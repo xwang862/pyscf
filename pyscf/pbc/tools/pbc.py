@@ -16,6 +16,7 @@
 import warnings
 import copy
 import numpy as np
+import itertools
 import scipy.linalg
 from pyscf import lib
 from pyscf.pbc.lib.kpts_helper import get_kconserv, get_kconserv3
@@ -550,3 +551,57 @@ def cutoff_to_gs(a, cutoff):
 def gs_to_cutoff(a, gs):
     '''Deprecated.  Replaced by function mesh_to_cutoff.'''
     return mesh_to_cutoff(a, [2*n+1 for n in gs])
+
+def select_kpts(kmesh_small, kmesh_large):
+    '''Returns a list of indices that maps a large k-mesh to a small k-mesh,
+    given that the two meshes are commensurate.
+
+    Args:
+        kmesh_small (list): small k-mesh
+        kmesh_large (list): large k-mesh
+
+    Example:
+        kmesh_small = [2,2,2]
+        kmesh_large = [4,4,4]
+        select_kpts(kmesh_small, kmesh_large): [0, 2, 8, 10, 32, 34, 40, 42]
+    '''
+    kmesh_small = np.array(kmesh_small)
+    kmesh_large = np.array(kmesh_large)
+    # Make sure small and large k-meshes are commensurate
+    if np.any(kmesh_large % kmesh_small):
+        raise ValueError('k-mesh {} and {} are not commensurate.'.format(kmesh_large, kmesh_small))
+
+    ratio = kmesh_large // kmesh_small
+
+    k_list = []
+    ranges = [range(kmesh_small[dim]) for dim in range(3)]
+    for idx, idy, idz in itertools.product(*ranges):
+        indices = np.array((idx, idy, idz)) * ratio
+        k_list.append(join_indices(indices, kmesh_large))
+    return k_list
+
+def join_indices(indices, struct):
+    '''Returns a joined index for an array of indices.
+
+    Args:
+        indices (np.array): an array of indices
+        struct (np.array): an array of index ranges
+
+    Example:
+        indices = np.array((3, 4, 5))
+        struct = np.array((10, 10, 10))
+        join_indices(indices, struct): 345
+    '''
+    if not isinstance(indices, np.ndarray) or not isinstance(struct, np.ndarray):
+        raise TypeError("Arguments %s and %s should both be numpy.ndarray" %
+                        (repr(indices), repr(struct)))
+    if indices.size != struct.size:
+        raise ValueError("Structure shape mismatch: expected dimension = %d, found %d" %
+                         (struct.size, indices.size))
+    if (indices >= struct).all():
+        raise ValueError("Indices are out of range")
+
+    result = 0
+    for dim in range(struct.size):
+        result += indices[dim] * np.prod(struct[dim+1:])
+    return result
