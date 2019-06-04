@@ -461,7 +461,7 @@ def kconserve_pmatrix(nkpts, kconserv):
 class RCCSD(pyscf.cc.ccsd.CCSD):
     max_space = getattr(__config__, 'pbc_cc_kccsd_rhf_KRCCSD_max_space', 20)
 
-    def __init__(self, mf, frozen=0, mo_coeff=None, mo_occ=None):
+    def __init__(self, mf, frozen=0, mo_coeff=None, mo_occ=None, remove_madelung=True):
         assert (isinstance(mf, scf.khf.KSCF))
         pyscf.cc.ccsd.CCSD.__init__(self, mf, frozen, mo_coeff, mo_occ)
         self.kpts = mf.kpts
@@ -472,10 +472,11 @@ class RCCSD(pyscf.cc.ccsd.CCSD):
         self.ip_partition = None
         self.ea_partition = None
         self.direct = True  # If possible, use GDF to compute Wvvvv on-the-fly
+        self.remove_madelung = remove_madelung
 
         keys = set(['kpts', 'khelper', 'made_ee_imds',
                     'made_ip_imds', 'made_ea_imds', 'ip_partition',
-                    'ea_partition', 'max_space', 'direct'])
+                    'ea_partition', 'max_space', 'direct', 'remove_madelung'])
         self._keys = self._keys.union(keys)
 
     @property
@@ -707,38 +708,35 @@ class _ERIS:  # (pyscf.cc.ccsd._ChemistsERIs):
             mo_coeff = cc.mo_coeff
         dtype = mo_coeff[0].dtype
 
-        self.fock = np.array([np.diag(cc._scf.mo_energy[k]) for k in range(nkpts)], dtype=dtype)
-        self.mo_energy = [self.fock[k].diagonal().real for k in range(nkpts)]
-
         mo_coeff = self.mo_coeff = padded_mo_coeff(cc, mo_coeff)
 
-        # # Re-make our fock MO matrix elements from density and fock AO
-        # dm = cc._scf.make_rdm1(cc.mo_coeff, cc.mo_occ)
-        # with lib.temporary_env(cc._scf, exxdiv=None):
-        #     # _scf.exxdiv affects eris.fock. HF exchange correction should be
-        #     # excluded from the Fock matrix.
-        #     fockao = cc._scf.get_hcore() + cc._scf.get_veff(cell, dm)
-        # self.fock = np.asarray([reduce(np.dot, (mo.T.conj(), fockao[k], mo))
-        #                         for k, mo in enumerate(mo_coeff)])
-        #
-        # self.mo_energy = [self.fock[k].diagonal().real for k in range(nkpts)]
-        # # Add HFX correction in the self.mo_energy to improve convergence in
-        # # CCSD iteration. It is useful for the 2D systems since their occupied and
-        # # the virtual orbital energies may overlap which may lead to numerical
-        # # issue in the CCSD iterations.
-        # # FIXME: Whether to add this correction for other exxdiv treatments?
-        # # Without the correction, MP2 energy may be largely off the correct value.
-        # madelung = tools.madelung(cell, kpts)
-        # self.mo_energy = [_adjust_occ(mo_e, nocc, -madelung)
-        #                   for k, mo_e in enumerate(self.mo_energy)]
-        #
-        # print("ref fock shape:", self.fock.shape, "test fock shape:", test_fock.shape)
-        # print("ref fock dtype:", self.fock.dtype, "test fock dtype:", test_fock.dtype)
-        # print("ref fock :", repr(self.fock))
-        # print("test fock:", repr(test_fock))
-        # print("ref mo_energy :", repr(self.mo_energy))
-        # print("test mo_energy:", repr(test_mo_energy))
+        if not cc.remove_madelung:
+            logger.warn(cc, 'Fill Fock diagonal with mo energies.'
+                            'Keep Madelung constant.')
+            self.fock = np.array([np.diag(cc._scf.mo_energy[k]) for k in range(nkpts)], dtype=dtype)
+            self.mo_energy = [self.fock[k].diagonal().real for k in range(nkpts)]
+        else:
+            logger.warn(cc, 'Rebuild Fock MO from density and Fock AO.'
+                            'Remove Madelung constant.')
+            # Re-make our fock MO matrix elements from density and fock AO
+            dm = cc._scf.make_rdm1(cc.mo_coeff, cc.mo_occ)
+            with lib.temporary_env(cc._scf, exxdiv=None):
+                # _scf.exxdiv affects eris.fock. HF exchange correction should be
+                # excluded from the Fock matrix.
+                fockao = cc._scf.get_hcore() + cc._scf.get_veff(cell, dm)
+            self.fock = np.asarray([reduce(np.dot, (mo.T.conj(), fockao[k], mo))
+                                    for k, mo in enumerate(mo_coeff)])
 
+            self.mo_energy = [self.fock[k].diagonal().real for k in range(nkpts)]
+            # Add HFX correction in the self.mo_energy to improve convergence in
+            # CCSD iteration. It is useful for the 2D systems since their occupied and
+            # the virtual orbital energies may overlap which may lead to numerical
+            # issue in the CCSD iterations.
+            # FIXME: Whether to add this correction for other exxdiv treatments?
+            # Without the correction, MP2 energy may be largely off the correct value.
+            madelung = tools.madelung(cell, kpts)
+            self.mo_energy = [_adjust_occ(mo_e, nocc, -madelung)
+                              for k, mo_e in enumerate(self.mo_energy)]
 
         # Get location of padded elements in occupied and virtual space.
         nocc_per_kpt = get_nocc(cc, per_kpoint=True)
