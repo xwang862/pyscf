@@ -40,6 +40,13 @@ htmlcov/
 nosetests.xml
 coverage.xml
 
+# pytest logs
+.pytest_cache/
+
+# Unwanted checkpoint files and outputs
+*.chk
+tests.out
+
 # Translations
 *.mo
 
