@@ -60,13 +60,13 @@ def loop_kkk(nkpts):
     range_nkpts = range(nkpts)
     return itertools.product(range_nkpts, range_nkpts, range_nkpts)
 
-def get_kconserv(cell, kpts):
+def get_kconserv(cell, kpts, kvshift=[0., 0., 0.]):
     r'''Get the momentum conservation array for a set of k-points.
 
     Given k-point indices (k, l, m) the array kconserv[k,l,m] returns
     the index n that satifies momentum conservation,
 
-        (k(k) - k(l) + k(m) - k(n)) \dot a = 2n\pi
+        (k(k) - k(l) + k(m) - k(n) - kvshift) \dot a = 2n\pi
 
     This is used for symmetry e.g. integrals of the form
         [\phi*[k](1) \phi[l](1) | \phi*[m](2) \phi[n](2)]
@@ -77,6 +77,8 @@ def get_kconserv(cell, kpts):
 
     kconserv = np.zeros((nkpts,nkpts,nkpts), dtype=int)
     kvKLM = kpts[:,None,None,:] - kpts[:,None,:] + kpts
+    # Apply kshift vector
+    kvKLM = kvKLM - kvshift    
     for N, kvN in enumerate(kpts):
         kvKLMN = np.einsum('wx,klmx->wklm', a, kvKLM - kvN)
         # check whether (1/(2pi) k_{KLMN} dot a) is an integer
@@ -85,7 +87,7 @@ def get_kconserv(cell, kpts):
         kconserv[mask] = N
     return kconserv
 
-
+    # TODO Remove this trunk because it is unreachable
     if kconserv is None:
         kconserv = get_kconserv(cell, kpts)
 
@@ -103,6 +105,33 @@ def get_kconserv(cell, kpts):
 
         offset += size
     return arr_offset, arr_size, (arr_size[-1] + arr_offset[-1])
+
+def get_kconserv1(cell, kpts, kvshift=[0., 0., 0.]):
+    r'''Get the momentum conservation array for a set of k-points.
+
+    Given k-point indices k the array kconserv[k] returns
+    the index n that satifies momentum conservation,
+
+        (k(k) - k(n) - kvshift) \dot a = 2n\pi
+
+    This is used for symmetry e.g. 1p-1h excitation operator vector
+    R_{m k_m}^{n k_n} is zero unless n satisfies the above.
+
+    '''
+    nkpts = kpts.shape[0]
+    a = cell.lattice_vectors() / (2*np.pi)
+
+    kconserv1 = np.zeros((nkpts), dtype=int)
+    kvK = kpts
+    # Apply kshift vector
+    kvK = kvK - kvshift
+    for N, kvN in enumerate(kpts):
+        kvKN = np.einsum('wx,kx->wk', a, kvK - kvN)
+        # check whether (1/(2pi) k_{KN} dot a) is an integer
+        kvKN_int = np.rint(kvKN)
+        mask = np.einsum('wk->k', abs(kvKN - kvKN_int)) < 1e-9
+        kconserv1[mask] = N
+    return kconserv1
 
 
 def check_kpt_antiperm_symmetry(array, idx1, idx2, tolerance=1e-8):
@@ -203,6 +232,22 @@ def get_kconserv3(cell, kpts, kijkab):
                  if not isinstance(x, (int,np.int))]
     kconserv = kconserv.reshape(new_shape)
     return kconserv
+
+
+def find_scaled_kpt(cell, target_kpt_scaled, kpts_abs):
+    kpts_scaled = cell.get_scaled_kpts(kpts_abs)
+    n = 0
+    for k, kpt in enumerate(kpts_scaled):
+        kpt_diff = kpt - target_kpt_scaled
+        kpt_int = np.rint(kpt_diff)
+        if (abs(kpt_diff - kpt_int) < 1e-9).all():
+            idx = k
+            n += 1
+    # Throw if there are either 0 or more than 1 points found      
+    if n != 1:
+        raise ValueError("{} points are found!!!\nScaled kpts:{}".format(n, kpts_scaled))
+
+    return idx
 
 
 class VectorComposer(object):

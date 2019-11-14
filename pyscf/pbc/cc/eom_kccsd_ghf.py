@@ -1824,8 +1824,14 @@ class EOMEE(eom_rccsd.EOM):
 
         Note that this method is adapted from `kpts_helper.get_kconserv()`.
         '''
-        kconserv_r1 = self.kconserv[:,kshift,0].copy()
-        return kconserv_r1
+        cell = self._cc._scf.cell
+        kpts = self.kpts
+
+        # Shift kpts to a Gamma-point centered grid
+        # Only has effect if scaled_center != [0,0,0]
+        kpts_gamma_centered = kpts - kpts[0]
+
+        return kpts_helper.get_kconserv1(cell, kpts, kpts_gamma_centered[kshift])
 
     # TODO merge it with `kpts_helper.get_kconserv()`
     def get_kconserv_ee_r2(self, kshift=0):
@@ -1843,20 +1849,12 @@ class EOMEE(eom_rccsd.EOM):
         '''
         cell = self._cc._scf.cell
         kpts = self.kpts
-        nkpts = kpts.shape[0]
-        a = cell.lattice_vectors() / (2 * np.pi)
 
-        kconserv_r2 = np.zeros((nkpts, nkpts, nkpts), dtype=int)
-        kvKLM = kpts[:, None, None, :] - kpts[:, None, :] + kpts
-        # Apply k shift
-        kvKLM = kvKLM - kpts[kshift]
-        for N, kvN in enumerate(kpts):
-            kvKLMN = np.einsum('wx,klmx->wklm', a, kvKLM - kvN)
-            # check whether (1/(2pi) k_{KLMN} dot a) is an integer
-            kvKLMN_int = np.rint(kvKLMN)
-            mask = np.einsum('wklm->klm', abs(kvKLMN - kvKLMN_int)) < 1e-9
-            kconserv_r2[mask] = N
-        return kconserv_r2
+        # Shift kpts to a Gamma-point centered grid
+        # Only has effect if scaled_center != [0,0,0]
+        kpts_gamma_centered = kpts - kpts[0]
+
+        return kpts_helper.get_kconserv(cell, kpts, kpts_gamma_centered[kshift])
 
     def make_imds(self, eris=None):
         imds = _IMDS(self._cc, eris=eris)

@@ -450,9 +450,15 @@ class KCIS(lib.StreamObject):
         Returns:
             list -- a list of k(n) corresponding to k(m) that ranges from 0 to max_k_index
         """
-        kconserv = self.khelper.kconserv
-        kconserv_r = kconserv[:, kshift, 0].copy()
-        return kconserv_r
+        cell = self._scf.cell
+        kpts = self.kpts
+
+        # Shift kpts to a Gamma-point centered grid
+        # Only has effect if scaled_center != [0,0,0]
+        kpts_gamma_centered = kpts - kpts[0]
+
+        return kpts_helper.get_kconserv1(cell, kpts, kpts_gamma_centered[kshift])
+
 
 
 # TODO Merge this with kccsd_rhf._ERIS, which contains more ints (e.g. oooo,
