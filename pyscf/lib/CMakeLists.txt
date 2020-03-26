@@ -83,7 +83,7 @@ if(BUILD_LIBCINT)
 if(NOT EXISTS "${PROJECT_SOURCE_DIR}/deps/include/cint.h")
   ExternalProject_Add(libcint
     GIT_REPOSITORY https://github.com/sunqm/libcint.git
-    GIT_TAG v3.0.18
+    GIT_TAG v3.0.19
     PREFIX ${PROJECT_BINARY_DIR}/deps
     INSTALL_DIR ${PROJECT_SOURCE_DIR}/deps
     CMAKE_ARGS -DWITH_F12=${WITH_F12} -DWITH_RANGE_COULOMB=1 -DWITH_COULOMB_ERF=1
@@ -147,9 +147,9 @@ if(APPLE)
   ExternalProject_Add(libxc
     #GIT_REPOSITORY https://gitlab.com/libxc/libxc/
     #GIT_TAG master
-    #URL http://www.tddft.org/programs/octopus/down.php?file=libxc/4.3.4/libxc-4.3.4.tar.gz
+    URL http://www.tddft.org/programs/libxc/down.php?file=4.3.4/libxc-4.3.4.tar.gz
     #URL https://gitlab.com/libxc/libxc/-/archive/4.3.4/libxc-4.3.4.tar.gz
-    URL http://www.sunqm.net/pyscf/files/src/libxc-4.3.4.tar.gz
+    #URL http://www.sunqm.net/pyscf/files/src/libxc-4.3.4.tar.gz
     PREFIX ${PROJECT_BINARY_DIR}/deps
     INSTALL_DIR ${PROJECT_SOURCE_DIR}/deps
     BUILD_IN_SOURCE 1
@@ -209,17 +209,24 @@ endif() # DISABLE_DFT
 option(ENABLE_TBLIS "Using tblis tensor contraction library" OFF)
 
 if(ENABLE_TBLIS)
-if(NOT EXISTS "${PROJECT_SOURCE_DIR}/libtblis.so")
-  ExternalProject_Add(tblis
-    GIT_REPOSITORY https://github.com/sunqm/tblis
-    GIT_TAG python
+if(NOT EXISTS "${PROJECT_SOURCE_DIR}/deps/include/tblis/tblis.h")
+  ExternalProject_Add(libtblis
+    GIT_REPOSITORY https://github.com/devinamatthews/tblis.git
+    GIT_TAG master
     PREFIX ${PROJECT_BINARY_DIR}/deps
-    INSTALL_DIR ${PROJECT_SOURCE_DIR}
+    INSTALL_DIR ${PROJECT_SOURCE_DIR}/deps
     #INSTALL_COMMAND "make install && cp <SOURCE_DIR>/src/python/tblis_einsum.py ${PROJECT_SOURCE_DIR}"
-    CONFIGURE_COMMAND <SOURCE_DIR>/configure --prefix=<INSTALL_DIR> --libdir=<INSTALL_DIR>
-          --enable-einsum CC=${CMAKE_C_COMPILER} CXX=${CMAKE_CXX_COMPILER}
+    CONFIGURE_COMMAND <SOURCE_DIR>/configure --prefix=<INSTALL_DIR> --libdir=<INSTALL_DIR>/lib
+          CC=${CMAKE_C_COMPILER} CXX=${CMAKE_CXX_COMPILER}
   )
 endif()
+
+add_library(tblis_einsum SHARED np_helper/as_einsum.cxx)
+set_target_properties(tblis_einsum PROPERTIES
+  LIBRARY_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}
+  COMPILE_FLAGS "-std=c++11")
+target_link_libraries(tblis_einsum tblis)
+add_dependencies(tblis_einsum libtblis)
 endif() # ENABLE_TBLIS
 
 

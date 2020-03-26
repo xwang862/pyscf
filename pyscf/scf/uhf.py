@@ -60,6 +60,8 @@ def init_guess_by_atom(mol, breaksym=BREAKSYM):
             dma[p0:p1,p0:p1] = dmb[p0:p1,p0:p1]
     return numpy.array((dma,dmb))
 
+def init_guess_by_huckel(mol, breaksym=BREAKSYM):
+    return UHF(mol).init_guess_by_huckel(mol)
 
 def init_guess_by_chkfile(mol, chkfile_name, project=None):
     '''Read SCF chkfile and make the density matrix for UHF initial guess.
@@ -136,7 +138,7 @@ def make_rdm1(mo_coeff, mo_occ, **kwargs):
 # passed to functions like get_jk, get_vxc.  These functions may take the tags
 # (mo_coeff, mo_occ) to compute the potential if tags were found in the DM
 # arrays and modifications to DM arrays may be ignored.
-    return numpy.array((dm_a,dm_b))
+    return numpy.array((dm_a, dm_b))
 
 def get_veff(mol, dm, dm_last=0, vhf_last=0, hermi=1, vhfopt=None):
     r'''Unrestricted Hartree-Fock potential matrix of alpha and beta spins,
@@ -726,6 +728,15 @@ class UHF(hf.SCF):
             breaksym = False
         return init_guess_by_atom(mol, breaksym)
 
+    def init_guess_by_huckel(self, mol=None, breaksym=BREAKSYM):
+        if mol is None: mol = self.mol
+        logger.info(self, 'Initial guess from on-the-fly Huckel, doi:10.1021/acs.jctc.8b01089.')
+        mo_energy, mo_coeff = hf._init_guess_huckel_orbitals(mol)
+        mo_energy = (mo_energy, mo_energy)
+        mo_coeff = (mo_coeff, mo_coeff)
+        mo_occ = self.get_occ(mo_energy, mo_coeff)
+        return self.make_rdm1(mo_coeff, mo_occ)
+
     def init_guess_by_1e(self, mol=None, breaksym=BREAKSYM):
         if mol is None: mol = self.mol
         logger.info(self, 'Initial guess from hcore.')
@@ -878,7 +889,7 @@ class HF1e(UHF):
         s1e = self.get_ovlp(self.mol)
         self.mo_energy, self.mo_coeff = self.eig([h1e]*2, s1e)
         self.mo_occ = self.get_occ(self.mo_energy, self.mo_coeff)
-        self.e_tot = self.mo_energy[0][self.mo_occ[0]>0][0] + self.mol.energy_nuc()
+        self.e_tot = self.mo_energy[self.mo_occ>0][0] + self.mol.energy_nuc()
         self._finalize()
         return self.e_tot
 

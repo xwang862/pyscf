@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-# Copyright 2014-2018 The PySCF Developers. All Rights Reserved.
+# Copyright 2014-2020 The PySCF Developers. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -60,6 +60,10 @@ class KnownValues(unittest.TestCase):
         dm = scf.dhf.get_init_guess(mol, key='minao')
         self.assertAlmostEqual(abs(dm).sum(), 14.859714177083553, 9)
 
+    def test_init_guess_huckel(self):
+        dm = scf.dhf.DHF(mol).get_init_guess(mol, key='huckel')
+        self.assertAlmostEqual(lib.fp(dm), (-0.47093452171132982-0.031705662333958599j), 9)
+
     def test_get_hcore(self):
         h = mf.get_hcore()
         self.assertAlmostEqual(numpy.linalg.norm(h), 129.81389477933607, 7)
@@ -109,7 +113,7 @@ class KnownValues(unittest.TestCase):
         dm = numpy.random.random((n4c,n4c))+numpy.random.random((n4c,n4c))*1j
         dm = dm + dm.T.conj()
         v = mf.get_veff(mol, dm)
-        self.assertAlmostEqual(lib.finger(v), (-21.613084684028077-28.50754366262467j), 8)
+        self.assertAlmostEqual(lib.fp(v), (-21.613084684028077-28.50754366262467j), 8)
 
         mf1 = copy.copy(mf)
         mf1.direct_scf = False

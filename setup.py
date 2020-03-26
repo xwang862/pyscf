@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-# Copyright 2014-2018 The PySCF Developers. All Rights Reserved.
+# Copyright 2014-2020 The PySCF Developers. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -63,7 +63,7 @@ MAINTAINER_EMAIL = 'osirpt.sun@gmail.com'
 DESCRIPTION      = 'PySCF: Python-based Simulations of Chemistry Framework'
 #LONG_DESCRIPTION = ''
 URL              = 'http://www.pyscf.org'
-DOWNLOAD_URL     = 'http://github.com/sunqm/pyscf'
+DOWNLOAD_URL     = 'http://github.com/pyscf/pyscf'
 LICENSE          = 'Apache License 2.0'
 AUTHOR           = 'Qiming Sun'
 AUTHOR_EMAIL     = 'osirpt.sun@gmail.com'
@@ -280,7 +280,7 @@ def make_ext(pkg_name, relpath, srcs, libraries=[], library_dirs=default_lib_dir
             soname = pkg_name.split('.')[-1]
             extra_link_flags = extra_link_flags + ['-install_name', '@loader_path/'+soname+so_ext]
             runtime_library_dirs = []
-        if sys.platform.startswith('aix') or sys.platform.startswith('os400'):
+        elif sys.platform.startswith('aix') or sys.platform.startswith('os400'):
             extra_compile_flags = extra_compile_flags + ['-fopenmp']
             extra_link_flags = extra_link_flags + ['-lblas', '-lgomp', '-Wl,-brtl']
             runtime_library_dirs = ['$ORIGIN', '.']

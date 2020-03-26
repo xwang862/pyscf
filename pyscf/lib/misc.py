@@ -419,6 +419,7 @@ class omnimethod(object):
         return functools.partial(self.func, instance)
 
 
+SANITY_CHECK = getattr(__config__, 'SANITY_CHECK', True)
 class StreamObject(object):
     '''For most methods, there are three stream functions to pipe computing stream:
 
@@ -481,12 +482,15 @@ class StreamObject(object):
         self.kernel(*args)
         return self
 
-    def set(self, **kwargs):
+    def set(self, *args, **kwargs):
         '''
         Update the attributes of the current object.  The return value of
         method set is the object itself.  This allows a series of
         functions/methods to be executed in pipe.
         '''
+        if args:
+            warnings.warn('method set() only supports keyword arguments.\n'
+                          'Arguments %s are ignored.' % args)
         #if getattr(self, '_keys', None):
         #    for k,v in kwargs.items():
         #        setattr(self, k, v)
@@ -521,7 +525,8 @@ class StreamObject(object):
         return value of method set is the object itself.  This allows a series
         of functions/methods to be executed in pipe.
         '''
-        if (self.verbose > 0 and  # logger.QUIET
+        if (SANITY_CHECK and
+            self.verbose > 0 and  # logger.QUIET
             getattr(self, '_keys', None)):
             check_sanity(self, self._keys, self.stdout)
         return self
@@ -906,24 +911,25 @@ class H5TmpFile(h5py.File):
     >>> from pyscf import lib
     >>> ftmp = lib.H5TmpFile()
     '''
-    def __init__(self, filename=None, *args, **kwargs):
+    def __init__(self, filename=None, mode='a', *args, **kwargs):
         if filename is None:
             tmpfile = tempfile.NamedTemporaryFile(dir=param.TMPDIR)
             filename = tmpfile.name
-        h5py.File.__init__(self, filename, *args, **kwargs)
+        h5py.File.__init__(self, filename, mode, *args, **kwargs)
 #FIXME: Does GC flush/close the HDF5 file when releasing the resource?
 # To make HDF5 file reusable, file has to be closed or flushed
     def __del__(self):
         try:
             self.close()
-        except ValueError:  # if close() is called twice
+        except:
+        #except ValueError:  # if close() is called twice
             pass
 
 def fingerprint(a):
     '''Fingerprint of numpy array'''
     a = numpy.asarray(a)
     return numpy.dot(numpy.cos(numpy.arange(a.size)), a.ravel())
-finger = fingerprint
+finger = fp = fingerprint
 
 
 def ndpointer(*args, **kwargs):

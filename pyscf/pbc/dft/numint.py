@@ -157,6 +157,7 @@ def eval_rho(cell, ao, dm, non0tab=None, xctype='LDA', hermi=0, verbose=None):
             dm = (dm + dm.conj().T) * .5
 
         def dot_bra(bra, aodm):
+            # rho = numpy.einsum('pi,pi->p', bra.conj(), aodm).real
             #:rho  = numpy.einsum('pi,pi->p', bra.real, aodm.real)
             #:rho += numpy.einsum('pi,pi->p', bra.imag, aodm.imag)
             #:return rho
@@ -387,7 +388,7 @@ def nr_rks(ni, cell, grids, xc_code, dms, spin=0, relativity=0, hermi=0,
         nelec = nelec[0]
         excsum = excsum[0]
         vmat = vmat[0]
-    return nelec, excsum, vmat
+    return nelec, excsum, numpy.asarray(vmat)
 
 def nr_uks(ni, cell, grids, xc_code, dms, spin=1, relativity=0, hermi=0,
            kpts=None, kpts_band=None, max_memory=2000, verbose=None):
@@ -523,7 +524,7 @@ def nr_uks(ni, cell, grids, xc_code, dms, spin=1, relativity=0, hermi=0,
         excsum = excsum[0]
         vmata = vmata[0]
         vmatb = vmatb[0]
-    return nelec, excsum, lib.asarray((vmata,vmatb))
+    return nelec, excsum, numpy.asarray((vmata,vmatb))
 
 def _format_uks_dm(dms):
     dma, dmb = dms
@@ -646,7 +647,7 @@ def nr_rks_fxc(ni, cell, grids, xc_code, dm0, dms, relativity=0, hermi=0,
     if isinstance(dms, numpy.ndarray) and dms.ndim == vmat[0].ndim:
         # One set of DMs in the input
         vmat = vmat[0]
-    return lib.asarray(vmat)
+    return numpy.asarray(vmat)
 
 def nr_rks_fxc_st(ni, cell, grids, xc_code, dm0, dms_alpha, relativity=0, singlet=True,
                   rho0=None, vxc=None, fxc=None, kpts=None, max_memory=2000,
@@ -742,7 +743,7 @@ def nr_rks_fxc_st(ni, cell, grids, xc_code, dm0, dms_alpha, relativity=0, single
 
     if isinstance(dms_alpha, numpy.ndarray) and dms_alpha.ndim == vmat[0].ndim:
         vmat = vmat[0]
-    return lib.asarray(vmat)
+    return numpy.asarray(vmat)
 
 
 def nr_uks_fxc(ni, cell, grids, xc_code, dm0, dms, relativity=0, hermi=0,
@@ -868,7 +869,7 @@ def nr_uks_fxc(ni, cell, grids, xc_code, dm0, dms, relativity=0, hermi=0,
     if dma.ndim == vmata[0].ndim:  # One set of DMs in the input
         vmata = vmata[0]
         vmatb = vmatb[0]
-    return lib.asarray((vmata,vmatb))
+    return numpy.asarray((vmata,vmatb))
 
 def _fxc_mat(cell, ao, wv, non0tab, xctype, ao_loc):
     shls_slice = (0, cell.nbas)
@@ -1010,13 +1011,15 @@ class NumInt(numint.NumInt):
     def _fxc_mat(self, cell, ao, wv, non0tab, xctype, ao_loc):
         return _fxc_mat(cell, ao, wv, non0tab, xctype, ao_loc)
 
-    def block_loop(self, cell, grids, nao, deriv=0, kpt=numpy.zeros(3),
+    def block_loop(self, cell, grids, nao=None, deriv=0, kpt=numpy.zeros(3),
                    kpts_band=None, max_memory=2000, non0tab=None, blksize=None):
         '''Define this macro to loop over grids by blocks.
         '''
 # For UniformGrids, grids.coords does not indicate whehter grids are initialized
         if grids.non0tab is None:
             grids.build(with_non0tab=True)
+        if nao is None:
+            nao = mol.nao
         grids_coords = grids.coords
         grids_weights = grids.weights
         ngrids = grids_coords.shape[0]
@@ -1174,12 +1177,14 @@ class KNumInt(numint.NumInt):
             mat[k] = _fxc_mat(cell, ao_kpts[k], wv, non0tab, xctype, ao_loc)
         return mat
 
-    def block_loop(self, cell, grids, nao, deriv=0, kpts=numpy.zeros((1,3)),
+    def block_loop(self, cell, grids, nao=None, deriv=0, kpts=numpy.zeros((1,3)),
                    kpts_band=None, max_memory=2000, non0tab=None, blksize=None):
         '''Define this macro to loop over grids by blocks.
         '''
         if grids.coords is None:
             grids.build(with_non0tab=True)
+        if nao is None:
+            nao = cell.nao
         grids_coords = grids.coords
         grids_weights = grids.weights
         ngrids = grids_coords.shape[0]

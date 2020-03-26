@@ -544,6 +544,18 @@ def davidson1(aop, x0, precond, tol=1e-12, max_cycle=50, max_space=12,
             callback(locals())
 
     x0 = [x for x in x0]  # nparray -> list
+
+    # Check whether the solver finds enough eigenvectors.
+    h_dim = x0[0].size
+    if len(x0) < min(h_dim, nroots):
+        # Two possible reasons:
+        # 1. All the initial guess are the eigenvectors. No more trial vectors
+        # can be generated.
+        # 2. The initial guess sits in the subspace which is smaller than the
+        # required number of roots.
+        msg = 'Not enough eigenvectors (len(x0)=%d, nroots=%d)' % (len(x0), nroots)
+        warnings.warn(msg)
+
     return numpy.asarray(conv), e, x0
 
 
@@ -1007,9 +1019,9 @@ def dgeev(abop, x0, precond, type=1, tol=1e-12, max_cycle=50, max_space=12,
     e, x = dgeev1(map_abop, x0, precond, type, tol, max_cycle, max_space, lindep,
                   max_memory, dot, callback, nroots, lessio, verbose)[1:]
     if nroots == 1:
-        return e[0], x0[0]
+        return e[0], x[0]
     else:
-        return e, x0
+        return e, x
 
 def dgeev1(abop, x0, precond, type=1, tol=1e-12, max_cycle=50, max_space=12,
           lindep=DAVIDSON_LINDEP, max_memory=MAX_MEMORY,
@@ -1238,6 +1250,9 @@ def dgeev1(abop, x0, precond, type=1, tol=1e-12, max_cycle=50, max_space=12,
     return conv, e, x0
 
 
+# TODO: new solver with Arnoldi iteration
+# The current implementation fails in polarizability. see
+# https://github.com/pyscf/pyscf/issues/507
 def krylov(aop, b, x0=None, tol=1e-10, max_cycle=30, dot=numpy.dot,
            lindep=DSOLVE_LINDEP, callback=None, hermi=False,
            max_memory=MAX_MEMORY, verbose=logger.WARN):

@@ -669,8 +669,12 @@ def state_average(casscf, weights=(0.5,0.5)):
             return numpy.einsum('i,i->', e, self.weights), c
 
         def approx_kernel(self, h1, h2, norb, nelec, ci0=None, **kwargs):
-            e, c = fcibase_class.kernel(self, h1, h2, norb, nelec, ci0,
-                                        nroots=self.nroots, **kwargs)
+            try:
+                e, c = fcibase_class.approx_kernel(self, h1, h2, norb, nelec, ci0,
+                                                   nroots=self.nroots, **kwargs)
+            except AttributeError:
+                e, c = fcibase_class.kernel(self, h1, h2, norb, nelec, ci0,
+                                            nroots=self.nroots, **kwargs)
             return numpy.einsum('i,i->', e, self.weights), c
 
         def make_rdm1(self, ci0, norb, nelec, *args, **kwargs):
@@ -757,19 +761,26 @@ def _state_average_mcscf_solver(casscf, fcisolver):
         def e_average(self):
             return numpy.dot(self.fcisolver.weights, self.fcisolver.e_states)
 
+        @property
+        def e_states(self):
+            return self.fcisolver.e_states
+
         def _finalize(self):
             mcscfbase_class._finalize(self)
-            self.e_tot = self.fcisolver.e_states
+            # Do not overwrite self.e_tot because .e_tot needs to be used in
+            # geometry optimization. self.e_states can be used to access the
+            # energy of each state
+            #self.e_tot = self.fcisolver.e_states
             logger.note(self, 'CASCI state-averaged energy = %.15g', self.e_average)
             logger.note(self, 'CASCI energy for each state')
             if has_spin_square:
                 ss = self.fcisolver.states_spin_square(self.ci, self.ncas,
                                                        self.nelecas)[0]
-                for i, ei in enumerate(self.e_tot):
+                for i, ei in enumerate(self.e_states):
                     logger.note(self, '  State %d weight %g  E = %.15g S^2 = %.7f',
                                 i, self.weights[i], ei, ss[i])
             else:
-                for i, ei in enumerate(self.e_tot):
+                for i, ei in enumerate(self.e_states):
                     logger.note(self, '  State %d weight %g  E = %.15g',
                                 i, self.weights[i], ei)
             return self
@@ -826,8 +837,12 @@ def state_specific_(casscf, state=1):
         def approx_kernel(self, h1, h2, norb, nelec, ci0=None, **kwargs):
             if self._civec is not None:
                 ci0 = self._civec
-            e, c = fcibase_class.kernel(self, h1, h2, norb, nelec, ci0,
-                                        nroots=self.nroots, **kwargs)
+            try:
+                e, c = fcibase_class.approx_kernel(self, h1, h2, norb, nelec, ci0,
+                                            nroots=self.nroots, **kwargs)
+            except AttributeError:
+                e, c = fcibase_class.kernel(self, h1, h2, norb, nelec, ci0,
+                                            nroots=self.nroots, **kwargs)
             if state == 0:
                 self._civec = [c]
                 return e, c
@@ -924,8 +939,12 @@ def state_average_mix(casscf, fcisolvers, weights=(0.5,0.5)):
             es = []
             cs = []
             for solver, c0 in loop_solver(fcisolvers, ci0):
-                e, c = solver.kernel(h1, h2, norb, get_nelec(solver, nelec), c0,
-                                     orbsym=self.orbsym, **kwargs)
+                try:
+                    e, c = solver.approx_kernel(h1, h2, norb, get_nelec(solver, nelec), c0,
+                                                orbsym=self.orbsym, **kwargs)
+                except AttributeError:
+                    e, c = solver.kernel(h1, h2, norb, get_nelec(solver, nelec), c0,
+                                         orbsym=self.orbsym, **kwargs)
                 if solver.nroots == 1:
                     es.append(e)
                     cs.append(c)

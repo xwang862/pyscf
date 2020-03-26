@@ -318,7 +318,7 @@ def cis_diag(cis, kshift, eris=None):
 
 
 class KCIS(lib.StreamObject):
-    def __init__(self, mf, frozen=0, mo_coeff=None, mo_occ=None):
+    def __init__(self, mf, frozen=None, mo_coeff=None, mo_occ=None):
         assert isinstance(mf, scf.khf.KSCF)
 
         if mo_coeff is None:
@@ -351,21 +351,18 @@ class KCIS(lib.StreamObject):
         self.voov = None
         self.ovov = None
 
-    def dump_flags(self):
-        logger.info(self, "")
-        logger.info(self, "******** %s ********", self.__class__)
-        logger.info(self, "nkpts = %d", self.nkpts)
-        logger.info(self, "CIS nocc = %d, nmo = %d", self.nocc, self.nmo)
-        if self.frozen is not 0:
-            logger.info(self, "frozen orbitals = %s", self.frozen)
-        logger.info(
-            self,
-            "max_memory %d MB (current use %d MB)",
-            self.max_memory,
-            lib.current_memory()[0],
-        )
+    def dump_flags(self, verbose=None):
+        log = logger.new_logger(self, verbose)
+        log.info("")
+        log.info("******** %s ********", self.__class__)
+        log.info("nkpts = %d", self.nkpts)
+        log.info("CIS nocc = %d, nmo = %d", self.nocc, self.nmo)
+        if self.frozen is not None:
+            log.info("frozen orbitals = %s", self.frozen)
+        log.info("max_memory %d MB (current use %d MB)",
+                 self.max_memory, lib.current_memory()[0])
         if self.direct:
-            logger.info(self, "cis.direct = True; voov and ovov will not be computed")
+            log.info("cis.direct = True; voov and ovov will not be computed")
         return self
 
     @property
@@ -430,7 +427,7 @@ class KCIS(lib.StreamObject):
         return guess
 
     def get_kconserv_r(self, kshift):
-        """Get the momentum conservation array for a set of k-points.
+        r"""Get the momentum conservation array for a set of k-points.
 
         Given k-point index m the array kconserv_r1[m] returns the index n that
         satisfies momentum conservation,

@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-# Copyright 2014-2018 The PySCF Developers. All Rights Reserved.
+# Copyright 2014-2020 The PySCF Developers. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -27,6 +27,7 @@ import re
 import numpy
 import scipy.linalg
 from pyscf.lib import misc
+from numpy import asarray  # For backward compatibility
 
 EINSUM_MAX_SIZE = getattr(misc.__config__, 'lib_einsum_max_size', 2000)
 
@@ -100,18 +101,19 @@ else:
         einsum_args.insert(0, ((a, b), idx_removed, einsum_str, indices_in))
         return operands, einsum_args
 
+_numpy_einsum = numpy.einsum
 def _contract(subscripts, *tensors, **kwargs):
     idx_str = subscripts.replace(' ','')
     indices  = idx_str.replace(',', '').replace('->', '')
     if '->' not in idx_str or any(indices.count(x)>2 for x in set(indices)):
-        return numpy.einsum(idx_str, *tensors)
+        return _numpy_einsum(idx_str, *tensors)
 
     A, B = tensors
     # Call numpy.asarray because A or B may be HDF5 Datasets 
     A = numpy.asarray(A, order='A')
     B = numpy.asarray(B, order='A')
     if A.size < EINSUM_MAX_SIZE or B.size < EINSUM_MAX_SIZE:
-        return numpy.einsum(idx_str, *tensors)
+        return _numpy_einsum(idx_str, *tensors)
 
     C_dtype = numpy.result_type(A, B)
     if FOUND_TBLIS and C_dtype == numpy.double:
@@ -142,12 +144,12 @@ def _contract(subscripts, *tensors, **kwargs):
 
     # duplicated indices 'in,ijj->n'
     if len(rangeA) != A.ndim or len(rangeB) != B.ndim:
-        return numpy.einsum(idx_str, A, B)
+        return _numpy_einsum(idx_str, A, B)
 
     # Find the shared indices being summed over
     shared_idxAB = set(idxA).intersection(idxB)
     if len(shared_idxAB) == 0: # Indices must overlap
-        return numpy.einsum(idx_str, A, B)
+        return _numpy_einsum(idx_str, A, B)
 
     idxAt = list(idxA)
     idxBt = list(idxB)
@@ -229,7 +231,7 @@ def einsum(subscripts, *tensors, **kwargs):
 
     subscripts = subscripts.replace(' ','')
     if len(tensors) <= 1 or '...' in subscripts:
-        out = numpy.einsum(subscripts, *tensors, **kwargs)
+        out = _numpy_einsum(subscripts, *tensors, **kwargs)
     elif len(tensors) <= 2:
         out = _contract(subscripts, *tensors, **kwargs)
     else:
@@ -246,7 +248,7 @@ def einsum(subscripts, *tensors, **kwargs):
             inds, idx_rm, einsum_str, remaining = contraction[:4]
             tmp_operands = [tensors.pop(x) for x in inds]
             if len(tmp_operands) > 2:
-                out = numpy.einsum(einsum_str, *tmp_operands)
+                out = _numpy_einsum(einsum_str, *tmp_operands)
             else:
                 out = contract(einsum_str, *tmp_operands)
             tensors.append(out)
@@ -842,16 +844,6 @@ def _zgemm(trans_a, trans_b, m, n, k, a, b, c, alpha=1, beta=0,
                        (ctypes.c_double*2)(beta.real, beta.imag))
     return c
 
-def asarray(a, dtype=None, order=None):
-    '''Convert a list of N-dim arrays to a (N+1) dim array.  It is equivalent to
-    numpy.asarray function.
-    '''
-    try:  # numpy.stack function is not available in numpy-1.8
-        a = numpy.stack(a)
-    except:
-        pass
-    return numpy.asarray(a, dtype, order)
-
 def frompointer(pointer, count, dtype=float):
     '''Interpret a buffer that the pointer refers to as a 1-dimensional array.
 
@@ -888,7 +880,7 @@ if LooseVersion(numpy.__version__) <= LooseVersion('1.6.0'):
             axes = string.ascii_lowercase[:x.ndim]
             target = axes.replace(axes[axis], '')
             descr = '%s,%s->%s' % (axes, axes, target)
-            xx = numpy.einsum(descr, x.conj(), x)
+            xx = _numpy_einsum(descr, x.conj(), x)
             return numpy.sqrt(xx.real)
 else:
     norm = numpy.linalg.norm
@@ -951,8 +943,8 @@ def direct_sum(subscripts, *operands):
 
     Examples:
 
-    >>> a = numpy.random((6,5))
-    >>> b = numpy.random((4,3,2))
+    >>> a = numpy.random.random((6,5))
+    >>> b = numpy.random.random((4,3,2))
     >>> direct_sum('ij,klm->ijklm', a, b).shape
     (6, 5, 4, 3, 2)
     >>> direct_sum('ij,klm', a, b).shape
@@ -999,10 +991,10 @@ def direct_sum(subscripts, *operands):
         unisymb = set(symb)
         if len(unisymb) != len(symb):
             unisymb = ''.join(unisymb)
-            op = numpy.einsum('->'.join((symb, unisymb)), op)
+            op = _numpy_einsum('->'.join((symb, unisymb)), op)
             src[i] = unisymb
         if i == 0:
-            if sign[i] is '+':
+            if sign[i] == '+':
                 out = op
             else:
                 out = -op
@@ -1011,7 +1003,7 @@ def direct_sum(subscripts, *operands):
         else:
             out = out.reshape(out.shape+(1,)*op.ndim) - op
 
-    out = numpy.einsum('->'.join((''.join(src), dest)), out)
+    out = _numpy_einsum('->'.join((''.join(src), dest)), out)
     out.flags.writeable = True  # old numpy has this issue
     return out
 
@@ -1101,6 +1093,44 @@ def tag_array(a, **kwargs):
         t.__dict__.update(a.__dict__)
     t.__dict__.update(kwargs)
     return t
+
+#TODO: merge with function pbc.cc.kccsd_rhf.vector_to_nested
+def split_reshape(a, shapes):
+    '''
+    Split a vector into multiple tensors. shapes is a list of tuples.
+    The entries of shapes indicate the shape of each tensor.
+
+    Returns:
+        tensors : a list of tensors 
+
+    Examples:
+
+    >>> a = numpy.arange(12)
+    >>> split_reshape(a, ((2,3), (1,), ((2,2), (1,1))))
+    [array([[0, 1, 2],
+            [3, 4, 5]]),
+     array([6]),
+     [array([[ 7,  8],
+             [ 9, 10]]),
+      array([[11]])]]
+    '''
+    if isinstance(shapes[0], (int, numpy.integer)):
+        return a.reshape(shapes)
+
+    def sub_split(a, shapes):
+        tensors = []
+        p1 = 0
+        for shape in shapes:
+            if isinstance(shape[0], (int, numpy.integer)):
+                p0, p1 = p1, p1 + numpy.prod(shape)
+                tensors.append(a[p0:p1].reshape(shape))
+            else:
+                subtensors, size = sub_split(a[p1:], shape)
+                p1 += size
+                tensors.append(subtensors)
+        size = p1
+        return tensors, size
+    return sub_split(a, shapes)[0]
 
 if __name__ == '__main__':
     a = numpy.random.random((30,40,5,10))

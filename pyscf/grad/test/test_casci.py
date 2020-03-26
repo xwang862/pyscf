@@ -214,7 +214,9 @@ def kernel(mc, mo_coeff=None, ci=None, atmlst=None, mf_grad=None,
 def _response_dm1(mycc, Xvo, eris=None):
     nvir, nocc = Xvo.shape
     nmo = nocc + nvir
-    with_frozen = not (mycc.frozen is None or mycc.frozen is 0)
+    with_frozen = not ((mycc.frozen is None)
+                       or (isinstance(mycc.frozen, (int, numpy.integer)) and mycc.frozen == 0)
+                       or (len(mycc.frozen) == 0))
     if eris is None or with_frozen:
         mo_energy = mycc._scf.mo_energy
         mo_occ = mycc.mo_occ
@@ -410,7 +412,7 @@ class KnownValues(unittest.TestCase):
             mcs = mcscf.CASCI(mf, 4, 4).as_scanner().x2c()
             gscan = mcs.nuc_grad_method().as_scanner()
             g1 = gscan(mol)[1]
-            self.assertAlmostEqual(lib.finger(g1), -0.070708933966346407, 7)
+            self.assertAlmostEqual(lib.finger(g1), -0.0707065428512548, 7)
 
             e1 = mcs('N 0 0 0; N 0 0 1.201; H 1 1 0; H 1 1 1.2')
             e2 = mcs('N 0 0 0; N 0 0 1.199; H 1 1 0; H 1 1 1.2')

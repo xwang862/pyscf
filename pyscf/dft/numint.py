@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-# Copyright 2014-2018 The PySCF Developers. All Rights Reserved.
+# Copyright 2014-2020 The PySCF Developers. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -380,28 +380,41 @@ def _vv10nlc(rho,coords,vvrho,vvweight,vvcoords,nlc_pars):
     K=Kvv*(R**(1./6.))
     dKdR=(1./6.)*K
 
-    for i in range(R.size):
-        DX=vvcoords[:,0]-coords[i,0]
-        DY=vvcoords[:,1]-coords[i,1]
-        DZ=vvcoords[:,2]-coords[i,2]
-        R2=DX*DX+DY*DY+DZ*DZ
-        gp=R2*W0p+Kp
-        g=R2*W0[i]+K[i]
-        gt=g+gp
-        T=RpW/(g*gp*gt)
-        F=numpy.sum(T)
-        T*=(1./g+1./gt)
-        U=numpy.sum(T)
-        W=numpy.sum(T*R2)
-        F*=-1.5
-        #excthresh is multiplied by Rho later
-        excthresh[i]=Beta+0.5*F
-        vxcthresh[0,i]=Beta+F+1.5*(U*dKdR[i]+W*dW0dR[i])
-        vxcthresh[1,i]=1.5*W*dW0dG[i]
-    exc[threshind]=excthresh
-    vxc[0,threshind]=vxcthresh[0,:]
-    vxc[1,threshind]=vxcthresh[1,:]
-
+    vvcoords = numpy.asarray(vvcoords, order='C')
+    coords = numpy.asarray(coords, order='C')
+    F = numpy.empty_like(R)
+    U = numpy.empty_like(R)
+    W = numpy.empty_like(R)
+    #for i in range(R.size):
+    #    DX=vvcoords[:,0]-coords[i,0]
+    #    DY=vvcoords[:,1]-coords[i,1]
+    #    DZ=vvcoords[:,2]-coords[i,2]
+    #    R2=DX*DX+DY*DY+DZ*DZ
+    #    gp=R2*W0p+Kp
+    #    g=R2*W0[i]+K[i]
+    #    gt=g+gp
+    #    T=RpW/(g*gp*gt)
+    #    F=numpy.sum(T)
+    #    T*=(1./g+1./gt)
+    #    U=numpy.sum(T)
+    #    W=numpy.sum(T*R2)
+    #    F*=-1.5
+    libdft.VXC_vv10nlc(F.ctypes.data_as(ctypes.c_void_p),
+                       U.ctypes.data_as(ctypes.c_void_p),
+                       W.ctypes.data_as(ctypes.c_void_p),
+                       vvcoords.ctypes.data_as(ctypes.c_void_p),
+                       coords.ctypes.data_as(ctypes.c_void_p),
+                       W0p.ctypes.data_as(ctypes.c_void_p),
+                       W0.ctypes.data_as(ctypes.c_void_p),
+                       K.ctypes.data_as(ctypes.c_void_p),
+                       Kp.ctypes.data_as(ctypes.c_void_p),
+                       RpW.ctypes.data_as(ctypes.c_void_p),
+                       ctypes.c_int(vvcoords.shape[0]),
+                       ctypes.c_int(coords.shape[0]))
+    #exc is multiplied by Rho later
+    exc[threshind] = Beta+0.5*F
+    vxc[0,threshind] = Beta+F+1.5*(U*dKdR+W*dW0dR)
+    vxc[1,threshind] = 1.5*W*dW0dG
     return exc,vxc
 
 def eval_mat(mol, ao, weight, rho, vxc,
@@ -719,7 +732,7 @@ def nr_rks(ni, mol, grids, xc_code, dms, relativity=0, hermi=0,
         xc_code : str
             XC functional description.
             See :func:`parse_xc` of pyscf/dft/libxc.py for more details.
-        dms : 2D array a list of 2D arrays
+        dms : 2D array or a list of 2D arrays
             Density matrix or multiple density matrices
 
     Kwargs:
@@ -754,7 +767,10 @@ def nr_rks(ni, mol, grids, xc_code, dms, relativity=0, hermi=0,
 
     nelec = numpy.zeros(nset)
     excsum = numpy.zeros(nset)
-    vmat = numpy.zeros((nset,nao,nao))
+    if isinstance(dms, numpy.ndarray):
+        vmat = numpy.zeros((nset,nao,nao), dtype=dms.dtype)
+    else:
+        vmat = numpy.zeros((nset,nao,nao), dtype=numpy.result_type(*dms))
     aow = None
     if xctype == 'LDA':
         ao_deriv = 0
@@ -868,11 +884,11 @@ def nr_rks(ni, mol, grids, xc_code, dms, relativity=0, hermi=0,
                 rho = exc = vxc = vrho = vsigma = wv = None
 
     for i in range(nset):
-        vmat[i] = vmat[i] + vmat[i].T
+        vmat[i] = vmat[i] + vmat[i].conj().T
     if nset == 1:
         nelec = nelec[0]
         excsum = excsum[0]
-        vmat = vmat.reshape(nao,nao)
+        vmat = vmat[0]
     return nelec, excsum, vmat
 
 def nr_uks(ni, mol, grids, xc_code, dms, relativity=0, hermi=0,
@@ -932,7 +948,7 @@ def nr_uks(ni, mol, grids, xc_code, dms, relativity=0, hermi=0,
 
     nelec = numpy.zeros((2,nset))
     excsum = numpy.zeros(nset)
-    vmat = numpy.zeros((2,nset,nao,nao))
+    vmat = numpy.zeros((2,nset,nao,nao), dtype=numpy.result_type(dma, dmb))
     aow = None
     if xctype == 'LDA':
         ao_deriv = 0
@@ -1028,8 +1044,8 @@ def nr_uks(ni, mol, grids, xc_code, dms, relativity=0, hermi=0,
                 rho_a = rho_b = exc = vxc = vrho = vsigma = wva = wvb = None
 
     for i in range(nset):
-        vmat[0,i] = vmat[0,i] + vmat[0,i].T
-        vmat[1,i] = vmat[1,i] + vmat[1,i].T
+        vmat[0,i] = vmat[0,i] + vmat[0,i].conj().T
+        vmat[1,i] = vmat[1,i] + vmat[1,i].conj().T
     if isinstance(dma, numpy.ndarray) and dma.ndim == 2:
         vmat = vmat[:,0]
         nelec = nelec.reshape(2)
@@ -1106,7 +1122,10 @@ def nr_rks_fxc(ni, mol, grids, xc_code, dm0, dms, relativity=0, hermi=0,
     shls_slice = (0, mol.nbas)
     ao_loc = mol.ao_loc_nr()
 
-    vmat = numpy.zeros((nset,nao,nao))
+    if isinstance(dms, numpy.ndarray):
+        vmat = numpy.zeros((nset,nao,nao), dtype=dms.dtype)
+    else:
+        vmat = numpy.zeros((nset,nao,nao), dtype=numpy.result_type(*dms))
     aow = None
     if xctype == 'LDA':
         ao_deriv = 0
@@ -1189,7 +1208,10 @@ def nr_rks_fxc_st(ni, mol, grids, xc_code, dm0, dms_alpha, relativity=0, singlet
     shls_slice = (0, mol.nbas)
     ao_loc = mol.ao_loc_nr()
 
-    vmat = numpy.zeros((nset,nao,nao))
+    if isinstance(dms_alpha, numpy.ndarray):
+        vmat = numpy.zeros((nset,nao,nao), dtype=dms_alpha.dtype)
+    else:
+        vmat = numpy.zeros((nset,nao,nao), dtype=numpy.result_type(*dms_alpha))
     aow = None
     if xctype == 'LDA':
         ao_deriv = 0
@@ -1387,7 +1409,7 @@ def nr_uks_fxc(ni, mol, grids, xc_code, dm0, dms, relativity=0, hermi=0,
     shls_slice = (0, mol.nbas)
     ao_loc = mol.ao_loc_nr()
 
-    vmat = numpy.zeros((2,nset,nao,nao))
+    vmat = numpy.zeros((2,nset,nao,nao), dtype=numpy.result_type(dma, dmb))
     aow = None
     if xctype == 'LDA':
         ao_deriv = 0
@@ -1840,8 +1862,9 @@ def get_rho(ni, mol, dm, grids, max_memory=2000):
 
 
 class NumInt(object):
+    libxc = libxc
+
     def __init__(self):
-        self.libxc = libxc
         self.omega = None  # RSH paramter
 
     @lib.with_doc(nr_vxc.__doc__)
@@ -1890,12 +1913,14 @@ class NumInt(object):
     def eval_rho(self, mol, ao, dm, non0tab=None, xctype='LDA', hermi=0, verbose=None):
         return eval_rho(mol, ao, dm, non0tab, xctype, hermi, verbose)
 
-    def block_loop(self, mol, grids, nao, deriv=0, max_memory=2000,
+    def block_loop(self, mol, grids, nao=None, deriv=0, max_memory=2000,
                    non0tab=None, blksize=None, buf=None):
         '''Define this macro to loop over grids by blocks.
         '''
         if grids.coords is None:
             grids.build(with_non0tab=True)
+        if nao is None:
+            nao = mol.nao
         ngrids = grids.coords.shape[0]
         comp = (deriv+1)*(deriv+2)*(deriv+3)//6
 # NOTE to index grids.non0tab, the blksize needs to be the integer multiplier of BLKSIZE
