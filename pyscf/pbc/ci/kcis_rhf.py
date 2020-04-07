@@ -20,6 +20,7 @@
 import time
 from functools import reduce
 import numpy as np
+import scipy
 import h5py
 
 from pyscf import lib
@@ -125,6 +126,103 @@ def kernel(cis, nroots=1, eris=None, kptlist=None, **kargs):
 
     log.timer("CIS", *cpu0)
     return evals, evecs
+
+def cis_spectrum_singlet(cis, scan, eta, kshift=0, tol=1e-5, maxiter=500, eris=None, **kwargs):
+    """Compute CIS singlet optical spectrum.
+    
+    Arguments:
+        cis {[type]} -- A CIS class instance
+    """
+        
+    kpts = cis.kpts
+    nkpts = len(kpts)
+    nocc = cis.nocc
+    nmo = cis.nmo
+    nvir = nmo - nocc
+
+    # TODO enable kshift!=0 (current impl. assumes kshift=0)
+
+    #
+    # dipole(i,a) \approx -I p(i,a) / (\epsilon_a - \epsison_i)
+    # where I: imaginary unit, p: momentum operator, \epsilon: orbital energy.
+    #
+    # I.p matrix in AO basis
+    ip_ao = cis._scf.cell.pbc_intor('cint1e_ipovlp_cart', kpts=kpts, comp=3)
+    ip_ao = np.asarray(ip_ao).transpose(1,0,2,3)  # with shape (naxis, nkpts, nmo, nmo)
+
+    # I.p matrix in MO basis (only the occ-vir block) 
+    mo_coeff = cis._scf.mo_coeff
+    ip_mo = np.empty((3, nkpts, nocc, nvir), dtype=mo_coeff[0].dtype)
+    for k in range(nkpts):
+        mo_occ = mo_coeff[k][:, :nocc]
+        mo_vir = mo_coeff[k][:, nocc:]
+        for x in range(3):
+            ip_mo[x, k] = reduce(np.dot, (mo_occ.T.conj(), ip_ao[x, k], mo_vir))
+
+    # eia = \epsilon_a - \epsilon_i
+    mo_energy = cis._scf.mo_energy
+    mo_e_o = [mo_energy[k][:nocc] for k in range(nkpts)]
+    mo_e_v = [mo_energy[k][nocc:] for k in range(nkpts)]
+    nonzero_opadding, nonzero_vpadding = padding_k_idx(cis, kind="split")
+
+    eia = np.empty((nkpts, nocc, nvir), dtype=mo_energy[0].dtype)
+    for k in range(nkpts):
+        n0_ovp_ia = np.ix_(nonzero_opadding[k], nonzero_vpadding[k])
+        eia[k][n0_ovp_ia] = -1. * (mo_e_o[k][:,None] - mo_e_v[k])[n0_ovp_ia]
+
+    # dipole in MO basis = -I p(i,a) / (\epsilon_a - \epsison_i)
+    dipole = np.empty((3, nkpts, nocc, nvir), dtype=ip_mo.dtype)
+    for x in range(3):
+        dipole[x] = -1. * ip_mo[x] / eia
+
+    # solve linear equations
+    e0 = cis._scf.e_tot
+    ieta = 1j*eta
+    omega_list = scan
+    spectrum = np.zeros((3, len(omega_list)), dtype=np.complex)
+    b_vector = dipole.reshape(3, nkpts*nocc*nvir)
+    b_size = nkpts * nocc * nvir
+
+    if eris is None:
+        eris = cis.ao2mo()
+    diag = cis.get_diag(kshift, eris)
+
+    x0 = np.zeros((3, b_size), dtype=np.complex)
+
+    e0s = np.zeros(3,dtype=np.complex)
+    counter = gmres_counter()
+    for i, omega in enumerate(omega_list):
+        matvec = lambda vec: cis.matvec(vec, kshift, eris)*(-1.) + (omega + ieta) * vec
+        A = scipy.sparse.linalg.LinearOperator((b_size, b_size), matvec=matvec, dtype=np.complex)
+
+        for x in range(3):
+
+            sol, info = scipy.sparse.linalg.gmres(A, b_vector[x], x0=x0[x], tol=tol, maxiter=maxiter, callback=counter)
+            if info == 0:
+                print('Frequency', np.round(omega,3), 'converged in', counter.niter, 'iterations')
+            else:
+                print('Frequency', np.round(omega,3), 'not converged after', counter.niter, 'iterations')
+            counter.reset()
+            
+            x0[x] = sol
+            spectrum[x,i] = np.dot(b_vector[x].conj(), sol)
+
+    return -1./np.pi*spectrum.imag
+
+
+class gmres_counter(object):
+    def __init__(self, disp=False):
+        self._disp = disp
+        self.niter = 0
+    def __call__(self, rk=None):
+        self.niter += 1
+        if self._disp:
+            print('iter %3i\trk = %s' % (self.niter, str(rk)))
+    def reset(self):
+        self.niter = 0
+
+
+
 
 def cis_matvec_singlet(cis, vector, kshift, eris=None):
     """Compute matrix-vector product of the Hamiltonion matrix and a CIS c
@@ -381,6 +479,7 @@ class KCIS(lib.StreamObject):
     get_diag = cis_diag
     matvec = cis_matvec_singlet
     kernel = kernel
+    get_spectrum = cis_spectrum_singlet
 
     def vector_size(self):
         nocc = self.nocc
