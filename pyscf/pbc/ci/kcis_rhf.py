@@ -127,7 +127,7 @@ def kernel(cis, nroots=1, eris=None, kptlist=None, **kargs):
     log.timer("CIS", *cpu0)
     return evals, evecs
 
-def cis_spectrum_singlet(cis, scan, eta, kshift=0, tol=1e-5, maxiter=500, eris=None, **kwargs):
+def optical_absorption_singlet(cis, scan, eta, kshift=0, tol=1e-5, maxiter=500, eris=None, **kwargs):
     """Compute CIS singlet optical spectrum.
     
     Arguments:
@@ -492,7 +492,7 @@ class KCIS(lib.StreamObject):
     get_diag = cis_diag
     matvec = cis_matvec_singlet
     kernel = kernel
-    get_spectrum = cis_spectrum_singlet
+    get_absorption_spectrum = optical_absorption_singlet
 
     def vector_size(self):
         nocc = self.nocc
