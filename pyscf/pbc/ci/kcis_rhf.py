@@ -147,6 +147,9 @@ def cis_spectrum_singlet(cis, scan, eta, kshift=0, tol=1e-5, maxiter=500, eris=N
     # where I: imaginary unit, p: momentum operator, \epsilon: orbital energy.
     #
     # I.p matrix in AO basis
+
+    # TODO figure out why 'cint1e_ipovlp_cart' causes shape mismatch for `ip_ao` and `mo_coeff` when basis='gth-dzvp'. 
+    # Meanwhile, let's use 'cint1e_ipovlp_sph' or 'int1e_ipovlp' because they seems to be fine.
     ip_ao = cis._scf.cell.pbc_intor('cint1e_ipovlp_sph', kpts=kpts, comp=3)
     ip_ao = np.asarray(ip_ao).transpose(1,0,2,3)  # with shape (naxis, nkpts, nmo, nmo)
 
@@ -191,13 +194,22 @@ def cis_spectrum_singlet(cis, scan, eta, kshift=0, tol=1e-5, maxiter=500, eris=N
 
     e0s = np.zeros(3,dtype=np.complex)
     counter = gmres_counter()
+    LinearSolver = scipy.sparse.linalg.gmres
+
     for i, omega in enumerate(omega_list):
         matvec = lambda vec: cis.matvec(vec, kshift, eris)*(-1.) + (omega + ieta) * vec
         A = scipy.sparse.linalg.LinearOperator((b_size, b_size), matvec=matvec, dtype=np.complex)
 
+        # preconditioner
+        # P should be close to A, but easy to solve. We choose P = H diags shifted by omega + ieta. 
+        P = scipy.sparse.diags(diag * (-1.) + omega + ieta, format='csc', dtype=diag.dtype)
+        # M is the inverse of P.
+        M_x = lambda x: scipy.sparse.linalg.spsolve(P, x)
+        M = scipy.sparse.linalg.LinearOperator((b_size, b_size), M_x)        
+
         for x in range(3):
 
-            sol, info = scipy.sparse.linalg.gmres(A, b_vector[x], x0=x0[x], tol=tol, maxiter=maxiter, callback=counter)
+            sol, info = LinearSolver(A, b_vector[x], x0=x0[x], tol=tol, maxiter=maxiter, M=M, callback=counter)
             if info == 0:
                 print('Frequency', np.round(omega,3), 'converged in', counter.niter, 'iterations')
             else:
