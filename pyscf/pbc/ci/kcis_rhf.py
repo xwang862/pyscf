@@ -194,7 +194,8 @@ def cis_spectrum_singlet(cis, scan, eta, kshift=0, tol=1e-5, maxiter=500, eris=N
 
     e0s = np.zeros(3,dtype=np.complex)
     counter = gmres_counter()
-    LinearSolver = scipy.sparse.linalg.gmres
+    # LinearSolver = scipy.sparse.linalg.gmres
+    LinearSolver = scipy.sparse.linalg.gcrotmk
 
     for i, omega in enumerate(omega_list):
         matvec = lambda vec: cis.matvec(vec, kshift, eris)*(-1.) + (omega + ieta) * vec
