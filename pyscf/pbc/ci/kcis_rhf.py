@@ -147,7 +147,7 @@ def cis_spectrum_singlet(cis, scan, eta, kshift=0, tol=1e-5, maxiter=500, eris=N
     # where I: imaginary unit, p: momentum operator, \epsilon: orbital energy.
     #
     # I.p matrix in AO basis
-    ip_ao = cis._scf.cell.pbc_intor('cint1e_ipovlp_cart', kpts=kpts, comp=3)
+    ip_ao = cis._scf.cell.pbc_intor('cint1e_ipovlp_sph', kpts=kpts, comp=3)
     ip_ao = np.asarray(ip_ao).transpose(1,0,2,3)  # with shape (naxis, nkpts, nmo, nmo)
 
     # I.p matrix in MO basis (only the occ-vir block) 
@@ -175,7 +175,7 @@ def cis_spectrum_singlet(cis, scan, eta, kshift=0, tol=1e-5, maxiter=500, eris=N
     for x in range(3):
         dipole[x] = -1. * ip_mo[x] / eia
 
-    # solve linear equations
+    # solve linear equations A.x = b
     e0 = cis._scf.e_tot
     ieta = 1j*eta
     omega_list = scan
