@@ -250,17 +250,14 @@ def optical_absorption_singlet(cis, scan, eta, kshift=0, tol=1e-5, maxiter=500, 
 
     x0 = np.zeros((3, b_size), dtype=np.complex)
 
-    use_dask = True
-    if use_dask:
-        #
-        # experimenting dask parallalism
-        #
-        from dask.distributed import Client
-        # We adopt distributed parallelism (or multiprocessing)
-        # because matvec contains pure python codes that hold GIL.
-        # The downside is that we have to transfer large data
-        # like ERIS.
-        client = Client()
+    #
+    # experimenting dask parallalism
+    #
+    if kwargs.get("dask_client") is not None:
+
+        client = kwargs.get("dask_client")
+        print("\n******** dask client information  ********")
+        print(client.cluster)
 
         kconserv = cis.get_kconserv_r(kshift)
         direct = cis.direct
