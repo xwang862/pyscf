@@ -127,6 +127,62 @@ def kernel(cis, nroots=1, eris=None, kptlist=None, **kargs):
     log.timer("CIS", *cpu0)
     return evals, evecs
 
+
+def spectrum_kernel(omega, eta, ax, kshift, eris, diag, dipole, tol, maxiter, kconserv, direct):
+    """This is a temporary function that comptues absorption spectrum 
+    at a particular frequency and polarization direction (x, y, or z). 
+
+    Make sure kshift=0.
+
+    Arguments:
+        omega {float} -- the requested frequency
+        eta {float} -- spectrum broadening
+        ax {int} -- polarization axis. 0, 1, or 2 means x, y, or z axis
+        kshift {int} -- momentum transfer, has to be 0 for now.
+        eris {np.array} -- ERIS instance, 3-center Lpq if `direct` is true, 4-center voov/ovov otherwise
+        diag {np.array} -- diagonal elements of CIS Hamiltonian
+        dipole {np.array} -- dipole matrix, with shape (3, nkpts, nocc, nvir)
+        tol {float} -- convergence control of scipy iterative solver
+        maxiter {int} -- convergence control of scipy iterative solver
+        kconserv {np.array} -- momentum conservation at `kshift`
+        direct {bool} -- whether cis.direct is turned on
+
+    Returns:
+        [type] -- [description]
+    """
+    ieta = 1j*eta
+
+    nkpts, nocc, nvir = dipole[0].shape
+    b_size = nkpts * nocc * nvir
+    b_vector = dipole.reshape(3, b_size)
+
+    #
+    # Here we need to solve linear equations Ax=b (solving x for given A, b)
+    #
+    # In Scipy solvers (GMRES or GCROTMK), A can either be a matrix,
+    # or a linear operator which can produce Ax.
+    matvec = lambda vec: standalone_cis_matvec(vec, kshift, eris, nkpts, nocc, nvir, kconserv, direct)*(-1.) + (omega + ieta) * vec
+    A = scipy.sparse.linalg.LinearOperator((b_size, b_size), matvec=matvec, dtype=np.complex)
+    
+    # P is preconditioner
+    # P should be close to A, but easy to solve. We choose P = H diags shifted by omega + ieta. 
+    P = scipy.sparse.diags(diag * (-1.) + omega + ieta, format='csc', dtype=diag.dtype)
+
+    # M is the inverse of P.
+    # Instead of calculate M explicitly, we use the following template to produce M. The following is a linear operator that computes P^-1 * x
+    M_x = lambda x: scipy.sparse.linalg.spsolve(P, x)
+    M = scipy.sparse.linalg.LinearOperator((b_size, b_size), M_x)         
+    
+    # initial guess of x
+    x0 = np.zeros(b_size, dtype=np.complex)
+
+    # Now let's solve Ax=b
+    sol, info = scipy.sparse.linalg.gcrotmk(A, b_vector[ax], x0=x0, tol=tol, maxiter=maxiter, M=M)
+    result = np.dot(b_vector[ax].conj(), sol)
+
+    return result
+
+
 def optical_absorption_singlet(cis, scan, eta, kshift=0, tol=1e-5, maxiter=500, eris=None, **kwargs):
     """Compute CIS singlet optical spectrum.
     
@@ -194,33 +250,62 @@ def optical_absorption_singlet(cis, scan, eta, kshift=0, tol=1e-5, maxiter=500, 
 
     x0 = np.zeros((3, b_size), dtype=np.complex)
 
-    e0s = np.zeros(3,dtype=np.complex)
-    counter = gmres_counter()
-    # LinearSolver = scipy.sparse.linalg.gmres
-    LinearSolver = scipy.sparse.linalg.gcrotmk
+    use_dask = True
+    if use_dask:
+        #
+        # experimenting dask parallalism
+        #
+        from dask.distributed import Client
+        # We adopt distributed parallelism (or multiprocessing)
+        # because matvec contains pure python codes that hold GIL.
+        # The downside is that we have to transfer large data
+        # like ERIS.
+        client = Client()
 
-    for i, omega in enumerate(omega_list):
-        matvec = lambda vec: cis.matvec(vec, kshift, eris)*(-1.) + (omega + ieta) * vec
-        A = scipy.sparse.linalg.LinearOperator((b_size, b_size), matvec=matvec, dtype=np.complex)
+        kconserv = cis.get_kconserv_r(kshift)
+        direct = cis.direct
+        # Ship ERIS to workers before calculations start.
+        # This may help lower communication burden.
+        eris_fut = client.scatter(eris)
 
-        # preconditioner
-        # P should be close to A, but easy to solve. We choose P = H diags shifted by omega + ieta. 
-        P = scipy.sparse.diags(diag * (-1.) + omega + ieta, format='csc', dtype=diag.dtype)
-        # M is the inverse of P.
-        M_x = lambda x: scipy.sparse.linalg.spsolve(P, x)
-        M = scipy.sparse.linalg.LinearOperator((b_size, b_size), M_x)        
+        spectrum_full = []
+        for ax in range(3):
+            for omega in omega_list:
+                sp = client.submit(spectrum_kernel, omega, eta, ax, kshift, eris_fut, diag, dipole, tol, maxiter, kconserv, direct)
 
-        for x in range(3):
+                spectrum_full.append(sp)
 
-            sol, info = LinearSolver(A, b_vector[x], x0=x0[x], tol=tol, maxiter=maxiter, M=M, callback=counter)
-            if info == 0:
-                print('Frequency', np.round(omega,3), 'converged in', counter.niter, 'iterations')
-            else:
-                print('Frequency', np.round(omega,3), 'not converged after', counter.niter, 'iterations')
-            counter.reset()
-            
-            x0[x] = sol
-            spectrum[x,i] = np.dot(b_vector[x].conj(), sol)
+        spectrum_test = client.gather(spectrum_full)
+        spectrum = np.asarray(spectrum_test).reshape(3, len(omega_list))
+    
+    else:
+
+        counter = gmres_counter()
+        # LinearSolver = scipy.sparse.linalg.gmres
+        LinearSolver = scipy.sparse.linalg.gcrotmk
+
+        for i, omega in enumerate(omega_list):
+            matvec = lambda vec: cis.matvec(vec, kshift, eris)*(-1.) + (omega + ieta) * vec
+            A = scipy.sparse.linalg.LinearOperator((b_size, b_size), matvec=matvec, dtype=np.complex)
+
+            # preconditioner
+            # P should be close to A, but easy to solve. We choose P = H diags shifted by omega + ieta. 
+            P = scipy.sparse.diags(diag * (-1.) + omega + ieta, format='csc', dtype=diag.dtype)
+            # M is the inverse of P.
+            M_x = lambda x: scipy.sparse.linalg.spsolve(P, x)
+            M = scipy.sparse.linalg.LinearOperator((b_size, b_size), M_x)        
+
+            for x in range(3):
+
+                sol, info = LinearSolver(A, b_vector[x], x0=x0[x], tol=tol, maxiter=maxiter, M=M, callback=counter)
+                if info == 0:
+                    print('Frequency', np.round(omega,3), 'converged in', counter.niter, 'iterations')
+                else:
+                    print('Frequency', np.round(omega,3), 'not converged after', counter.niter, 'iterations')
+                counter.reset()
+                
+                x0[x] = sol
+                spectrum[x,i] = np.dot(b_vector[x].conj(), sol)
     
     log.timer('CIS Spectrum', *cpu0)
 
@@ -239,6 +324,49 @@ class gmres_counter(object):
         self.niter = 0
 
 
+def standalone_cis_matvec(vector, kshift, eris, nkpts, nocc, nvir, kconserv, direct):
+    """This is basically `cis_matvec_singlet` except that the first argument
+    `cis` is removed. The purpose is that now the function and arguments are
+    all serializable (while the cis instance is not).
+
+    TODO merge this function with `cis_matvec_singlet`
+    TODO add sanity checks on vector shape, etc.
+    """
+    kconserv_r = kconserv
+
+    r = vector[: nkpts*nocc*nvir].copy().reshape(nkpts, nocc, nvir)
+
+    # Should use Fock diagonal elements to build (e_a - e_i) matrix
+    epsilons = [eris.fock[k].diagonal().real for k in range(nkpts)]
+
+    Hr = np.zeros_like(r)
+    for ki in range(nkpts):
+        ka = kconserv_r[ki]
+        Hr[ki] += einsum('ia,a->ia', r[ki], epsilons[ka][nocc:])
+        Hr[ki] -= einsum('ia,i->ia', r[ki], epsilons[ki][:nocc])
+
+    if not direct:
+        for ki in range(nkpts):
+            ka = kconserv_r[ki]
+            # x: kj
+            Hr[ki] += 2.0 * einsum("xjb,xajib->ia", r, eris.voov[ka, :, ki])
+            Hr[ki] -= einsum("xjb,xjaib->ia", r, eris.ovov[:, ka, ki])
+    else:
+        for ki in range(nkpts):
+            ka = kconserv_r[ki]
+            for kj in range(nkpts):
+                kb = kconserv_r[kj]
+                # r_ia <- 2 r_jb (ai|jb) = 2 r_jb B^L_jb B^L_ai
+                L = 2.0 * einsum("jb,Ljb->L", r[kj], eris.Lpq_mo[kj,kb][:, :nocc, nocc:])
+                tmp = einsum("L,Lai->ia", L, eris.Lpq_mo[ka,ki][:, nocc:, :nocc])
+
+                # r_ia <- - r_jb (ab|ji) = -r_jb B^L_ab B^L_ji
+                Lja = -1.0 * einsum("jb,Lab->Lja", r[kj], eris.Lpq_mo[ka,kb][:, nocc:, nocc:])
+                tmp += einsum("Lja,Lji->ia", Lja, eris.Lpq_mo[kj,ki][:, :nocc, :nocc])
+                Hr[ki] += (1. / nkpts) * tmp
+
+    vector = Hr.ravel()
+    return vector
 
 
 def cis_matvec_singlet(cis, vector, kshift, eris=None):
