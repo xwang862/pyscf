@@ -133,7 +133,9 @@ def optical_absorption_singlet(cis, scan, eta, kshift=0, tol=1e-5, maxiter=500, 
     Arguments:
         cis {[type]} -- A CIS class instance
     """
-        
+    cpu0 = (time.clock(), time.time())
+    log = logger.Logger(cis.stdout, cis.verbose)
+
     kpts = cis.kpts
     nkpts = len(kpts)
     nocc = cis.nocc
@@ -219,6 +221,8 @@ def optical_absorption_singlet(cis, scan, eta, kshift=0, tol=1e-5, maxiter=500, 
             
             x0[x] = sol
             spectrum[x,i] = np.dot(b_vector[x].conj(), sol)
+    
+    log.timer('CIS Spectrum', *cpu0)
 
     return -1./np.pi*spectrum.imag
 
