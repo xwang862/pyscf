@@ -253,7 +253,7 @@ def optical_absorption_singlet(cis, scan, eta, kshift=0, tol=1e-5, maxiter=500, 
     #
     # experimenting dask parallalism
     #
-    if kwargs.get("dask_client") is not None:
+    if kwargs.get("dask_client") not in [None, False]:
 
         from dask.distributed import get_client, get_worker, secede, rejoin            
         
