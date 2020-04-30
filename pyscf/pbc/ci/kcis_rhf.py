@@ -255,7 +255,21 @@ def optical_absorption_singlet(cis, scan, eta, kshift=0, tol=1e-5, maxiter=500, 
     #
     if kwargs.get("dask_client") is not None:
 
-        client = kwargs.get("dask_client")
+        from dask.distributed import get_client, get_worker, secede, rejoin            
+        
+        # `get_client` will provide a normal Client object that gives
+        # full access to the dask cluster.
+        # However, this can deadlock the scheduler if too many tasks request jobs at once.
+        client = get_client()
+
+        # Determine if I am in a running worker
+        in_a_worker = False
+        try:
+            get_worker()
+            in_a_worker = True
+        except ValueError:
+            pass
+
         print("\n******** dask client information  ********")
         print(client.cluster)
 
@@ -269,10 +283,15 @@ def optical_absorption_singlet(cis, scan, eta, kshift=0, tol=1e-5, maxiter=500, 
         for ax in range(3):
             for omega in omega_list:
                 sp = client.submit(spectrum_kernel, omega, eta, ax, kshift, eris_fut, diag, dipole, tol, maxiter, kconserv, direct)
-
                 spectrum_full.append(sp)
 
+        # To avoid the deadlocking issue we can use `secede` and `rejoin` to remove and rejoin the current task from the cluster, respectively
+        if in_a_worker:        
+            secede()
         spectrum_test = client.gather(spectrum_full)
+        if in_a_worker:
+            rejoin()
+
         spectrum = np.asarray(spectrum_test).reshape(3, len(omega_list))
     
     else:
