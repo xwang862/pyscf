@@ -271,7 +271,7 @@ def optical_absorption_singlet(cis, scan, eta, kshift=0, tol=1e-5, maxiter=500, 
             pass
 
         print("\n******** dask client information  ********")
-        print(client.cluster)
+        print(client)
 
         kconserv = cis.get_kconserv_r(kshift)
         direct = cis.direct
