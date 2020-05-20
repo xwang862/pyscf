@@ -14,9 +14,11 @@
 # limitations under the License.
 
 import itertools
+from functools import reduce
 import time
 import sys
 import numpy as np
+import scipy
 
 from pyscf import lib
 from pyscf.lib import logger
@@ -846,6 +848,96 @@ def eomee_ccsd_singlet(eom, nroots=1, koopmans=False, guess=None, left=False,
     return eom.e, eom.v
 
 
+def optical_absorption_singlet_approx1(eom, scan, eta, kshift=0, tol=1e-5, maxiter=500, imds=None, **kwargs):
+    cpu0 = (time.clock(), time.time())
+    log = logger.Logger(eom.stdout, eom.verbose)
+
+    if imds is None: imds = eom.make_imds()
+
+    kpts = eom.kpts
+    nkpts = eom.nkpts
+    nocc = eom.nocc
+    nmo = eom.nmo
+    nvir = nmo - nocc
+
+    _scf = eom._cc._scf
+    # TODO enable kshift!=0 (current impl. assumes kshift=0)
+
+    #
+    # dipole(i,a) \approx -I p(i,a) / (\epsilon_a - \epsison_i)
+    # where I: imaginary unit, p: momentum operator, \epsilon: orbital energy.
+    #
+    # I.p matrix in AO basis
+    ip_ao = _scf.cell.pbc_intor('cint1e_ipovlp_sph', kpts=kpts, comp=3)
+    ip_ao = np.asarray(ip_ao).transpose(1,0,2,3)  # with shape (naxis, nkpts, nmo, nmo)
+
+    # I.p matrix in MO basis (only the occ-vir block) 
+    mo_coeff = _scf.mo_coeff
+    ip_mo = np.empty((3, nkpts, nocc, nvir), dtype=mo_coeff[0].dtype)
+    for k in range(nkpts):
+        mo_occ = mo_coeff[k][:, :nocc]
+        mo_vir = mo_coeff[k][:, nocc:]
+        for x in range(3):
+            ip_mo[x, k] = reduce(np.dot, (mo_occ.T.conj(), ip_ao[x, k], mo_vir))
+
+    # eia = \epsilon_a - \epsilon_i
+    mo_energy = _scf.mo_energy
+    mo_e_o = [mo_energy[k][:nocc] for k in range(nkpts)]
+    mo_e_v = [mo_energy[k][nocc:] for k in range(nkpts)]
+    nonzero_opadding, nonzero_vpadding = padding_k_idx(eom._cc, kind="split")
+
+    eia = np.empty((nkpts, nocc, nvir), dtype=mo_energy[0].dtype)
+    for k in range(nkpts):
+        n0_ovp_ia = np.ix_(nonzero_opadding[k], nonzero_vpadding[k])
+        eia[k][n0_ovp_ia] = -1. * (mo_e_o[k][:,None] - mo_e_v[k])[n0_ovp_ia]
+
+    # dipole in MO basis = -I p(i,a) / (\epsilon_a - \epsison_i)
+    dipole = np.empty((3, nkpts, nocc, nvir), dtype=ip_mo.dtype)
+    for x in range(3):
+        dipole[x] = -1. * ip_mo[x] / eia
+    
+    # solve linear equations A.x = b
+    ieta = 1j*eta
+    omega_list = scan
+    spectrum = np.zeros((3, len(omega_list)), dtype=np.complex)
+    b_size = nkpts * nocc * nvir
+    b_vector = dipole.reshape(3, b_size)
+
+    diag = eom.get_diag(kshift, imds)[:b_size]
+    x0 = np.zeros((3, b_size), dtype=np.complex)
+
+    from pyscf.pbc.ci import kcis_rhf
+    counter = kcis_rhf.gmres_counter()
+    LinearSolver = scipy.sparse.linalg.gcrotmk
+
+    for i, omega in enumerate(omega_list):
+        matvec = lambda vec: eeccsd_matvec_singlet_Hr1(eom, vec, kshift, imds=imds) + (omega + ieta) * vec
+        A = scipy.sparse.linalg.LinearOperator((b_size, b_size), matvec=matvec, dtype=np.complex)        
+
+        # preconditioner
+        # P should be close to A, but easy to solve. We choose P = H diags shifted by omega + ieta. 
+        P = scipy.sparse.diags(diag * (-1.) + omega + ieta, format='csc', dtype=diag.dtype)
+        # M is the inverse of P.
+        M_x = lambda x: scipy.sparse.linalg.spsolve(P, x)
+        M = scipy.sparse.linalg.LinearOperator((b_size, b_size), M_x)        
+
+        for x in range(3):
+
+            sol, info = LinearSolver(A, b_vector[x], x0=x0[x], tol=tol, maxiter=maxiter, M=M, callback=counter)
+            if info == 0:
+                print('Frequency', np.round(omega,3), 'converged in', counter.niter, 'iterations')
+            else:
+                print('Frequency', np.round(omega,3), 'not converged after', counter.niter, 'iterations')
+            counter.reset()
+            
+            x0[x] = sol
+            spectrum[x,i] = np.dot(b_vector[x].conj(), sol)
+
+    log.timer('EOM-CCSD Spectrum', *cpu0)
+
+    return -1./np.pi*spectrum.imag
+
+
 def vector_to_amplitudes_singlet(vector, nkpts, nmo, nocc, kconserv):
     '''Transform 1-dimensional array to 3- and 7-dimensional arrays, r1 and r2.
 
@@ -1431,6 +1523,7 @@ class EOMEESinglet(EOMEE):
     matvec = eeccsd_matvec_singlet
     get_init_guess = get_init_guess_cis
     cis = cis_easy
+    get_absorption_spectrum = optical_absorption_singlet_approx1
 
     def vector_size(self, kshift=0):
         '''Size of the linear excitation operator R vector based on spatial
