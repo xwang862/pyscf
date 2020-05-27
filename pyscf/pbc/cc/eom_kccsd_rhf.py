@@ -911,7 +911,7 @@ def optical_absorption_singlet_approx1(eom, scan, eta, kshift=0, tol=1e-5, maxit
     LinearSolver = scipy.sparse.linalg.gcrotmk
 
     for i, omega in enumerate(omega_list):
-        matvec = lambda vec: eeccsd_matvec_singlet_Hr1(eom, vec, kshift, imds=imds) + (omega + ieta) * vec
+        matvec = lambda vec: eeccsd_matvec_singlet_Hr1(eom, vec, kshift, imds=imds) * (-1.) + (omega + ieta) * vec
         A = scipy.sparse.linalg.LinearOperator((b_size, b_size), matvec=matvec, dtype=np.complex)        
 
         # preconditioner
