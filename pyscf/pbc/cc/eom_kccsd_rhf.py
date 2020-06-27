@@ -849,6 +849,21 @@ def eomee_ccsd_singlet(eom, nroots=1, koopmans=False, guess=None, left=False,
 
 
 def optical_absorption_singlet_approx1(eom, scan, eta, kshift=0, tol=1e-5, maxiter=500, imds=None, **kwargs):
+    """ Compute approximate spectra assuming:
+            lambda = 0, \bar{\mu} = \mu
+
+    Args:
+        eom ([type]): [description]
+        scan ([type]): [description]
+        eta ([type]): [description]
+        kshift (int, optional): [description]. Defaults to 0.
+        tol ([type], optional): [description]. Defaults to 1e-5.
+        maxiter (int, optional): [description]. Defaults to 500.
+        imds ([type], optional): [description]. Defaults to None.
+
+    Returns:
+        [type]: [description]
+    """
     cpu0 = (time.clock(), time.time())
     log = logger.Logger(eom.stdout, eom.verbose)
 
@@ -859,51 +874,31 @@ def optical_absorption_singlet_approx1(eom, scan, eta, kshift=0, tol=1e-5, maxit
     nocc = eom.nocc
     nmo = eom.nmo
     nvir = nmo - nocc
+    kconserv2 = eom.get_kconserv_ee_r2(kshift)
 
     _scf = eom._cc._scf
-    # TODO enable kshift!=0 (current impl. assumes kshift=0)
-
-    #
-    # dipole(i,a) \approx -I p(i,a) / (\epsilon_a - \epsison_i)
-    # where I: imaginary unit, p: momentum operator, \epsilon: orbital energy.
-    #
-    # I.p matrix in AO basis
-    ip_ao = _scf.cell.pbc_intor('cint1e_ipovlp_sph', kpts=kpts, comp=3)
-    ip_ao = np.asarray(ip_ao).transpose(1,0,2,3)  # with shape (naxis, nkpts, nmo, nmo)
-
-    # I.p matrix in MO basis (only the occ-vir block) 
-    mo_coeff = _scf.mo_coeff
-    ip_mo = np.empty((3, nkpts, nocc, nvir), dtype=mo_coeff[0].dtype)
-    for k in range(nkpts):
-        mo_occ = mo_coeff[k][:, :nocc]
-        mo_vir = mo_coeff[k][:, nocc:]
-        for x in range(3):
-            ip_mo[x, k] = reduce(np.dot, (mo_occ.T.conj(), ip_ao[x, k], mo_vir))
-
-    # eia = \epsilon_a - \epsilon_i
-    mo_energy = _scf.mo_energy
-    mo_e_o = [mo_energy[k][:nocc] for k in range(nkpts)]
-    mo_e_v = [mo_energy[k][nocc:] for k in range(nkpts)]
-    nonzero_opadding, nonzero_vpadding = padding_k_idx(eom._cc, kind="split")
-
-    eia = np.empty((nkpts, nocc, nvir), dtype=mo_energy[0].dtype)
-    for k in range(nkpts):
-        n0_ovp_ia = np.ix_(nonzero_opadding[k], nonzero_vpadding[k])
-        eia[k][n0_ovp_ia] = -1. * (mo_e_o[k][:,None] - mo_e_v[k])[n0_ovp_ia]
-
-    # dipole in MO basis = -I p(i,a) / (\epsilon_a - \epsison_i)
-    dipole = np.empty((3, nkpts, nocc, nvir), dtype=ip_mo.dtype)
-    for x in range(3):
-        dipole[x] = -1. * ip_mo[x] / eia
+    dipole = get_dipole_mo(_scf, "occ", "vir")
     
     # solve linear equations A.x = b
     ieta = 1j*eta
     omega_list = scan
     spectrum = np.zeros((3, len(omega_list)), dtype=np.complex)
-    b_size = nkpts * nocc * nvir
-    b_vector = dipole.reshape(3, b_size)
+    
+    # initialize b vector as zeros
+    t1, t2 = eom._cc.t1, eom._cc.t2
+    b_vector = [amplitudes_to_vector_singlet(np.zeros_like(t1), np.zeros_like(t2), kconserv2) for x in range(3)]
+    # fill singles block of b vector
+    nkov = nkpts * nocc * nvir
+    for x in range(3):
+        b_vector[x][:nkov] = dipole[x].reshape(nkov)
+    b_vector = np.asarray(b_vector)
+    b_size = b_vector.shape[1]
+    # get the \phi_0 component of b vector
+    b0 = einsum('xkpp->x', get_dipole_mo(_scf, "all", "all"))
+    if any(abs(b0) > 1e-6):
+        logger.warn(eom, 'Large b0 detected! b0 (x,y,z) = {}). Consider adding b0.conj() * x0 contribution to spectra'.format(b0))
 
-    diag = eom.get_diag(kshift, imds)[:b_size]
+    diag = eom.get_diag(kshift, imds)
     x0 = np.zeros((3, b_size), dtype=np.complex)
 
     from pyscf.pbc.ci import kcis_rhf
@@ -911,7 +906,95 @@ def optical_absorption_singlet_approx1(eom, scan, eta, kshift=0, tol=1e-5, maxit
     LinearSolver = scipy.sparse.linalg.gcrotmk
 
     for i, omega in enumerate(omega_list):
-        matvec = lambda vec: eeccsd_matvec_singlet_Hr1(eom, vec, kshift, imds=imds) * (-1.) + (omega + ieta) * vec
+        matvec = lambda vec: eeccsd_matvec_singlet(eom, vec, kshift, imds=imds) * (-1.) + (omega + ieta) * vec
+        A = scipy.sparse.linalg.LinearOperator((b_size, b_size), matvec=matvec, dtype=np.complex)        
+
+        # preconditioner
+        # P should be close to A, but easy to solve. We choose P = H diags shifted by omega + ieta. 
+        P = scipy.sparse.diags(diag * (-1.) + omega + ieta, format='csc', dtype=diag.dtype)
+        # M is the inverse of P.
+        M_x = lambda x: scipy.sparse.linalg.spsolve(P, x)
+        M = scipy.sparse.linalg.LinearOperator((b_size, b_size), M_x)        
+
+        for x in range(3):
+
+            sol, info = LinearSolver(A, b_vector[x], x0=x0[x], tol=tol, maxiter=maxiter, M=M, callback=counter)
+            if info == 0:
+                print('Frequency', np.round(omega,3), 'converged in', counter.niter, 'iterations')
+            else:
+                print('Frequency', np.round(omega,3), 'not converged after', counter.niter, 'iterations')
+            counter.reset()
+            
+            x0[x] = sol
+            spectrum[x,i] = np.dot(b_vector[x].conj(), sol) 
+            
+            # Uncomment next 3 lines if b0 is non-negligible
+            # sol0 = b0[x] + np.dot(sol, amplitudes_to_vector_singlet(imds.Fov, imds.woOvV, kconserv2))
+            # sol0 /= omega + ieta            
+            # spectrum[x, i] += b0[x].conj()*sol0
+
+    log.timer('EOM-CCSD Spectrum Approx1', *cpu0)
+
+    return -1./np.pi*spectrum.imag
+
+
+def optical_absorption_singlet_approx2(eom, scan, eta, kshift=0, tol=1e-5, maxiter=500, imds=None, **kwargs):
+    """Compute approximate spectra assuming:
+            lambda = 0
+
+    Args:
+        eom ([type]): [description]
+        scan ([type]): [description]
+        eta ([type]): [description]
+        kshift (int, optional): [description]. Defaults to 0.
+        tol ([type], optional): [description]. Defaults to 1e-5.
+        maxiter (int, optional): [description]. Defaults to 500.
+        imds ([type], optional): [description]. Defaults to None.
+    """
+    cpu0 = (time.clock(), time.time())
+    log = logger.Logger(eom.stdout, eom.verbose)
+
+    if imds is None: imds = eom.make_imds()
+
+    kpts = eom.kpts
+    nkpts = eom.nkpts
+    nocc = eom.nocc
+    nmo = eom.nmo
+    nvir = nmo - nocc
+    kconserv2 = eom.get_kconserv_ee_r2(kshift)
+
+    # dipole in MO basis    
+    # _scf = eom._cc._scf
+    # dipole_ov = get_dipole_mo(_scf, "occ", "vir")
+    # dipole = np.zeros((3, nkpts, nmo, nmo), dtype=dipole_ov.dtype)
+    # dipole[:,:,:nocc,nocc:] = dipole_ov
+    # dipole[:,:,nocc:,:nocc] = dipole_ov.transpose(0,1,3,2).conj()
+
+    dipole = get_dipole_mo(eom._cc._scf, "all", "all")
+
+    # b = <\Phi_{\alpha} | \bar{\dipole} | \Phi_0>
+    # b is needed to solve a.x=b linear equations
+    b0, b_vector = get_effective_dipole_left(eom, dipole, kshift)
+    b_size = b_vector.shape[1]
+    # check the \phi_0 component of b vector
+    print(f"b0 = {b0}")
+    if any(abs(b0) > 1e-6):
+        logger.warn(eom, 'Large b0 detected! b0 (x,y,z) = {}). Consider adding b0.conj() * x0 contribution to spectra'.format(b0))
+
+    # solve linear equations A.x = b
+    ieta = 1j*eta
+    omega_list = scan
+    spectrum = np.zeros((3, len(omega_list)), dtype=np.complex)
+
+    diag = eom.get_diag(kshift, imds)
+    x0 = np.zeros((3, b_size), dtype=b_vector.dtype)
+
+    from pyscf.pbc.ci import kcis_rhf
+    counter = kcis_rhf.gmres_counter()
+    LinearSolver = scipy.sparse.linalg.gcrotmk
+
+    for i, omega in enumerate(omega_list):
+        matvec = lambda vec: eeccsd_matvec_singlet(eom, vec, kshift, imds=imds) * (-1.) + (omega + ieta) * vec
         A = scipy.sparse.linalg.LinearOperator((b_size, b_size), matvec=matvec, dtype=np.complex)        
 
         # preconditioner
@@ -933,9 +1016,180 @@ def optical_absorption_singlet_approx1(eom, scan, eta, kshift=0, tol=1e-5, maxit
             x0[x] = sol
             spectrum[x,i] = np.dot(b_vector[x].conj(), sol)
 
-    log.timer('EOM-CCSD Spectrum', *cpu0)
+            sol0 = b0[x] + np.dot(sol, amplitudes_to_vector_singlet(imds.Fov, imds.woOvV, kconserv2))
+            sol0 /= omega + ieta
+            spec0 = b0[x].conj()*sol0
+            logger.debug(eom, 'b0.conj * x0 contribution to spectrum = %.15g, %.15g, %.15g', spec0)
+           
+            spectrum[x, i] += spec0
+
+    log.timer('EOM-CCSD Spectrum Approx2', *cpu0)
 
     return -1./np.pi*spectrum.imag
+    
+def get_dipole_mo(scf, pblock="occ", qblock="vir"):
+    """[summary]
+
+    TODO add kshift argument.
+
+    Args:
+        scf ([type]): [description]
+        pblock (str, optional): 'occ', 'vir', 'all'. Defaults to "occ".
+        qblock (str, optional): 'occ', 'vir', 'all'. Defaults to "vir".
+
+    Returns:
+        np.ndarray: shape (naxis, nkpts, pblock_length, qblock_length)
+    """
+    # TODO figure out why 'cint1e_ipovlp_cart' causes shape mismatch for `ip_ao` and `mo_coeff` when basis='gth-dzvp'. 
+    # Meanwhile, let's use 'cint1e_ipovlp_sph' or 'int1e_ipovlp' because they seems to be fine.
+    kpts = scf.kpts
+    nkpts = len(kpts)
+    nelectron = scf.cell.atom_charges().sum() - scf.cell.charge
+    nocc = nelectron // 2
+    nmo = len(scf.mo_energy[0])
+
+    ip_ao = scf.cell.pbc_intor('cint1e_ipovlp_sph', kpts=kpts, comp=3)
+    ip_ao = np.asarray(ip_ao).transpose(1,0,2,3)  # with shape (naxis, nkpts, nmo, nmo)
+
+    # I.p matrix in MO basis (only the occ-vir block) 
+    mo_coeff = np.asarray(scf.mo_coeff)
+    def get_range(key):
+        if key in ["occ", "all"]:
+            start = 0
+            end = nocc if key is "occ" else nmo
+        elif key is "vir":
+            start = nocc
+            end = nmo
+        return start, end
+    pstart, pend = get_range(pblock)
+    qstart, qend = get_range(qblock)
+    plen = pend - pstart
+    qlen = qend - qstart
+
+    ip_mo = np.empty((3, nkpts, plen, qlen), dtype=mo_coeff[0].dtype)
+    for k in range(nkpts):
+        pmo = mo_coeff[k, :, pstart:pend]
+        qmo = mo_coeff[k, :, qstart:qend]
+        for x in range(3):
+            ip_mo[x, k] = reduce(np.dot, (pmo.T.conj(), ip_ao[x, k], qmo))
+
+    # eia = \epsilon_a - \epsilon_i
+    mo_energy = scf.mo_energy
+    p_mo_e = [mo_energy[k][pstart:pend] for k in range(nkpts)]
+    q_mo_e = [mo_energy[k][qstart:qend] for k in range(nkpts)]
+
+    epq = np.empty((nkpts, plen, qlen), dtype=mo_energy[0].dtype)
+    for k in range(nkpts):
+        epq[k] = p_mo_e[k][:,None] - q_mo_e[k]
+
+    # dipole in MO basis = -I p(p,q) / (\epsilon_p - \epsison_q)
+    dipole = np.empty((3, nkpts, plen, qlen), dtype=ip_mo.dtype)
+    for x in range(3):
+        #TODO check: should be 1 or -1 * (\epsilon_p - \epsison_q)
+        # dipole[x] = -1. * ip_mo[x] / epq
+        
+        # switch to pure momentum operator (is it the velocity gauge in dipole approximation?)
+        dipole[x] = ip_mo[x]
+    
+    return dipole
+
+
+def get_effective_dipole_left(eom, dipole, kshift=0):
+    """[summary]
+
+    Args:
+        eom ([type]): [description]
+        dipole ([type]): [description]
+        kshift (int, optional): [description]. Defaults to 0.
+
+    Returns:
+        [type]: [description]
+    """
+    cput0 = (time.clock(), time.time())
+    log = logger.Logger(eom.stdout, eom.verbose)
+
+    nocc = eom.nocc
+    nmo = eom.nmo
+    nvir = nmo - nocc
+    nkpts = eom.nkpts
+    dtype = dipole.dtype
+    kconserv1 = eom.get_kconserv_ee_r1(kshift)
+    kconserv2 = eom.get_kconserv_ee_r2(kshift)
+
+    # extract different blocks of dipole
+    doo = dipole[:,:,:nocc,:nocc]
+    dov = dipole[:,:,:nocc,nocc:]
+    dvo = dipole[:,:,nocc:,:nocc]
+    dvv = dipole[:,:,nocc:,nocc:]
+
+    t1, t2 = eom._cc.t1, eom._cc.t2
+    mu0 = np.zeros(3, dtype=dtype)
+    mu1 = np.zeros((3, *(t1.shape)), dtype=dtype)
+    mu2 = np.zeros((3, *(t2.shape)), dtype=dtype)
+
+    # mu0 <- d_ii
+    mu0 += einsum('xkpp->x', doo)
+    # mu0 <- 2 d_ia t_ia
+    for ki in range(nkpts):
+        mu0 += 2. * einsum('xia,ia->x', doo[:,ki], t1[ki])
+
+    # mu_ia <- d_ai
+    mu1 += dvo.transpose(0,1,3,2)
+
+    for ki in range(nkpts):
+        # ki - ka = kshift
+        ka = kconserv1[ki]
+        # mu_ia <- - d_mi t_ma
+        #  km = ka
+        mu1[:,ki] -= einsum('xmi,ma->xia', doo[:,ka], t1[ka])
+        # ma_ia <- d_ac t_ic
+        mu1[:,ki] += einsum('xac,ic->xia', dvv[:,ka], t1[ki])
+        for km in range(nkpts):
+            # mu_ia <- d_me (2 t_imae - t_miae)
+            mu1[:,ki] += 2. * einsum('xme,imae->xia', dov[:,km], t2[ki,km,ka])
+            mu1[:,ki] -= einsum('xme,miae->xia', dov[:,km], t2[km,ki,ka])
+            # mu_ia <- - d_me t_ie t_ma
+            mu1[:,ki] -= einsum('xme,ie,ma->xia', dov[:,km], t1[ki], t1[km])
+
+    for ki, kj, ka in kpts_helper.loop_kkk(nkpts):
+        # ki + kj - ka - kb = kshift
+        kb = kconserv2[ki, ka, kj]
+
+        # mu_ijab <- - d_mj t_imab
+        #  km - kj = kshift
+        km = kconserv1[kj]
+        mu2[:,ki,kj,ka] -= einsum('xmj,imab->xijab', doo[:,km], t2[ki,km,ka])
+        # mu_ijab <- - d_mi t_jmba
+        #  km - ki = kshift
+        km = kconserv1[ki]
+        mu2[:,ki,kj,ka] -= einsum('xmi,jmba->xijab', doo[:,km], t2[kj,km,kb])
+        # mu_ijab <- d_be t_ijae
+        mu2[:,ki,kj,ka] += einsum('xbe,ijae->xijab', dvv[:,kb], t2[ki,kj,ka])
+        # mu_ijab <- d_ae t_jibe
+        mu2[:,ki,kj,ka] += einsum('xae,jibe->xijab', dvv[:,ka], t2[kj,ki,kb])
+        for km in range(nkpts):
+            # km - ke = kshift
+            ke = kconserv1[km]
+            # mu_ijab <- - d_me t_ie t_mjab
+            mu2[:,ki,kj,ka] -= einsum('xme,ie,mjab->xijab', dov[:,km], t1[ki], t2[km,kj,ka])
+            # mu_ijab <- - d_me t_je t_miba
+            mu2[:,ki,kj,ka] -= einsum('xme,je,miba->xijab', dov[:,km], t1[kj], t2[km,ki,kb])
+            # mu_ijab <- - d_me t_mb t_jiea
+            mu2[:,ki,kj,ka] -= einsum('xme,mb,jiea->xijab', dov[:,km], t1[km], t2[kj,ki,ke])
+            # mu_ijab <- - d_me t_ma t_ijeb
+            mu2[:,ki,kj,ka] -= einsum('xme,ma,ijeb->xijab', dov[:,km], t1[km], t2[ki,kj,ke])
+
+    print(f"mu1.shape = {mu1.shape}, mu2.shape = {mu2.shape}")
+
+    result = []
+    for x in range(3):
+        vector = amplitudes_to_vector_singlet(mu1[x], mu2[x], kconserv2)
+        result.append(vector)
+
+    log.timer("left effective dipole components", *cput0)
+
+    return mu0, np.asarray(result)
+
 
 
 def vector_to_amplitudes_singlet(vector, nkpts, nmo, nocc, kconserv):
@@ -986,7 +1240,7 @@ def vector_to_amplitudes_singlet(vector, nkpts, nmo, nocc, kconserv):
     # r2 indices (new): k_i, k_J, k_a, i, J, a, B
     r2 = r2.reshape(nkpts, nkpts, nkpts, nocc, nvir, nocc, nvir).transpose(0,2,1,3,5,4,6)
 
-    log.timer("vector_to_amplitudes_singlet", *cput0)
+    # log.timer("vector_to_amplitudes_singlet", *cput0)
     return [r1, r2]
 
 
@@ -1029,7 +1283,7 @@ def amplitudes_to_vector_singlet(r1, r2, kconserv):
             offset += nov2
 
     vector = np.hstack((r1.ravel(), vector[:offset]))
-    log.timer("amplitudes_to_vector_singlet", *cput0)
+    # log.timer("amplitudes_to_vector_singlet", *cput0)
     return vector
 
 
@@ -1523,7 +1777,17 @@ class EOMEESinglet(EOMEE):
     matvec = eeccsd_matvec_singlet
     get_init_guess = get_init_guess_cis
     cis = cis_easy
-    get_absorption_spectrum = optical_absorption_singlet_approx1
+    # get_absorption_spectrum = optical_absorption_singlet_approx1
+
+    def get_absorption_spectrum(self, scan, eta, approx=1, **kwargs):
+        if approx == 0:
+            raise NotImplementedError("Exact spectrum is not implemented")
+        elif approx == 1:
+            return optical_absorption_singlet_approx1(self, scan, eta, **kwargs)
+        elif approx == 2:
+            return optical_absorption_singlet_approx2(self, scan, eta, **kwargs)
+        else:
+            raise NotImplementedError("Unknown approximation to CC spectrum")
 
     def vector_size(self, kshift=0):
         '''Size of the linear excitation operator R vector based on spatial
