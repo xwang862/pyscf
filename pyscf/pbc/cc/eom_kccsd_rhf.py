@@ -1131,7 +1131,7 @@ def get_effective_dipole_left(eom, dipole, kshift=0):
     mu0 += einsum('xkpp->x', doo)
     # mu0 <- 2 d_ia t_ia
     for ki in range(nkpts):
-        mu0 += 2. * einsum('xia,ia->x', doo[:,ki], t1[ki])
+        mu0 += 2. * einsum('xia,ia->x', dov[:,ki], t1[ki])
 
     # mu_ia <- d_ai
     mu1 += dvo.transpose(0,1,3,2)
