@@ -1019,7 +1019,7 @@ def optical_absorption_singlet_approx2(eom, scan, eta, kshift=0, tol=1e-5, maxit
             sol0 = b0[x] + np.dot(sol, amplitudes_to_vector_singlet(imds.Fov, imds.woOvV, kconserv2))
             sol0 /= omega + ieta
             spec0 = b0[x].conj()*sol0
-            logger.debug(eom, 'b0.conj * x0 contribution to spectrum = %.15g, %.15g, %.15g', spec0)
+            logger.debug(eom, 'b0.conj * x0 contribution to spectrum = %.15g', spec0)
            
             spectrum[x, i] += spec0
 
