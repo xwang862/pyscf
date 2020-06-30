@@ -1047,12 +1047,20 @@ def get_dipole_mo(scf, pblock="occ", qblock="vir"):
     nelectron = scf.cell.atom_charges().sum() - scf.cell.charge
     nocc = nelectron // 2
     nmo = len(scf.mo_energy[0])
+    dtype = np.complex
 
+    # int1e_ipovlp gives overlap gradients, i.e. d/dr
+    # To get momentum operator, use (-i) * int1e_ipovlp
     ip_ao = scf.cell.pbc_intor('cint1e_ipovlp_sph', kpts=kpts, comp=3)
-    ip_ao = np.asarray(ip_ao).transpose(1,0,2,3)  # with shape (naxis, nkpts, nmo, nmo)
+    ip_ao = np.asarray(ip_ao, dtype=dtype).transpose(1,0,2,3)  # with shape (naxis, nkpts, nmo, nmo)
+    ip_ao *= -1j
+
+    for x in range(3):
+        for k in range(nkpts):
+            print(f"\naxis:{x}, kpt:{k}, dipole AO diagonals:{ip_ao[x,k].diagonal()}")
 
     # I.p matrix in MO basis (only the occ-vir block) 
-    mo_coeff = np.asarray(scf.mo_coeff)
+    mo_coeff = np.asarray(scf.mo_coeff, dtype=dtype)
     def get_range(key):
         if key in ["occ", "all"]:
             start = 0
@@ -1178,8 +1186,6 @@ def get_effective_dipole_left(eom, dipole, kshift=0):
             mu2[:,ki,kj,ka] -= einsum('xme,mb,jiea->xijab', dov[:,km], t1[km], t2[kj,ki,ke])
             # mu_ijab <- - d_me t_ma t_ijeb
             mu2[:,ki,kj,ka] -= einsum('xme,ma,ijeb->xijab', dov[:,km], t1[km], t2[ki,kj,ke])
-
-    print(f"mu1.shape = {mu1.shape}, mu2.shape = {mu2.shape}")
 
     result = []
     for x in range(3):
