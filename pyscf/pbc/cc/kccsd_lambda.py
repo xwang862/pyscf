@@ -42,9 +42,13 @@ def make_intermediates(cc, t1=None, t2=None, eris=None):
 
 
 def update_lambda(cc, t1, t2, l1, l2, eris, imds):
+    time0 = time.clock(), time.time()
+    log = logger.Logger(cc.stdout, cc.verbose)
 
     l1new = numpy.zeros_like(l1)
 
     l2new = numpy.zeros_like(l2)
+
+    time0 = log.timer_debug1('update l1 l2', *time0)
 
     return l1new, l2new

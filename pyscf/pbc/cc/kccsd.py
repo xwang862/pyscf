@@ -464,11 +464,16 @@ class GCCSD(gccsd.GCCSD):
         return spin2spatial(t1, orbspin), spin2spatial(t2, orbspin)
 
     def solve_lambda(self, t1=None, t2=None, l1=None, l2=None, eris=None):
+        from pyscf.pbc.cc import kccsd_lambda
         if t1 is None: t1 = self.t1
         if t2 is None: t2 = self.t2
         if eris is None: eris = self.ao2mo(self.mo_coeff)
 
-        from pyscf.pbc.cc import kccsd_lambda
+        # initial guess of lambda: Lambda = T^{\dagger}
+        # correct to 2nd order in the HF reference
+        if l1 is None: l1 = t1.conj()
+        if l2 is None: l2 = t2.conj()
+
         self.converged_lambda, self.l1, self.l2 = kccsd_lambda.kernel(self, eris, t1, t2, l1, l2, max_cycle=self.max_cycle, tol=self.conv_tol_normt, verbose=self.verbose)
         
 
