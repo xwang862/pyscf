@@ -60,44 +60,134 @@ def update_lambda(cc, t1, t2, l1, l2, eris, imds):
     # Get location of padded elements in occupied and virtual space
     nonzero_opadding, nonzero_vpadding = padding_k_idx(cc, kind="split")
 
+    # Make some intermediates first
+    # Ftmp_im = F_im - f_im
     Ftmp_oo = imds.Foo - fock[:, :nocc, :nocc]
+    # Ftmp_ea = F_ea - f_ea
     Ftmp_vv = imds.Fvv - fock[:, nocc:, nocc:]
+    # G_ef = l_mngf t_mnge
+    Gvv = numpy.zeros_like(Ftmp_vv)
+    for ke, km, kn in kpts_helper.loop_kkk(nkpts):
+        # km + kn - kg - ke = 0
+        kg = kconserv[km, ke, kn]
+        Gvv[ke] += einsum('mngf,mnge->ef', l2[km, kn, kg], t2[km, kn, kg])
+    # G_mn = l2_lmfe t2_lnfe
+    Goo = numpy.zeros_like(Ftmp_oo)
+    for km, kl, kf in kpts_helper.loop_kkk(nkpts):
+        # kn = km
+        Goo[km] += einsum('lmfe,lnfe->mn', l2[kl, km, kf], t2[kl, km, kf])
 
     # L1 equations
     
-    # l1_ia <- F_ia
+    # l_ia <- F_ia
     l1new = numpy.copy(imds.Fov)
 
     for ki in range(nkpts):
         # ki - ka = 0
         ka = ki
-        # l1_ia <- - l1_ma Ftmp_im
+        # l_ia <- - l_ma Ftmp_im
         #  km = ka 
         l1new[ki] -= einsum('ma,im->ia', l1[ka], Ftmp_oo[ki])
-        # l1_ia <- l1_ie Ftmp_ea
+        # l_ia <- l_ie Ftmp_ea
         #  ke = ka
         l1new[ki] += einsum('ie,ea->ia', l1[ki], Ftmp_vv[ka])
 
+        for ke in range(nkpts):
+            # l_ia <- l_me W_ieam
+            #  ki + ke - ka - km = 0
+            km = kconserv[ki, ka, ke]
+            l1new[ki] += einsum('me,ieam->ia', l1[km], imds.Wovvo[ki, ke, ka])
+
+            for kf in range(nkpts):
+                # l_ia <- 0.5 * l_imef W_efam
+                #  ke + kf - ka - km = 0
+                km = kconserv[ke, ka, kf]
+                l1new[ki] += 0.5 * einsum('imef,efam->ia', l2[ki, km, ke], imds.Wvvvo[ke, kf, ka])
+
+            for km in range(nkpts):
+                # l_ia <- -0.5 * l_mnae W_iemn
+                #  ki + ke - km - kn = 0
+                kn = kconserv[ki, km, ke]
+                l1new[ki] -= 0.5 * einsum('mnae,iemn->ia', l2[km, kn, ka], imds.Wovoo[ki, ke, km])
+
+        for ke in range(nkpts):
+            # l_ia <- - G_ef W_fiea
+            #  ke - kf = 0
+            kf = ke
+            l1new[ki] -= einsum('ef,fiea->ia', Gvv[ke], imds.Wvovv[kf, ki, ke])
+
+            km = ke
+            # l_ia <- - G_mn W_nami
+            #  km - kn = 0
+            kn = km
+            l1new[ki] -= einsum('mn,nami->ia', Goo[km], imds.Wovoo[kn, ka, km])
+
     # L2 equations
 
-    # l2_ijab <- V_ijab
+    # l_ijab <- V_ijab
     l2new = numpy.copy(eris.oovv)
 
     for ki, kj, ka in kpts_helper.loop_kkk(nkpts):
         # ki - ka + kj - kb = 0
         kb = kconserv[ki, ka, kj]
-        # l2_ijab <- P(ab) l2_ijae Ftmp_eb
+
+        # l_ijab <- P(ab) l_ijae Ftmp_eb
         #  ke = kb
         tmp = einsum('ijae,eb->ijab', l2[ki, kj, ka], Ftmp_vv[kb])
+        # l_ijab <- - P(ab) l_ma W_ijmb
+        #  km - ka = 0
+        km = ka
+        tmp -= einsum('ma,ijmb->ijab', l1[km], imds.Wooov[ki, kj, km])
+        # l_ijab <- P(ab) G_af V_ijfb
+        #  ki + kj - kf - kb = 0
+        kf = kconserv[ki, kb, kj]
+        tmp += einsum('af,ijfb->ijab', Gvv[ka], eris.oovv[ki, kj, kf])
+
         l2new[ki, kj, ka] += tmp
         l2new[ki, kj, kb] -= tmp.transpose(0, 1, 3, 2)
 
-        # l2_ijab <- - P(ij) l2_imab Ftmp_jm
+        # l_ijab <- - P(ij) l2_imab Ftmp_jm
         #  km = kj
         tmp = -1. * einsum('imab,jm->ijab', l2[ki, kj, ka], Ftmp_oo[kj])
+        # l_ijab <- P(ij) l_ie W_ejab
+        #  ki - ke = 0
+        ke = ki
+        tmp += einsum('ie,ejab->ijab', l1[ki], imds.Wvovv[ke, kj, ka])
+        # l_ijab <- - P(ij) G_in V_njab
+        #  ki - kn = 0
+        kn = ki
+        tmp -= einsum('in,njab->ijab', Goo[ki], eris.oovv[kn, kj, ka])    
+
         l2new[ki, kj, ka] += tmp
         l2new[kj, ki, ka] -= tmp.transpose(1, 0, 2, 3)
 
+        # l_ijab <- P(ij) P(ab) F_ia l_jb
+        tmp = einsum('ia,jb->ijab', imds.Fov[ki], l1[kj])
+        l2new[ki, kj, ka] += tmp
+        l2new[kj, ki, ka] -= tmp.transpose(1, 0, 2, 3)
+        l2new[ki, kj, kb] -= tmp.transpose(0, 1, 3, 2)
+        l2new[kj, ki, kb] += tmp.transpose(1, 0, 3, 2)
+
+        for km in range(nkpts):
+            # l_ijab <- 0.5 l_mnab W_ijmn
+            #  ki + kj - km - kn = 0
+            kn = kconserv[ki, km, kj]
+            l2new[ki, kj, ka] += 0.5 * einsum('mnab,ijmn->ijab', l2[km, kn, ka], imds.Woooo[ki, kj, km])
+
+            ke = km
+            # l_ijab <- 0.5 l_ijef W_efab
+            #  ki + kj - ke - kf = 0
+            kf = kconserv[ki, ke, kj]
+            l2new[ki, kj, ka] += 0.5 * einsum('ijef,efab->ijab', l2[ki, kj, ke], imds.Wvvvv[ke, kf, ka])
+
+            # l_ijab <- P(ij) P(ab) l_imae W_jebm
+            #  ki + km - ka - ke = 0
+            ke = kconserv[ki, ka, km]
+            tmp = einsum('imae,ejmb->ijab', l2[ki, km, ka], imds.Wovvo[kj, ke, kb])
+            l2new[ki, kj, ka] += tmp
+            l2new[kj, ki, ka] -= tmp.transpose(1, 0, 2, 3)
+            l2new[ki, kj, kb] -= tmp.transpose(0, 1, 3, 2)
+            l2new[kj, ki, kb] += tmp.transpose(1, 0, 3, 2)
 
     # Divide L1 by epsilon_ia
     for ki in range(nkpts):
