@@ -137,37 +137,37 @@ def update_lambda(cc, t1, t2, l1, l2, eris, imds):
         kb = kconserv[ki, ka, kj]
 
         # l_ijab <- P(ab) l_ijae Ftmp_eb
-        #  ke = kb
-        tmp = einsum('ijae,eb->ijab', l2[ki, kj, ka], Ftmp_vv[kb])
+        #  ke - kb = 0
+        ke = kb
+        tmp = einsum('ijae,eb->ijab', l2[ki, kj, ka], Ftmp_vv[ke])
         # l_ijab <- - P(ab) l_ma W_ijmb
         #  km - ka = 0
         km = ka
         tmp -= einsum('ma,ijmb->ijab', l1[km], imds.Wooov[ki, kj, km])
-        # l_ijab <- P(ab) G_af V_ijfb
-        #  ki + kj - kf - kb = 0
-        kf = kconserv[ki, kb, kj]
-        tmp += einsum('af,ijfb->ijab', Gvv[ka], eris.oovv[ki, kj, kf])
+        # l_ijab <- P(ab) G_be V_ijae
+        tmp += einsum('be,ijae->ijab', Gvv[kb], eris.oovv[ki, kj, ka])
 
         l2new[ki, kj, ka] += tmp
         l2new[ki, kj, kb] -= tmp.transpose(0, 1, 3, 2)
 
-        # l_ijab <- - P(ij) l2_imab Ftmp_jm
-        #  km = kj
-        tmp = -1. * einsum('imab,jm->ijab', l2[ki, kj, ka], Ftmp_oo[kj])
+        # l_ijab <- - P(ij) l_imab Ftmp_jm
+        #  kj - km = 0
+        km = kj
+        tmp = -1. * einsum('imab,jm->ijab', l2[ki, km, ka], Ftmp_oo[kj])
         # l_ijab <- P(ij) l_ie W_ejab
         #  ki - ke = 0
         ke = ki
         tmp += einsum('ie,ejab->ijab', l1[ki], imds.Wvovv[ke, kj, ka])
-        # l_ijab <- - P(ij) G_in V_njab
-        #  ki - kn = 0
-        kn = ki
-        tmp -= einsum('in,njab->ijab', Goo[ki], eris.oovv[kn, kj, ka])    
+        # l_ijab <- - P(ij) G_mj V_imab
+        #  km - kj = 0
+        km = kj
+        tmp -= einsum('mj,imab->ijab', Goo[km], eris.oovv[ki, km, ka])    
 
         l2new[ki, kj, ka] += tmp
         l2new[kj, ki, ka] -= tmp.transpose(1, 0, 2, 3)
 
-        # l_ijab <- P(ij) P(ab) F_ia l_jb
-        tmp = einsum('ia,jb->ijab', imds.Fov[ki], l1[kj])
+        # l_ijab <- P(ij) P(ab) F_jb l_ia
+        tmp = einsum('jb,ia->ijab', imds.Fov[kj], l1[ki])
         l2new[ki, kj, ka] += tmp
         l2new[kj, ki, ka] -= tmp.transpose(1, 0, 2, 3)
         l2new[ki, kj, kb] -= tmp.transpose(0, 1, 3, 2)
@@ -188,7 +188,7 @@ def update_lambda(cc, t1, t2, l1, l2, eris, imds):
             # l_ijab <- P(ij) P(ab) l_imae W_jebm
             #  ki + km - ka - ke = 0
             ke = kconserv[ki, ka, km]
-            tmp = einsum('imae,ejmb->ijab', l2[ki, km, ka], imds.Wovvo[kj, ke, kb])
+            tmp = einsum('imae,jebm->ijab', l2[ki, km, ka], imds.Wovvo[kj, ke, kb])
             l2new[ki, kj, ka] += tmp
             l2new[kj, ki, ka] -= tmp.transpose(1, 0, 2, 3)
             l2new[ki, kj, kb] -= tmp.transpose(0, 1, 3, 2)
