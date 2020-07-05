@@ -48,6 +48,9 @@ def make_intermediates(cc, t1=None, t2=None, eris=None):
 
 
 def update_lambda(cc, t1, t2, l1, l2, eris, imds):
+    """
+    Ref: Gauss and Stanton, J. Chem. Phys. 103, 3561 (1995) Table II. Unperturbed lambda equations (a) and (b)
+    """
     time0 = time.clock(), time.time()
     log = logger.Logger(cc.stdout, cc.verbose)
     nkpts, nocc, nvir = t1.shape
@@ -65,20 +68,22 @@ def update_lambda(cc, t1, t2, l1, l2, eris, imds):
     Ftmp_oo = imds.Foo - fock[:, :nocc, :nocc]
     # Ftmp_ea = F_ea - f_ea
     Ftmp_vv = imds.Fvv - fock[:, nocc:, nocc:]
-    # G_ef = l_mngf t_mnge
+
+    # G_ae = -0.5 * l_mnaf t_mnef
     Gvv = numpy.zeros_like(Ftmp_vv)
-    for ke, km, kn in kpts_helper.loop_kkk(nkpts):
-        # km + kn - kg - ke = 0
-        kg = kconserv[km, ke, kn]
-        Gvv[ke] += einsum('mngf,mnge->ef', l2[km, kn, kg], t2[km, kn, kg])
-    # G_mn = l2_lmfe t2_lnfe
+    for ka, km, kn in kpts_helper.loop_kkk(nkpts):
+        # ka - ke = 0
+        ke = ka
+        Gvv[ka] -= 0.5 * einsum('mnaf,mnef->ae', l2[km, kn, ka], t2[km, kn, ke])
+    # G_mi = 0.5 * l_inef t_mnef
     Goo = numpy.zeros_like(Ftmp_oo)
-    for km, kl, kf in kpts_helper.loop_kkk(nkpts):
-        # kn = km
-        Goo[km] += einsum('lmfe,lnfe->mn', l2[kl, km, kf], t2[kl, km, kf])
+    for km, kn, ke in kpts_helper.loop_kkk(nkpts):
+        # km - ki = 0
+        ki = km
+        Goo[km] += 0.5 * einsum('inef,mnef->mi', l2[ki, kn, ke], t2[km, kn, ke])
 
     # L1 equations
-    
+
     # l_ia <- F_ia
     l1new = numpy.copy(imds.Fov)
 
@@ -111,16 +116,16 @@ def update_lambda(cc, t1, t2, l1, l2, eris, imds):
                 l1new[ki] -= 0.5 * einsum('mnae,iemn->ia', l2[km, kn, ka], imds.Wovoo[ki, ke, km])
 
         for ke in range(nkpts):
-            # l_ia <- - G_ef W_fiea
+            # l_ia <- - G_ef W_eifa
             #  ke - kf = 0
             kf = ke
-            l1new[ki] -= einsum('ef,fiea->ia', Gvv[ke], imds.Wvovv[kf, ki, ke])
+            l1new[ki] -= einsum('ef,eifa->ia', Gvv[ke], imds.Wvovv[ke, ki, kf])
 
-            km = ke
-            # l_ia <- - G_mn W_nami
+        for km in range(nkpts):
+            # l_ia <- - G_mn W_mina
             #  km - kn = 0
             kn = km
-            l1new[ki] -= einsum('mn,nami->ia', Goo[km], imds.Wovoo[kn, ka, km])
+            l1new[ki] -= einsum('mn,mina->ia', Goo[km], imds.Wooov[km, ki, kn])
 
     # L2 equations
 
