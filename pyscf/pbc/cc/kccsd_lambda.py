@@ -216,7 +216,6 @@ def update_lambda(cc, t1, t2, l1, l2, eris, imds):
         n0_ovp_jb = numpy.ix_(nonzero_opadding[kj], nonzero_vpadding[kb])
         ejb[n0_ovp_jb] = (mo_e_o[kj][:,None] - mo_e_v[kb])[n0_ovp_jb]
         eijab = eia[:, None, :, None] + ejb[:, None, :]
-
         l2new[ki, kj, ka] /= eijab             
 
     time0 = log.timer_debug1('update l1 l2', *time0)
