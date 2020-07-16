@@ -586,16 +586,19 @@ class _CIS_ERIS:
 
         mo_coeff = self.mo_coeff = padded_mo_coeff(cis, mo_coeff)
 
-        # Re-make our fock MO matrix elements from density and fock AO
-        dm = cis._scf.make_rdm1(cis.mo_coeff, cis.mo_occ)
-        exxdiv = cis._scf.exxdiv if cis.keep_exxdiv else None
-        with lib.temporary_env(cis._scf, exxdiv=exxdiv):
-            # _scf.exxdiv affects eris.fock. HF exchange correction should be
-            # excluded from the Fock matrix.
-            fockao = cis._scf.get_hcore() + cis._scf.get_veff(cell, dm)
-        self.fock = np.asarray([reduce(np.dot, (mo.T.conj(), fockao[k], mo))
-                                for k, mo in enumerate(mo_coeff)])
-
+        if getattr(cis._scf, "fock", None) is not None:
+            self.fock = cis._scf.fock
+        else:
+            # Re-make our fock MO matrix elements from density and fock AO
+            dm = cis._scf.make_rdm1(cis.mo_coeff, cis.mo_occ)
+            exxdiv = cis._scf.exxdiv if cis.keep_exxdiv else None
+            with lib.temporary_env(cis._scf, exxdiv=exxdiv):
+                # _scf.exxdiv affects eris.fock. HF exchange correction should be
+                # excluded from the Fock matrix.
+                fockao = cis._scf.get_hcore() + cis._scf.get_veff(cell, dm)
+            self.fock = np.asarray([reduce(np.dot, (mo.T.conj(), fockao[k], mo))
+                                    for k, mo in enumerate(mo_coeff)])
+        
         self.mo_energy = [self.fock[k].diagonal().real for k in range(nkpts)]
 
         if not cis.keep_exxdiv:
