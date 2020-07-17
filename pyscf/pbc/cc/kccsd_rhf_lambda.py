@@ -143,6 +143,89 @@ def update_lambda(cc, t1, t2, l1, l2, eris, imds):
     # l_ijab <- V_ijab
     l2new = numpy.copy(eris.oovv)
 
+    for ki, kj, ka in kpts_helper.loop_kkk(nkpts):
+        # ki + kj - ka - kb = 0
+        kb = kconserv[ki, ka, kj]
+
+        # l_ijab <- l_ijae Ftmp_eb
+        #  ke - kb = 0
+        ke = kb
+        l2new[ki, kj, ka] += einsum('ijae,eb->ijab', l2[ki, kj, ka], Ftmp_vv[ke])
+        # l_ijab <- l_jibe Ftmp_ea
+        #  ke - ka = 0
+        ke = ka
+        l2new[ki, kj, ka] += einsum('jibe,ea->ijab', l2[kj, ki, kb], Ftmp_vv[ke])
+        # l_ijab <- - l_imab Ftmp_jm
+        #  kj - km = 0
+        km = kj
+        l2new[ki, kj, ka] -= einsum('imab,jm->ijab', l2[ki, km, ka], Ftmp_oo[kj])
+        # l_ijab <- - l_jmba Ftmp_im
+        #  ki - km = 0
+        km = ki
+        l2new[ki, kj, ka] -= einsum('jmba,im->ijab', l2[kj, km, kb], Ftmp_oo[ki])
+
+        # l_ijab <- l_ie W_ejab
+        #  ki - ke = 0
+        ke = ki
+        l2new[ki, kj, ka] += einsum('ie,ejab->ijab', l1[ki], imds.wvOvV[ke, kj, ka])
+        # l_ijab <- l_je W_eiba
+        #  kj - ke = 0
+        ke = kj
+        l2new[ki, kj, ka] += einsum('je,eiba->ijab', l1[kj], imds.wvOvV[ke, ki, kb])
+        # l_ijab <- - l_ma W_ijmb
+        #  km - ka = 0
+        km = ka
+        l2new[ki, kj, ka] -= einsum('ma,ijmb->ijab', l1[km], imds.woOoV[ki, kj, km])
+        # l_ijab <- - l_mb W_jima
+        #  km - kb = 0
+        km = kb
+        l2new[ki, kj, ka] -= einsum('mb,jima->ijab', l1[km], imds.woOoV[kj, ki, km])
+
+        # l_ijab <- G_be V_ijae
+        l2new[ki, kj, ka] += einsum('be,ijae->ijab', Gvv[kb], eris.oovv[ki, kj, ka])
+        # l_ijab <- G_ae V_jibe
+        l2new[ki, kj, ka] += einsum('ae,jibe->ijab', Gvv[ka], eris.oovv[kj, ki, kb])
+        # l_ijab <- - G_mj V_imab
+        #  km - kj = 0
+        km = kj
+        l2new[ki, kj, ka] -= einsum('mj,imab->ijab', Goo[km], eris.oovv[ki, km, ka])
+        # l_ijab <- - G_mi V_jmba
+        #  km - ki = 0
+        km = ki
+        l2new[ki, kj, ka] -= einsum('mi,jmba->ijab', Goo[km], eris.oovv[kj, km, kb])
+
+        for km in range(nkpts):
+            # l_ijab <- l_mnab W_ijmn
+            #  ki + kj - km - kn = 0
+            kn = kconserv[ki, km, kj]
+            l2new[ki, kj, ka] += einsum('mnab,ijmn->ijab', l2[km, kn, ka], imds.woOoO[ki, kj, km])
+        
+        for ke in range(nkpts):
+            # l_ijab <- l_ijef W_efab
+            #  ki + kj - ke - kf = 0
+            kf = kconserv[ki, ke, kj]
+            l2new[ki, kj, ka] += einsum('ijef,efab->ijab', l2[ki, kj, ke], imds.wvVvV[ke, kf, ka])
+
+        #
+        # l_ijab <- P(ab,ij) (2 l_imae W_jebm - l_imae W_ejbm - l_imea W_jebm - l_imeb W_ejam)
+        # P(ab,ij) means permuting a<->b and i<->j simultaneously.
+        for km in range(nkpts):
+            # l_ijab <- 2 l_imae W_jebm
+            #  ki + km - ka - ke = 0
+            ke = kconserv[ki, ka, km]
+            tmp = 2. * einsum('imae,jebm->ijab', l2[ki, km, ka], imds.woVvO[kj, ke, kb])
+            # l_ijab <- - l_imae W_ejbm = - l_imae W_jemb
+            tmp -= einsum('imae,jemb->ijab', l2[ki, km, ka], imds.woVoV[kj, ke, km])
+            # l_ijab <- - l_imea W_jebm
+            tmp -= einsum('imea,jebm->ijab', l2[ki, km, ke], imds.woVvO[kj, ke, kb])
+            # l_ijab <- - l_imeb W_ejam = - l_imeb W_jema
+            #  ki + km - ke - kb = 0
+            ke = kconserv[ki, kb, km]
+            tmp -= einsum('imeb,jema->ijab', l2[ki, km, ke], imds.woVoV[kj, ke, km])
+
+            l2new[ki, kj, ka] += tmp
+            l2new[kj, ki, kb] += tmp.transpose(1, 0, 3, 2)
+
     # Divide L1 by epsilon_ia
     for ki in range(nkpts):
         # ki - ka = 0
