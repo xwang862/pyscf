@@ -1371,15 +1371,12 @@ def get_effective_onebody(eom, onebody, kshift=0):
         Dvvvo[:, ka, kb, kc] -= einsum('xmc,imba->xabci', dov[:, km], t2[ki, km, kb])
 
     # D_ovoo
-    # D_iakl = d_ie t_jkae
+    # D_iakj = d_ie t_jkae
     Dovoo = np.zeros((3, nkpts, nkpts, nkpts, nocc, nvir, nocc, nocc), dtype=dtype)
     for ki, ka, kk in kpts_helper.loop_kkk(nkpts):
-        # ki - ke = kshift
-        ke = kconserv1[ki]
-        # kj + kk - ka - ke = 0
-        #  => ka + ke - kj - kk = 0
-        kj = kconserv_cc[ka, kk, ke]
-        Dovoo[:, ki, ka, kk] += einsum('xie,jkae->iakl', dov[:, ki], t2[kj, kk, ka])
+        # ki + ka - kk - kj = kshift
+        kj = kconserv2[ki, kk, ka]
+        Dovoo[:, ki, ka, kk] += einsum('xie,jkae->iakj', dov[:, ki], t2[kj, kk, ka])
 
     log.timer("effective one-body operator", *cput0) 
 
