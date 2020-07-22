@@ -1028,7 +1028,7 @@ def optical_absorption_singlet_approx2(eom, scan, eta, kshift=0, tol=1e-5, maxit
     return -1./np.pi*spectrum.imag
 
 
-def optical_absorption_singlet(eom, scan, eta, kshift=0, tol=1e-5, maxiter=500, imds=None, **kwargs):
+def optical_absorption_singlet(eom, scan, eta, kshift=0, tol=1e-5, maxiter=500, eris=None, imds=None, **kwargs):
     """Compute approximate spectra assuming:
             lambda = 0
 
@@ -1045,6 +1045,9 @@ def optical_absorption_singlet(eom, scan, eta, kshift=0, tol=1e-5, maxiter=500, 
     log = logger.Logger(eom.stdout, eom.verbose)
 
     if imds is None: imds = eom.make_imds()
+
+    if getattr(eom._cc, "l1", None) is None or getattr(eom._cc, "l2", None) is None:
+        eom._cc.solve_lambda(eris=eris, imds=imds)
 
     kpts = eom.kpts
     nkpts = eom.nkpts
