@@ -1026,7 +1026,95 @@ def optical_absorption_singlet_approx2(eom, scan, eta, kshift=0, tol=1e-5, maxit
     log.timer('EOM-CCSD Spectrum Approx2', *cpu0)
 
     return -1./np.pi*spectrum.imag
+
+
+def optical_absorption_singlet(eom, scan, eta, kshift=0, tol=1e-5, maxiter=500, imds=None, **kwargs):
+    """Compute approximate spectra assuming:
+            lambda = 0
+
+    Args:
+        eom ([type]): [description]
+        scan ([type]): [description]
+        eta ([type]): [description]
+        kshift (int, optional): [description]. Defaults to 0.
+        tol ([type], optional): [description]. Defaults to 1e-5.
+        maxiter (int, optional): [description]. Defaults to 500.
+        imds ([type], optional): [description]. Defaults to None.
+    """
+    cpu0 = (time.clock(), time.time())
+    log = logger.Logger(eom.stdout, eom.verbose)
+
+    if imds is None: imds = eom.make_imds()
+
+    kpts = eom.kpts
+    nkpts = eom.nkpts
+    nocc = eom.nocc
+    nmo = eom.nmo
+    nvir = nmo - nocc
+    kconserv2 = eom.get_kconserv_ee_r2(kshift)
+
+    dipole = get_dipole_mo(eom._cc._scf, "all", "all")
+
+    # b = <\Phi_{\alpha} | \bar{\dipole} | \Phi_0>
+    # b is needed to solve a.x=b linear equations
+    b0, b_vector = get_effective_dipole_left(eom, dipole, kshift)
+    b_size = b_vector.shape[1]
+    # check the \phi_0 component of b vector
+    print(f"b0 = {b0}")
+    if any(abs(b0) > 1e-6):
+        logger.warn(eom, 'Large b0 detected! b0 (x,y,z) = {}). Consider adding b0.conj() * x0 contribution to spectra'.format(b0))
+
+    # e = <\Phi_0 | (1+\Lambda) \bar{\dipole^{\dagger}} | \Phi_{\alpha}>
+    # TODO
+
     
+    # solve linear equations A.x = b
+    ieta = 1j*eta
+    omega_list = scan
+    spectrum = np.zeros((3, len(omega_list)), dtype=np.complex)
+
+    diag = eom.get_diag(kshift, imds)
+    x0 = np.zeros((3, b_size), dtype=b_vector.dtype)
+
+    from pyscf.pbc.ci import kcis_rhf
+    counter = kcis_rhf.gmres_counter()
+    LinearSolver = scipy.sparse.linalg.gcrotmk
+
+    for i, omega in enumerate(omega_list):
+        matvec = lambda vec: eeccsd_matvec_singlet(eom, vec, kshift, imds=imds) * (-1.) + (omega + ieta) * vec
+        A = scipy.sparse.linalg.LinearOperator((b_size, b_size), matvec=matvec, dtype=np.complex)        
+
+        # preconditioner
+        # P should be close to A, but easy to solve. We choose P = H diags shifted by omega + ieta. 
+        P = scipy.sparse.diags(diag * (-1.) + omega + ieta, format='csc', dtype=diag.dtype)
+        # M is the inverse of P.
+        M_x = lambda x: scipy.sparse.linalg.spsolve(P, x)
+        M = scipy.sparse.linalg.LinearOperator((b_size, b_size), M_x)        
+
+        for x in range(3):
+
+            sol, info = LinearSolver(A, b_vector[x], x0=x0[x], tol=tol, maxiter=maxiter, M=M, callback=counter)
+            if info == 0:
+                print('Frequency', np.round(omega,3), 'converged in', counter.niter, 'iterations')
+            else:
+                print('Frequency', np.round(omega,3), 'not converged after', counter.niter, 'iterations')
+            counter.reset()
+            
+            x0[x] = sol
+            spectrum[x,i] = np.dot(b_vector[x].conj(), sol)
+
+            sol0 = b0[x] + np.dot(sol, amplitudes_to_vector_singlet(imds.Fov, imds.woOvV, kconserv2))
+            sol0 /= omega + ieta
+            spec0 = b0[x].conj()*sol0
+            logger.debug(eom, 'b0.conj * x0 contribution to spectrum = %.15g', spec0)
+           
+            spectrum[x, i] += spec0
+
+    log.timer('EOM-CCSD Spectrum', *cpu0)
+
+    return -1./np.pi*spectrum.imag
+     
+
 def get_dipole_mo(scf, pblock="occ", qblock="vir"):
     """[summary]
 
@@ -1196,6 +1284,143 @@ def get_effective_dipole_left(eom, dipole, kshift=0):
 
     return mu0, np.asarray(result)
 
+
+def get_effective_onebody(eom, onebody, kshift=0):
+    cput0 = (time.clock(), time.time())
+    log = logger.Logger(eom.stdout, eom.verbose)
+
+    nocc = eom.nocc
+    nmo = eom.nmo
+    nvir = nmo - nocc
+    nkpts = eom.nkpts
+    dtype = onebody.dtype
+    size_kov = nkpts * nocc * nvir
+    kconserv1 = eom.get_kconserv_ee_r1(kshift)
+    kconserv2 = eom.get_kconserv_ee_r2(kshift)
+
+    # extract different blocks of one-body operator
+    doo = onebody[:,:,:nocc,:nocc]
+    dov = onebody[:,:,:nocc,nocc:]
+    dvo = onebody[:,:,nocc:,:nocc]
+    dvv = onebody[:,:,nocc:,nocc:]
+
+    t1, t2 = eom._cc.t1, eom._cc.t2
+
+    #
+    # effective one-body operator: e^-T O e^T
+    #
+
+    # Dov
+    # D_ia = d_ia
+    Dov = dov.copy()
+
+    # Dvo and Dvvoo
+    Dvo = np.zeros((3, nkpts, nvir, nocc), dtype=dtype)
+    Dvvoo = np.zeros((3, nkpts, nkpts, nkpts, nvir, nvir, nocc, nocc), dtype=dtype)
+    _, ov_oovv = get_effective_dipole_left(eom, onebody, kshift)
+    
+    Dov_tmp = np.zeros((3, nkpts, nocc, nvir), dtype=dtype)
+    Doovv_tmp = np.zeros((3, nkpts, nkpts, nkpts, nocc, nocc, nvir, nvir), dtype=dtype)
+    for x in range(3):
+        Dov_tmp[x], Doovv_tmp[x] = vector_to_amplitudes_singlet(ov_oovv[x], nkpts, nmo, nocc, kconserv2)
+    ov_oovv = None
+
+    # Transpose Dov_tmp to get Dvo
+    for ki in range(nkpts):
+        # ki - ka = kshift
+        ka = kconserv1[ki]
+        Dvo[:, ka] = Dov_tmp[:, ki].transpose(0, 2, 1)
+    Dov_tmp = None
+
+    # Transpose Doovv_tmp to get Dvvoo
+    for ki, kj, ka in kpts_helper.loop_kkk(nkpts):
+        # ki + kj - ka - kb = 0
+        kb = kconserv2[ki, ka, kj]
+        Dvvoo[:, ka, kb, ki] = Doovv_tmp[:, ki, kj, ka].transpose(0, 3, 4, 1, 2)
+    Doovv_tmp = None
+
+    # Doo
+    # D_ij <- d_ij
+    Doo = doo.copy()
+    # D_ij <- d_ie t_je
+    for ki in range(nkpts):
+        # ki - kj = kshift
+        kj = kconserv1[ki]
+        Doo[:, ki] += einsum('xie,je->xij', dov[:, ki], t1[kj])
+
+    # Dvv
+    # D_ab <- d_ab
+    Dvv = dvv.copy()
+    # D_ab <- - d_mb t_ma
+    for ka in range(nkpts):
+        # km - ka = 0
+        km = ka
+        Dvv[:, ka] -= einsum('xmb,ma->xab', dov[:, km], t1[km])
+
+    kconserv_cc = eom._cc.khelper.kconserv
+    # Dvvvo
+    # D_abci = - d_mc t_imba
+    Dvvvo = np.zeros((3, nkpts, nkpts, nkpts, nvir, nvir, nvir, nocc), dtype=dtype)
+    for ka, kb, kc in kpts_helper.loop_kkk(nkpts):
+        # ka + kb - kc - ki = kshift
+        ki = kconserv2[ka, kc, kb]
+        # ki + km - kb - ka = 0
+        #  => kb + ka - ki - km = 0
+        km = kconserv_cc[kb, ki, ka]
+        Dvvvo[:, ka, kb, kc] -= einsum('xmc,imba->xabci', dov[:, km], t2[ki, km, kb])
+
+    # D_ovoo
+    # D_iakl = d_ie t_jkae
+    Dovoo = np.zeros((3, nkpts, nkpts, nkpts, nocc, nvir, nocc, nocc), dtype=dtype)
+    for ki, ka, kk in kpts_helper.loop_kkk(nkpts):
+        # ki - ke = kshift
+        ke = kconserv1[ki]
+        # kj + kk - ka - ke = 0
+        #  => ka + ke - kj - kk = 0
+        kj = kconserv_cc[ka, kk, ke]
+        Dovoo[:, ki, ka, kk] += einsum('xie,jkae->iakl', dov[:, ki], t2[kj, kk, ka])
+
+    log.timer("effective one-body operator", *cput0) 
+
+    return Doo, Dvv, Dov, Dvo, Dvvvo, Dovoo, Dvvoo
+
+
+def get_effective_dipole_right(eom, dipole, kshift=0):
+    cput0 = (time.clock(), time.time())
+    log = logger.Logger(eom.stdout, eom.verbose)
+
+    nocc = eom.nocc
+    nmo = eom.nmo
+    nvir = nmo - nocc
+    nkpts = eom.nkpts
+    dtype = dipole.dtype
+    kconserv1 = eom.get_kconserv_ee_r1(kshift)
+    kconserv2 = eom.get_kconserv_ee_r2(kshift)
+
+    # adjoint of dipole matrix
+    d_adj = np.zeros((3, nkpts, nmo, nmo), dtype=dtype)
+    # [d_adj]_pq = (d_qp).conj()
+    for kq in range(nkpts):
+        # kq - kp = kshift
+        kp = kconserv1[kq]
+        d_adj[:, kp] = dipole[:, kq].transpose(0, 2, 1).conj()
+
+    l1, l2 = eom._cc.l1, eom._cc.l2
+    Doo, Dvv, Dov, Dvo, Dvvvo, Dovoo, Dvvoo = get_effective_onebody(eom, d_adj, kshift)
+
+    mu0 = np.zeros(3, dtype=dtype)
+    mu1 = np.zeros((3, *(l1.shape)), dtype=dtype)
+    mu2 = np.zeros((3, *(l2.shape)), dtype=dtype)   
+
+    result = []
+    for x in range(3):
+        vector = amplitudes_to_vector_singlet(mu1[x], mu2[x], kconserv2)
+        result.append(vector)
+
+    # TODO
+
+    log.timer("right effective dipole components", *cput0)
+    return mu0, np.asarray(result)
 
 
 def vector_to_amplitudes_singlet(vector, nkpts, nmo, nocc, kconserv):
