@@ -645,7 +645,7 @@ class RCCSD(pyscf.cc.ccsd.CCSD):
     def ao2mo(self, mo_coeff=None):
         return _ERIS(self, mo_coeff)
 
-    def solve_lambda(self, t1=None, t2=None, l1=None, l2=None, eris=None):
+    def solve_lambda(self, t1=None, t2=None, l1=None, l2=None, eris=None, imds=None):
         from pyscf.pbc.cc import kccsd_rhf_lambda
         if t1 is None: t1 = self.t1
         if t2 is None: t2 = self.t2
@@ -657,7 +657,7 @@ class RCCSD(pyscf.cc.ccsd.CCSD):
         if l2 is None: l2 = t2.conj()
 
         self.converged_lambda, self.l1, self.l2 = \
-            kccsd_rhf_lambda.kernel(self, eris, t1, t2, l1, l2,
+            kccsd_rhf_lambda.kernel(self, eris, t1, t2, l1, l2, imds,
                                     max_cycle=self.max_cycle, 
                                     tol=self.conv_tol_normt, 
                                     verbose=self.verbose)

@@ -1065,9 +1065,8 @@ def optical_absorption_singlet(eom, scan, eta, kshift=0, tol=1e-5, maxiter=500, 
         logger.warn(eom, 'Large b0 detected! b0 (x,y,z) = {}). Consider adding b0.conj() * x0 contribution to spectra'.format(b0))
 
     # e = <\Phi_0 | (1+\Lambda) \bar{\dipole^{\dagger}} | \Phi_{\alpha}>
-    # TODO
+    e0, e_vector = get_effective_dipole_right(eom, dipole, kshift)
 
-    
     # solve linear equations A.x = b
     ieta = 1j*eta
     omega_list = scan
@@ -1294,7 +1293,6 @@ def get_effective_onebody(eom, onebody, kshift=0):
     nvir = nmo - nocc
     nkpts = eom.nkpts
     dtype = onebody.dtype
-    size_kov = nkpts * nocc * nvir
     kconserv1 = eom.get_kconserv_ee_r1(kshift)
     kconserv2 = eom.get_kconserv_ee_r2(kshift)
 
@@ -2012,7 +2010,7 @@ class EOMEESinglet(EOMEE):
 
     def get_absorption_spectrum(self, scan, eta, approx=1, **kwargs):
         if approx == 0:
-            raise NotImplementedError("Exact spectrum is not implemented")
+            return optical_absorption_singlet(self, scan, eta, **kwargs)
         elif approx == 1:
             return optical_absorption_singlet_approx1(self, scan, eta, **kwargs)
         elif approx == 2:

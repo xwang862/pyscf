@@ -48,7 +48,10 @@ def kernel(mycc, eris=None, t1=None, t2=None, l1=None, l2=None,
     if fupdate is None:
         fupdate = update_lambda
 
-    imds = fintermediates(mycc, t1, t2, eris)
+    if callable(fintermediates):
+        imds = fintermediates(mycc, t1, t2, eris)
+    else:
+        imds = fintermediates
 
     if isinstance(mycc.diis, lib.diis.DIIS):
         adiis = mycc.diis

@@ -31,10 +31,14 @@ from pyscf.pbc.cc.kccsd_rhf import _get_epq
 
 einsum = lib.einsum
 
-def kernel(cc, eris=None, t1=None, t2=None, l1=None, l2=None, max_cycle=50, tol=1e-8, verbose=logger.INFO):
+def kernel(cc, eris=None, t1=None, t2=None, l1=None, l2=None, imds=None, max_cycle=50, tol=1e-8, verbose=logger.INFO):
     log = logger.Logger(cc.stdout, cc.verbose)
     log.info("******** PBC RCCSD lambda solver ********")
-    return ccsd_lambda.kernel(cc, eris, t1, t2, l1, l2, max_cycle=max_cycle, tol=tol, verbose=verbose, fintermediates=make_intermediates, fupdate=update_lambda)
+
+    if imds is None:
+        imds = make_intermediates
+
+    return ccsd_lambda.kernel(cc, eris, t1, t2, l1, l2, max_cycle=max_cycle, tol=tol, verbose=verbose, fintermediates=imds, fupdate=update_lambda)
 
 def make_intermediates(cc, t1=None, t2=None, eris=None):
     from pyscf.pbc.cc.eom_kccsd_rhf import _IMDS
