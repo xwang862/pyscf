@@ -194,6 +194,11 @@ def update_lambda(cc, t1, t2, l1, l2, eris, imds):
         km = ki
         l2new[ki, kj, ka] -= einsum('mi,jmba->ijab', Goo[km], eris.oovv[kj, km, kb])
 
+        # l_ijab <- F_jb l_ia
+        l2new[ki, kj, ka] += einsum('jb,ia->ijab', imds.Fov[kj], l1[ki])
+        # l_ijab <- F_ia l_jb
+        l2new[ki, kj, ka] += einsum('ia,jb->ijab', imds.Fov[ki], l1[kj])
+
         for km in range(nkpts):
             # l_ijab <- l_mnab W_ijmn
             #  ki + kj - km - kn = 0
