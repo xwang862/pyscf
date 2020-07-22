@@ -1103,11 +1103,11 @@ def optical_absorption_singlet(eom, scan, eta, kshift=0, tol=1e-5, maxiter=500, 
             counter.reset()
             
             x0[x] = sol
-            spectrum[x,i] = np.dot(b_vector[x].conj(), sol)
+            spectrum[x,i] = np.dot(e_vector[x], sol)
 
             sol0 = b0[x] + np.dot(sol, amplitudes_to_vector_singlet(imds.Fov, imds.woOvV, kconserv2))
             sol0 /= omega + ieta
-            spec0 = b0[x].conj()*sol0
+            spec0 = e0[x] * sol0
             logger.debug(eom, 'b0.conj * x0 contribution to spectrum = %.15g', spec0)
            
             spectrum[x, i] += spec0
@@ -1145,9 +1145,9 @@ def get_dipole_mo(scf, pblock="occ", qblock="vir"):
     ip_ao = np.asarray(ip_ao, dtype=dtype).transpose(1,0,2,3)  # with shape (naxis, nkpts, nmo, nmo)
     ip_ao *= -1j
 
-    for x in range(3):
-        for k in range(nkpts):
-            print(f"\naxis:{x}, kpt:{k}, dipole AO diagonals:{ip_ao[x,k].diagonal()}")
+    # for x in range(3):
+    #     for k in range(nkpts):
+    #         print(f"\naxis:{x}, kpt:{k}, dipole AO diagonals:{ip_ao[x,k].diagonal()}")
 
     # I.p matrix in MO basis (only the occ-vir block) 
     mo_coeff = np.asarray(scf.mo_coeff, dtype=dtype)
@@ -1403,6 +1403,13 @@ def get_effective_dipole_right(eom, dipole, kshift=0):
         kp = kconserv1[kq]
         d_adj[:, kp] = dipole[:, kq].transpose(0, 2, 1).conj()
 
+    # extract different blocks of dipole adjoint
+    doo = d_adj[:,:,:nocc,:nocc]
+    dov = d_adj[:,:,:nocc,nocc:]
+    dvo = d_adj[:,:,nocc:,:nocc]
+    dvv = d_adj[:,:,nocc:,nocc:]
+
+    t1 = eom._cc.t1
     l1, l2 = eom._cc.l1, eom._cc.l2
     Doo, Dvv, Dov, Dvo, Dvvvo, Dovoo, Dvvoo = get_effective_onebody(eom, d_adj, kshift)
 
@@ -1410,12 +1417,93 @@ def get_effective_dipole_right(eom, dipole, kshift=0):
     mu1 = np.zeros((3, *(l1.shape)), dtype=dtype)
     mu2 = np.zeros((3, *(l2.shape)), dtype=dtype)   
 
+    # mu0
+    for ki in range(nkpts):
+        # mu0 <- 2 d_ia t_ia
+        # TODO Figure this out: ki - ka = 0 orkshift?
+        mu0[:] += 2. * einsum('xia,ia->x', dov[:, ki], t1[ki])
+        # mu0 <- 2 D_ai l_ia
+        #  ki - ka = 0 assuming true for now
+        ka = ki
+        mu0[:] += 2. * einsum('xai,ia->x', Dvo[:, ka], l1[ki])
+
+    for ki, kj, ka in kpts_helper.loop_kkk(nkpts):
+        # mu0 <- 4 D_abij l_ijab
+        # TODO Figure this out: ki + kj - ka - kb = 0 or kshift?
+        # ki + kj - ka - kb = 0 assuming true for now
+        kb = kconserv2[ki, ka, kj]
+        mu0[:] += 4. * einsum('xabij,ijab->x', Dvvoo[:, ka, kb, ki], l2[ki, kj, ka])
+        # mu0 <- -2 D_abij l_jiab
+        mu0[:] -= 2. * einsum('xabij,jiab->x', Dvvoo[:, ka, kb, ki], l2[kj, ki, ka])
+    
+    # mu_ia <- D_ia
+    mu1 += Dov
+    for ki in range(nkpts):
+        # ki - ka = kshift
+        ka = kconserv1[ki]
+        # mu_ia <- D_ea l_ie
+        #  ki - ke = 0
+        ke = ki
+        mu1[:, ki] += einsum('xea,ie->xia', Dvv[:, ke], l1[ki])
+        # mu_ia <- - D_im l_ma
+        #  ki - km = kshift
+        km = kconserv1[ki]
+        mu1[:, ki] -= einsum('xim,ma->xia', Doo[:, ki], l1[km])
+
+        for ke in range(nkpts):
+            # mu_ia <- 2 D_em l_imae
+            #  ke - km = kshift
+            km = kconserv1[ke]
+            mu1[:, ki] += 2. * einsum('xem,imae->xia', Dvo[:, ke], l2[ki, km, ka])
+            # mu_ia <- - D_em l_miae
+            mu1[:, ki] -= einsum('xem,miae->xia', Dvo[:, ke], l2[km, ki, ka])
+
+            for kf in range(nkpts):
+                # mu_ia <- 2 D_efam l_imef
+                #  ke + kf - ka - km = kshift
+                km = kconserv2[ke, ka, kf]
+                mu1[:, ki] += 2. * einsum('xefam,imef->xia', Dvvvo[:, ke, kf, ka], l2[ki, km, ke])
+                # mu_ia <- - D_efam l_mief
+                mu1[:, ki] -= einsum('xefam,mief->xia', Dvvvo[:, ke, kf, ka], l2[km, ki, ke])
+
+            for km in range(nkpts):
+                # mu_ia <- -2 D_iemn l_mnae
+                #  ki + ke - km - kn = kshift
+                kn = kconserv2[ki, km, ke]
+                mu1[:, ki] -= 2. * einsum('xiemn,mnae->xia', Dovoo[:, ki, ke, km], l2[km, kn, ka])
+                # mu_ia <- D_iemn l_mnea
+                mu1[:, ki] += einsum('xiemn,mnea->xia', Dovoo[:, ki, ke, km], l2[km, kn, ke])
+
+    kconserv_cc = eom._cc.khelper.kconserv
+    for ki, kj, ka in kpts_helper.loop_kkk(nkpts):
+        # ki + kj - ka - kb = kshift
+        kb = kconserv2[ki, ka, kj]
+        # mu_ijab <- D_ia l_jb
+        mu2[:, ki, kj, ka] += einsum('xia,jb->xijab', Dov[:, ki], l1[kj])
+        # mu_ijab <- D_jb l_ia
+        mu2[:, ki, kj, ka] += einsum('xjb,ia->xijab', Dov[:, kj], l1[ki])
+
+        # mu_ijab <- D_eb l_ijae
+        #  ki + kj - ka - ke = 0
+        ke = kconserv_cc[ki, ka, kj]
+        mu2[:, ki, kj, ka] += einsum('xeb,ijae->xijab', Dvv[:, ke], l2[ki, kj, ka])
+        # mu_ijab <- D_ea l_jibe
+        #  kj + ki - kb - ke = 0
+        ke = kconserv_cc[kj, kb, ki]
+        mu2[:, ki, kj, ka] += einsum('xea,jibe->xijab', Dvv[:, ke], l2[kj, ki, kb])
+        # mu_ijab <- - D_jm l_imab
+        #  kj - km = kshift
+        km = kconserv1[kj]
+        mu2[:, ki, kj, ka] -= einsum('xjm,imab->xijab', Doo[:, kj], l2[ki, km, ka])
+        # mu_ijab <- - D_im l_jmba
+        #  ki - km = kshift
+        km = kconserv1[ki]
+        mu2[:, ki, kj, ka] -= einsum('xim,jmba->xijab', Doo[:, ki], l2[kj, km, kb])
+
     result = []
     for x in range(3):
         vector = amplitudes_to_vector_singlet(mu1[x], mu2[x], kconserv2)
         result.append(vector)
-
-    # TODO
 
     log.timer("right effective dipole components", *cput0)
     return mu0, np.asarray(result)
