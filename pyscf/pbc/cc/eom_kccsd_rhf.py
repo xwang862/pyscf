@@ -1029,8 +1029,7 @@ def optical_absorption_singlet_approx2(eom, scan, eta, kshift=0, tol=1e-5, maxit
 
 
 def optical_absorption_singlet(eom, scan, eta, kshift=0, tol=1e-5, maxiter=500, eris=None, imds=None, **kwargs):
-    """Compute approximate spectra assuming:
-            lambda = 0
+    """Compute full CCSD spectra.
 
     Args:
         eom ([type]): [description]
