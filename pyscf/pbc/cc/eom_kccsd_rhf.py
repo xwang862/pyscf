@@ -1046,6 +1046,7 @@ def optical_absorption_singlet(eom, scan, eta, kshift=0, tol=1e-5, maxiter=500, 
     if imds is None: imds = eom.make_imds()
 
     if getattr(eom._cc, "l1", None) is None or getattr(eom._cc, "l2", None) is None:
+        print("Missing lambdas. Computing them now...")
         eom._cc.solve_lambda(eris=eris, imds=imds)
 
     kpts = eom.kpts
