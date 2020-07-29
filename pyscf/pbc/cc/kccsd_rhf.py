@@ -746,17 +746,21 @@ class _ERIS:  # (pyscf.cc.ccsd._ChemistsERIs):
 
         mo_coeff = self.mo_coeff = padded_mo_coeff(cc, mo_coeff)
 
-        # Re-make our fock MO matrix elements from density and fock AO
-        dm = cc._scf.make_rdm1(cc.mo_coeff, cc.mo_occ)
-        exxdiv = cc._scf.exxdiv if cc.keep_exxdiv else None
-        with lib.temporary_env(cc._scf, exxdiv=exxdiv):
-            # _scf.exxdiv affects eris.fock. HF exchange correction should be
-            # excluded from the Fock matrix.
-            vhf = cc._scf.get_veff(cell, dm)
-        fockao = cc._scf.get_hcore() + vhf
-        self.fock = np.asarray([reduce(np.dot, (mo.T.conj(), fockao[k], mo))
-                                for k, mo in enumerate(mo_coeff)])
-        self.e_hf = cc._scf.energy_tot(dm=dm, vhf=vhf)
+        if getattr(cc._scf, "fock", None) is not None and getattr(cc._scf, "e_tot", None):
+            self.fock = cc._scf.fock
+            self.e_hf = cc._scf.e_tot
+        else:
+            # Re-make our fock MO matrix elements from density and fock AO
+            dm = cc._scf.make_rdm1(cc.mo_coeff, cc.mo_occ)
+            exxdiv = cc._scf.exxdiv if cc.keep_exxdiv else None
+            with lib.temporary_env(cc._scf, exxdiv=exxdiv):
+                # _scf.exxdiv affects eris.fock. HF exchange correction should be
+                # excluded from the Fock matrix.
+                vhf = cc._scf.get_veff(cell, dm)
+            fockao = cc._scf.get_hcore() + vhf
+            self.fock = np.asarray([reduce(np.dot, (mo.T.conj(), fockao[k], mo))
+                                    for k, mo in enumerate(mo_coeff)])
+            self.e_hf = cc._scf.energy_tot(dm=dm, vhf=vhf)
 
         self.mo_energy = [self.fock[k].diagonal().real for k in range(nkpts)]
 
