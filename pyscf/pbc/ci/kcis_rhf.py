@@ -200,7 +200,7 @@ def optical_absorption_singlet(cis, scan, eta, kshift=0, tol=1e-5, maxiter=500, 
     LinearSolver = scipy.sparse.linalg.gcrotmk
 
     for i, omega in enumerate(omega_list):
-        matvec = lambda vec: cis.matvec(vec, kshift, eris)*(-1.) + (omega + ieta) * vec
+        matvec = lambda vec: cis.matvec(vec, kshift, eris, **kwargs)*(-1.) + (omega + ieta) * vec
         A = scipy.sparse.linalg.LinearOperator((b_size, b_size), matvec=matvec, dtype=np.complex)
 
         # preconditioner
@@ -241,7 +241,7 @@ class gmres_counter(object):
 
 
 
-def cis_matvec_singlet(cis, vector, kshift, eris=None):
+def cis_matvec_singlet(cis, vector, kshift, eris=None, dielec=1.0):
     """Compute matrix-vector product of the Hamiltonion matrix and a CIS c
     oefficient vector, in the space of single excitation.
 
@@ -252,6 +252,8 @@ def cis_matvec_singlet(cis, vector, kshift, eris=None):
             Available k-shift indices depend on the k-point mesh. For example,
             a 2 by 2 by 2 k-point mesh allows at most 8 k-shift values, which can
             be targeted by 0, 1, 2, 3, 4, 5, 6, or 7.
+        dielec {float} -- macroscopic dielectric constant, used to scale (oo|vv) 
+            type integral.
 
     Keyword Arguments:
         eris {_CIS_ERIS} -- Depending on cis.direct, eris may
@@ -276,6 +278,9 @@ def cis_matvec_singlet(cis, vector, kshift, eris=None):
     # Should use Fock diagonal elements to build (e_a - e_i) matrix
     epsilons = [eris.fock[k].diagonal().real for k in range(nkpts)]
 
+    # Scaling factor of (oo|vv) type integral
+    scale = 1.0 / dielec
+
     Hr = np.zeros_like(r)
     for ki in range(nkpts):
         ka = kconserv_r[ki]
@@ -287,7 +292,7 @@ def cis_matvec_singlet(cis, vector, kshift, eris=None):
             ka = kconserv_r[ki]
             # x: kj
             Hr[ki] += 2.0 * einsum("xjb,xajib->ia", r, eris.voov[ka, :, ki])
-            Hr[ki] -= einsum("xjb,xjaib->ia", r, eris.ovov[:, ka, ki])
+            Hr[ki] -= scale * einsum("xjb,xjaib->ia", r, eris.ovov[:, ka, ki])
     else:
         for ki in range(nkpts):
             ka = kconserv_r[ki]
@@ -299,7 +304,7 @@ def cis_matvec_singlet(cis, vector, kshift, eris=None):
 
                 # r_ia <- - r_jb (ab|ji) = -r_jb B^L_ab B^L_ji
                 Lja = -1.0 * einsum("jb,Lab->Lja", r[kj], eris.Lpq_mo[ka,kb][:, nocc:, nocc:])
-                tmp += einsum("Lja,Lji->ia", Lja, eris.Lpq_mo[kj,ki][:, :nocc, :nocc])
+                tmp += scale * einsum("Lja,Lji->ia", Lja, eris.Lpq_mo[kj,ki][:, :nocc, :nocc])
                 Hr[ki] += (1. / nkpts) * tmp
 
     vector = cis.amplitudes_to_vector(Hr)
