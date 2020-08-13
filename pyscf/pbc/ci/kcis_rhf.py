@@ -262,6 +262,9 @@ def cis_matvec_singlet(cis, vector, kshift, eris=None):
         1D array -- matrix-vector product of the Hamiltonion matrix and the
             input vector.
     """
+    cput0 = (time.clock(), time.time())
+    log = logger.Logger(cis.stdout, cis.verbose)
+
     if eris is None:
         eris = cis.ao2mo()
     nkpts = cis.nkpts
@@ -300,6 +303,7 @@ def cis_matvec_singlet(cis, vector, kshift, eris=None):
                 Hr[ki] += (1. / nkpts) * tmp
 
     vector = cis.amplitudes_to_vector(Hr)
+    log.timer("matvec KCIS Singlet", *cput0)
     return vector
 
 def cis_H(cis, kshift, eris=None):
