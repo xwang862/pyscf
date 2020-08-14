@@ -195,7 +195,7 @@ def optical_absorption_singlet(cis, scan, eta, kshift=0, tol=1e-5, maxiter=500, 
     x0 = np.zeros((3, b_size), dtype=np.complex)
 
     e0s = np.zeros(3,dtype=np.complex)
-    counter = gmres_counter()
+    counter = gmres_counter(rel=True)
     # LinearSolver = scipy.sparse.linalg.gmres
     LinearSolver = scipy.sparse.linalg.gcrotmk
 
@@ -228,15 +228,28 @@ def optical_absorption_singlet(cis, scan, eta, kshift=0, tol=1e-5, maxiter=500, 
 
 
 class gmres_counter(object):
-    def __init__(self, disp=False):
+    def __init__(self, disp=True, rel=False):
         self._disp = disp
+        self._rel = rel
         self.niter = 0
+        self.rk_old = None
     def __call__(self, rk=None):
+        # rk is residual vector for GMRES, and solution vector for GCROTMK
         self.niter += 1
         if self._disp:
-            print('iter %3i\trk = %s' % (self.niter, str(rk)))
+            if self._rel:
+                res = 0
+                if self.niter > 1:
+                    res = np.linalg.norm(rk - self.rk_old)
+                print('iter %3i\tnorm of rk = %.16f, norm of rk residual = %.16f' % (self.niter, np.linalg.norm(rk), res))
+            else:
+                print('iter %3i\tnorm of rk = %.16f' % (self.niter, np.linalg.norm(rk)))
+        if self._rel:
+            self.rk_old = rk.copy()
+
     def reset(self):
         self.niter = 0
+        self.rk_old = None
 
 
 

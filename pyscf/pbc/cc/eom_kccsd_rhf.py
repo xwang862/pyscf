@@ -902,7 +902,7 @@ def optical_absorption_singlet_approx1(eom, scan, eta, kshift=0, tol=1e-5, maxit
     x0 = np.zeros((3, b_size), dtype=np.complex)
 
     from pyscf.pbc.ci import kcis_rhf
-    counter = kcis_rhf.gmres_counter()
+    counter = kcis_rhf.gmres_counter(rel=True)
     LinearSolver = scipy.sparse.linalg.gcrotmk
 
     for i, omega in enumerate(omega_list):
@@ -990,7 +990,7 @@ def optical_absorption_singlet_approx2(eom, scan, eta, kshift=0, tol=1e-5, maxit
     x0 = np.zeros((3, b_size), dtype=b_vector.dtype)
 
     from pyscf.pbc.ci import kcis_rhf
-    counter = kcis_rhf.gmres_counter()
+    counter = kcis_rhf.gmres_counter(rel=True)
     LinearSolver = scipy.sparse.linalg.gcrotmk
 
     for i, omega in enumerate(omega_list):
@@ -1080,7 +1080,7 @@ def optical_absorption_singlet(eom, scan, eta, kshift=0, tol=1e-5, maxiter=500, 
     x0 = np.zeros(b_size, dtype=b_vector.dtype)
 
     from pyscf.pbc.ci import kcis_rhf
-    counter = kcis_rhf.gmres_counter()
+    counter = kcis_rhf.gmres_counter(rel=True)
     LinearSolver = scipy.sparse.linalg.gcrotmk
 
     for i, omega in enumerate(omega_list):
