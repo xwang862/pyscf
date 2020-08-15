@@ -127,7 +127,21 @@ def kernel(cis, nroots=1, eris=None, kptlist=None, **kargs):
     log.timer("CIS", *cpu0)
     return evals, evecs
 
-def optical_absorption_singlet(cis, scan, eta, kshift=0, tol=1e-5, maxiter=500, eris=None, **kwargs):
+
+def _adjust_vir(mo_energy, nocc, shift):
+    """Adjust virtual orbital energies by a constant shift
+
+    Args:
+        mo_energy ([type]): [description]
+        nocc ([int]): [description]
+        shift ([float]): [description]
+    """
+    mo_energy = mo_energy.copy()
+    mo_energy[nocc:] += shift
+    return mo_energy
+
+
+def optical_absorption_singlet(cis, scan, eta, kshift=0, tol=1e-5, maxiter=500, eris=None, scissor=None, **kwargs):
     """Compute CIS singlet optical spectrum.
     
     Arguments:
@@ -141,6 +155,14 @@ def optical_absorption_singlet(cis, scan, eta, kshift=0, tol=1e-5, maxiter=500, 
     nocc = cis.nocc
     nmo = cis.nmo
     nvir = nmo - nocc
+
+    if eris is None:
+        eris = cis.ao2mo()
+
+    # Apply "scissor" to conduction band energies
+    if isinstance(scissor, (float, np.float64)):
+        logger.warn(cis, "Applying a constant scissor %s to conduction band energies", scissor)
+        eris.mo_energy = [_adjust_vir(mo_e, nocc, -scissor) for mo_e in eris.mo_energy]
 
     # TODO enable kshift!=0 (current impl. assumes kshift=0)
 
@@ -156,7 +178,7 @@ def optical_absorption_singlet(cis, scan, eta, kshift=0, tol=1e-5, maxiter=500, 
     ip_ao = np.asarray(ip_ao).transpose(1,0,2,3)  # with shape (naxis, nkpts, nmo, nmo)
 
     # I.p matrix in MO basis (only the occ-vir block) 
-    mo_coeff = cis._scf.mo_coeff
+    mo_coeff = eris.mo_coeff
     ip_mo = np.empty((3, nkpts, nocc, nvir), dtype=mo_coeff[0].dtype)
     for k in range(nkpts):
         mo_occ = mo_coeff[k][:, :nocc]
@@ -165,7 +187,7 @@ def optical_absorption_singlet(cis, scan, eta, kshift=0, tol=1e-5, maxiter=500, 
             ip_mo[x, k] = reduce(np.dot, (mo_occ.T.conj(), ip_ao[x, k], mo_vir))
 
     # eia = \epsilon_a - \epsilon_i
-    mo_energy = cis._scf.mo_energy
+    mo_energy = eris.mo_energy
     mo_e_o = [mo_energy[k][:nocc] for k in range(nkpts)]
     mo_e_v = [mo_energy[k][nocc:] for k in range(nkpts)]
     nonzero_opadding, nonzero_vpadding = padding_k_idx(cis, kind="split")
@@ -181,20 +203,14 @@ def optical_absorption_singlet(cis, scan, eta, kshift=0, tol=1e-5, maxiter=500, 
         dipole[x] = -1. * ip_mo[x] / eia
 
     # solve linear equations A.x = b
-    e0 = cis._scf.e_tot
     ieta = 1j*eta
     omega_list = scan
     spectrum = np.zeros((3, len(omega_list)), dtype=np.complex)
     b_vector = dipole.reshape(3, nkpts*nocc*nvir)
     b_size = nkpts * nocc * nvir
 
-    if eris is None:
-        eris = cis.ao2mo()
     diag = cis.get_diag(kshift, eris)
-
     x0 = np.zeros((3, b_size), dtype=np.complex)
-
-    e0s = np.zeros(3,dtype=np.complex)
     counter = gmres_counter(rel=True)
     # LinearSolver = scipy.sparse.linalg.gmres
     LinearSolver = scipy.sparse.linalg.gcrotmk
@@ -289,7 +305,9 @@ def cis_matvec_singlet(cis, vector, kshift, eris=None, dielec=1.0):
     r = cis.vector_to_amplitudes(vector)
 
     # Should use Fock diagonal elements to build (e_a - e_i) matrix
-    epsilons = [eris.fock[k].diagonal().real for k in range(nkpts)]
+    # epsilons = [eris.fock[k].diagonal().real for k in range(nkpts)]
+    # Assume mo_energy comes from Fock diagonal
+    epsilons = eris.mo_energy
 
     # Scaling factor of (oo|vv) type integral
     scale = 1.0 / dielec
@@ -432,7 +450,7 @@ def cis_diag(cis, kshift, eris=None):
     nvir = nmo - nocc
     kconserv_r = cis.get_kconserv_r(kshift)
     dtype = eris.dtype
-    epsilons = [eris.fock[k].diagonal().real for k in range(nkpts)]
+    epsilons = eris.mo_energy
 
     Hdiag = np.zeros((nkpts, nocc, nvir), dtype=dtype)
     for ki in range(nkpts):
