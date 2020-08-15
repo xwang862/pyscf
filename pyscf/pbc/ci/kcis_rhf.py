@@ -293,6 +293,8 @@ def cis_matvec_singlet(cis, vector, kshift, eris=None, dielec=1.0):
 
     # Scaling factor of (oo|vv) type integral
     scale = 1.0 / dielec
+    if dielec != 1.0:
+        logger.warn(cis, "Scale (oo|vv) type integral by 1/%s", dielec)
 
     Hr = np.zeros_like(r)
     for ki in range(nkpts):
