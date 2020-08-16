@@ -848,7 +848,7 @@ def eomee_ccsd_singlet(eom, nroots=1, koopmans=False, guess=None, left=False,
     return eom.e, eom.v
 
 
-def optical_absorption_singlet_approx1(eom, scan, eta, kshift=0, tol=1e-5, maxiter=500, imds=None, **kwargs):
+def optical_absorption_singlet_approx1(eom, scan, eta, kshift=0, tol=1e-5, maxiter=500, imds=None, x0=None, **kwargs):
     """ Compute approximate spectra assuming:
             lambda = 0, \bar{\mu} = \mu
 
@@ -899,7 +899,8 @@ def optical_absorption_singlet_approx1(eom, scan, eta, kshift=0, tol=1e-5, maxit
         logger.warn(eom, 'Large b0 detected! b0 (x,y,z) = {}). Consider adding b0.conj() * x0 contribution to spectra'.format(b0))
 
     diag = eom.get_diag(kshift, imds)
-    x0 = np.zeros((3, b_size), dtype=np.complex)
+    if x0 is None:
+        x0 = np.zeros((3, b_size), dtype=np.complex)
 
     from pyscf.pbc.ci import kcis_rhf
     counter = kcis_rhf.gmres_counter(rel=True)
@@ -935,10 +936,10 @@ def optical_absorption_singlet_approx1(eom, scan, eta, kshift=0, tol=1e-5, maxit
 
     log.timer('EOM-CCSD Spectrum Approx1', *cpu0)
 
-    return -1./np.pi*spectrum.imag
+    return -1./np.pi*spectrum.imag, x0
 
 
-def optical_absorption_singlet_approx2(eom, scan, eta, kshift=0, tol=1e-5, maxiter=500, imds=None, **kwargs):
+def optical_absorption_singlet_approx2(eom, scan, eta, kshift=0, tol=1e-5, maxiter=500, imds=None, x0=None, **kwargs):
     """Compute approximate spectra assuming:
             lambda = 0
 
@@ -987,7 +988,8 @@ def optical_absorption_singlet_approx2(eom, scan, eta, kshift=0, tol=1e-5, maxit
     spectrum = np.zeros((3, len(omega_list)), dtype=np.complex)
 
     diag = eom.get_diag(kshift, imds)
-    x0 = np.zeros((3, b_size), dtype=b_vector.dtype)
+    if x0 is None:
+        x0 = np.zeros((3, b_size), dtype=b_vector.dtype)
 
     from pyscf.pbc.ci import kcis_rhf
     counter = kcis_rhf.gmres_counter(rel=True)
@@ -1025,10 +1027,10 @@ def optical_absorption_singlet_approx2(eom, scan, eta, kshift=0, tol=1e-5, maxit
 
     log.timer('EOM-CCSD Spectrum Approx2', *cpu0)
 
-    return -1./np.pi*spectrum.imag
+    return -1./np.pi*spectrum.imag, x0
 
 
-def optical_absorption_singlet(eom, scan, eta, kshift=0, tol=1e-5, maxiter=500, eris=None, imds=None, **kwargs):
+def optical_absorption_singlet(eom, scan, eta, kshift=0, tol=1e-5, maxiter=500, eris=None, imds=None, x0=None, **kwargs):
     """Compute full CCSD spectra.
 
     Args:
@@ -1076,7 +1078,8 @@ def optical_absorption_singlet(eom, scan, eta, kshift=0, tol=1e-5, maxiter=500, 
     spectrum = np.zeros((3, len(omega_list)), dtype=np.complex)
 
     diag = eom.get_diag(kshift, imds)
-    x0 = np.zeros((3, b_size), dtype=b_vector.dtype)
+    if x0 is None:
+        x0 = np.zeros((3, b_size), dtype=b_vector.dtype)
 
     from pyscf.pbc.ci import kcis_rhf
     counter = kcis_rhf.gmres_counter(rel=True)
@@ -1114,7 +1117,7 @@ def optical_absorption_singlet(eom, scan, eta, kshift=0, tol=1e-5, maxiter=500, 
 
     log.timer('EOM-CCSD Spectrum', *cpu0)
 
-    return -1./np.pi*spectrum.imag
+    return -1./np.pi*spectrum.imag, x0
      
 
 def get_dipole_mo(scf, pblock="occ", qblock="vir"):
