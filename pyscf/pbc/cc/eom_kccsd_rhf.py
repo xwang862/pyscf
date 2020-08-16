@@ -1076,8 +1076,7 @@ def optical_absorption_singlet(eom, scan, eta, kshift=0, tol=1e-5, maxiter=500, 
     spectrum = np.zeros((3, len(omega_list)), dtype=np.complex)
 
     diag = eom.get_diag(kshift, imds)
-    # x0 = np.zeros((3, b_size), dtype=b_vector.dtype)
-    x0 = np.zeros(b_size, dtype=b_vector.dtype)
+    x0 = np.zeros((3, b_size), dtype=b_vector.dtype)
 
     from pyscf.pbc.ci import kcis_rhf
     counter = kcis_rhf.gmres_counter(rel=True)
@@ -1096,15 +1095,14 @@ def optical_absorption_singlet(eom, scan, eta, kshift=0, tol=1e-5, maxiter=500, 
 
         for x in range(3):
 
-            sol, info = LinearSolver(A, b_vector[x], x0=x0, tol=tol, maxiter=maxiter, M=M, callback=counter)
+            sol, info = LinearSolver(A, b_vector[x], x0=x0[x], tol=tol, maxiter=maxiter, M=M, callback=counter)
             if info == 0:
                 print('Frequency', np.round(omega,3), 'converged in', counter.niter, 'iterations')
             else:
                 print('Frequency', np.round(omega,3), 'not converged after', counter.niter, 'iterations')
             counter.reset()
             
-            print("using current solution as next guess")
-            x0 = sol
+            x0[x] = sol
             spectrum[x,i] = np.dot(e_vector[x], sol)
 
             sol0 = b0[x] + np.dot(sol, amplitudes_to_vector_singlet(imds.Fov, imds.woOvV, kconserv2))
