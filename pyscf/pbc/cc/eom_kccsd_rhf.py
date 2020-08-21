@@ -1698,6 +1698,7 @@ def eeccsd_matvec_singlet(eom, vector, kshift, imds=None, diag=None):
         woVvO_bar[wkm, wkb, wke] = 2. * imds.woVvO[wkm, wkb, wke] - imds.woVoV[wkm, wkb, wkj].transpose(0,1,3,2)
 
     Hr1 = np.zeros_like(r1)
+    # 1h1p-1h1p block
     for ki in range(nkpts):
         #  ki - ka = kshift
         ka = kconserv_r1[ki]
@@ -1713,6 +1714,11 @@ def eeccsd_matvec_singlet(eom, vector, kshift, imds=None, diag=None):
             Hr1[ki] += 2. * einsum('maei,me->ia', imds.woVvO[km, ka, ke], r1[km])
             Hr1[ki] -= einsum('maie,me->ia', imds.woVoV[km, ka, ki], r1[km])
 
+    # 1h1p-2h2p block
+    for ki in range(nkpts):
+        #  ki - ka = kshift
+        ka = kconserv_r1[ki]
+        for km in range(nkpts):
             # r_ia <- F_me (2 r_imae - r_miae)
             Hr1[ki] += 2. * einsum('me,imae->ia', imds.Fov[km], r2[ki, km, ka])
             Hr1[ki] -= einsum('me,miae->ia', imds.Fov[km], r2[km, ki, ka])
@@ -1731,20 +1737,10 @@ def eeccsd_matvec_singlet(eom, vector, kshift, imds=None, diag=None):
                 Hr1[ki] += np.einsum('mnie,nmae->ia', imds.woOoV[km, kn, ki], r2[kn, km, ka])
 
     Hr2 = np.zeros_like(r2)
+    # 2h2p-1h1p block
     for ki, kj, ka in kpts_helper.loop_kkk(nkpts):
         # ki + kj - ka - kb = kshift
         kb = kconserv_r2[ki, ka, kj]
-
-        # r_ijab <= - F_mj r_imab
-        #  km = kj
-        Hr2[ki, kj, ka] -= einsum('mj,imab->ijab', imds.Foo[kj], r2[ki, kj, ka])
-        # r_ijab <= - F_mi r_jmba
-        #  km = ki
-        Hr2[ki, kj, ka] -= einsum('mi,jmba->ijab', imds.Foo[ki], r2[kj, ki, kb])
-        # r_ijab <= F_be r_ijae
-        Hr2[ki, kj, ka] += einsum('be,ijae->ijab', imds.Fvv[kb], r2[ki, kj, ka])
-        # r_ijab <= F_ae r_jibe
-        Hr2[ki, kj, ka] += einsum('ae,jibe->ijab', imds.Fvv[ka], r2[kj, ki, kb])
 
         # r_ijab <= W_abej r_ie
         #  ki - ke = kshift
@@ -1764,6 +1760,74 @@ def eeccsd_matvec_singlet(eom, vector, kshift, imds=None, diag=None):
         # => ki -ka + kj - km = G
         km = kconserv[ki, ka, kj]
         Hr2[ki, kj, ka] -= einsum('maji,mb->ijab', imds.woVoO[km, ka, kj], r1[km])
+
+    #
+    # r_ijab <= - (2 W_nmie - W_nmei) t_jnba r_me
+    # r_ijab <= - (2 W_nmje - W_nmej) t_inab r_me
+    # r_ijab <= + (2 W_amfe - W_amef) t_jibf r_me
+    # r_ijab <= + (2 W_bmfe - W_bmef) t_ijaf r_me
+    #
+    # First, build intermediates M = W.r
+    #
+    wr1_oo = np.zeros((nkpts, nocc, nocc), dtype=r2.dtype)
+    wr1_vv = np.zeros((nkpts, nvir, nvir), dtype=r2.dtype)
+    for kj in range(nkpts):
+        # Wr1_in = (2 W_nmie - W_nmei) r_me = wbar_nmie r_me
+        ki = kj
+        #  kn + km - ki - ke = G
+        #  km - ke = kshift
+        # => ki - kn = kshift
+        kn = kconserv_r1[ki]
+        # x: km
+        wr1_oo[ki] += einsum('xnmie,xme->in', woOoV_bar[kn, :, ki], r1)
+
+        # Wr1_fa = (2 W_amfe - W_amef) r_me = wbar_amfe r_me
+        kf = kj
+        #  ka + km - kf - ke = G
+        #  km - ke = kshift
+        # => kf - ka = kshift
+        ka = kconserv_r1[kf]
+        # x: km
+        wr1_vv[kf] += einsum('xamfe,xme->fa', wvOvV_bar[ka, :, kf], r1)
+
+    #
+    # Second, compute the whole contraction
+    #
+    for ki, kj, ka in kpts_helper.loop_kkk(nkpts):
+        # ki + kj - ka - kb = kshift
+        kb = kconserv_r2[ki, ka, kj]
+        # r_ijab <= - Wr1_in t_jnba
+        #  ki - kn = kshift
+        kn = kconserv_r1[ki]
+        Hr2[ki, kj, ka] -= einsum('in,jnba->ijab', wr1_oo[ki], imds.t2[kj, kn, kb])
+        # r_ijab <= - Wr1_jn t_inab
+        #  kj - kn = kshift
+        kn = kconserv_r1[kj]
+        Hr2[ki, kj, ka] -= einsum('jn,inab->ijab', wr1_oo[kj], imds.t2[ki, kn, ka])
+        # r_ijab <= Wr1_fa t_jibf
+        #  kj + ki - kb - kf = G
+        kf = kconserv[kj, kb, ki]
+        Hr2[ki, kj, ka] += einsum('fa,jibf->ijab', wr1_vv[kf], imds.t2[kj, ki, kb])
+        # r_ijab <= Wr1_fb t_ijaf
+        #  ki + kj - ka - kf = G
+        kf = kconserv[ki, ka, kj]
+        Hr2[ki, kj, ka] += einsum('fb,ijaf->ijab', wr1_vv[kf], imds.t2[ki, kj, ka])
+
+    # 2h2p-2h2p block
+    for ki, kj, ka in kpts_helper.loop_kkk(nkpts):
+        # ki + kj - ka - kb = kshift
+        kb = kconserv_r2[ki, ka, kj]
+
+        # r_ijab <= - F_mj r_imab
+        #  km = kj
+        Hr2[ki, kj, ka] -= einsum('mj,imab->ijab', imds.Foo[kj], r2[ki, kj, ka])
+        # r_ijab <= - F_mi r_jmba
+        #  km = ki
+        Hr2[ki, kj, ka] -= einsum('mi,jmba->ijab', imds.Foo[ki], r2[kj, ki, kb])
+        # r_ijab <= F_be r_ijae
+        Hr2[ki, kj, ka] += einsum('be,ijae->ijab', imds.Fvv[kb], r2[ki, kj, ka])
+        # r_ijab <= F_ae r_jibe
+        Hr2[ki, kj, ka] += einsum('ae,jibe->ijab', imds.Fvv[ka], r2[kj, ki, kb])
 
         tmp = np.zeros((nocc, nocc, nvir, nvir), dtype=r2.dtype)
         for km in range(nkpts):
@@ -1800,17 +1864,10 @@ def eeccsd_matvec_singlet(eom, vector, kshift, imds=None, diag=None):
     # r_ijab <= - W_mnef t_ijae (2 r_mnbf - r_mnfb)
     # r_ijab <= - W_mnef t_jibe (2 r_mnaf - r_mnfa)
     #
-    # r_ijab <= - (2 W_nmie - W_nmei) t_jnba r_me
-    # r_ijab <= - (2 W_nmje - W_nmej) t_inab r_me
-    # r_ijab <= + (2 W_amfe - W_amef) t_jibf r_me
-    # r_ijab <= + (2 W_bmfe - W_bmef) t_ijaf r_me
-    #
     # First, build intermediates M = W.r
     #
     wr2_oo = np.zeros((nkpts, nocc, nocc), dtype=r2.dtype)
     wr2_vv = np.zeros((nkpts, nvir, nvir), dtype=r2.dtype)
-    wr1_oo = np.zeros_like(wr2_oo)
-    wr1_vv = np.zeros_like(wr2_vv)
     for kj in range(nkpts):
         # Wr2_jm = W_mnef (2 r_jnef - r_jnfe) = W_mnef rbar_jnef
         #  km + kn - ke - kf = G
@@ -1829,23 +1886,6 @@ def eeccsd_matvec_singlet(eom, vector, kshift, imds=None, diag=None):
         # x: km, y: kn
         wr2_vv[ke] += einsum('xymnef,xymnbf->eb', imds.woOvV[:, :, ke], r2bar[:, :, kb])
 
-        # Wr1_in = (2 W_nmie - W_nmei) r_me = wbar_nmie r_me
-        ki = kj
-        #  kn + km - ki - ke = G
-        #  km - ke = kshift
-        # => ki - kn = kshift
-        kn = kconserv_r1[ki]
-        # x: km
-        wr1_oo[ki] += einsum('xnmie,xme->in', woOoV_bar[kn, :, ki], r1)
-
-        # Wr1_fa = (2 W_amfe - W_amef) r_me = wbar_amfe r_me
-        kf = kj
-        #  ka + km - kf - ke = G
-        #  km - ke = kshift
-        # => kf - ka = kshift
-        ka = kconserv_r1[kf]
-        # x: km
-        wr1_vv[kf] += einsum('xamfe,xme->fa', wvOvV_bar[ka, :, kf], r1)
     #
     # Second, compute the whole contraction
     #
@@ -1868,23 +1908,6 @@ def eeccsd_matvec_singlet(eom, vector, kshift, imds=None, diag=None):
         #  kj + ki - kb - ke = G
         ke = kconserv[kj, kb, ki]
         Hr2[ki, kj, ka] -= einsum('ea,jibe->ijab', wr2_vv[ke], imds.t2[kj, ki, kb])
-
-        # r_ijab <= - Wr1_in t_jnba
-        #  ki - kn = kshift
-        kn = kconserv_r1[ki]
-        Hr2[ki, kj, ka] -= einsum('in,jnba->ijab', wr1_oo[ki], imds.t2[kj, kn, kb])
-        # r_ijab <= - Wr1_jn t_inab
-        #  kj - kn = kshift
-        kn = kconserv_r1[kj]
-        Hr2[ki, kj, ka] -= einsum('jn,inab->ijab', wr1_oo[kj], imds.t2[ki, kn, ka])
-        # r_ijab <= Wr1_fa t_jibf
-        #  kj + ki - kb - kf = G
-        kf = kconserv[kj, kb, ki]
-        Hr2[ki, kj, ka] += einsum('fa,jibf->ijab', wr1_vv[kf], imds.t2[kj, ki, kb])
-        # r_ijab <= Wr1_fb t_ijaf
-        #  ki + kj - ka - kf = G
-        kf = kconserv[ki, ka, kj]
-        Hr2[ki, kj, ka] += einsum('fb,ijaf->ijab', wr1_vv[kf], imds.t2[ki, kj, ka])
 
     vector = amplitudes_to_vector_singlet(Hr1, Hr2, kconserv_r2)
     log.timer("matvec EOMEE Singlet", *cput0)
