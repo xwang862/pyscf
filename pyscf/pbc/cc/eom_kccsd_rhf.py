@@ -841,6 +841,9 @@ def eomee_ccsd_singlet(eom, nroots=1, koopmans=False, guess=None, left=False,
                        eris=None, imds=None, diag=None, partition=None,
                        kptlist=None, dtype=None):
     '''See `eom_kgccsd.kernel()` for a description of arguments.'''
+    if partition:
+        eom.partition = partition.lower()
+        assert eom.partition in ['mp', 'full']
     eom.converged, eom.e, eom.v  \
             = eom_kgccsd.kernel_ee(eom, nroots, koopmans, guess, left, eris=eris,
                                    imds=imds, diag=diag, partition=partition,
@@ -848,7 +851,7 @@ def eomee_ccsd_singlet(eom, nroots=1, koopmans=False, guess=None, left=False,
     return eom.e, eom.v
 
 
-def optical_absorption_singlet_approx1(eom, scan, eta, kshift=0, tol=1e-5, maxiter=500, imds=None, x0=None, **kwargs):
+def optical_absorption_singlet_approx1(eom, scan, eta, kshift=0, tol=1e-5, maxiter=500, imds=None, x0=None, partition=None, **kwargs):
     """ Compute approximate spectra assuming:
             lambda = 0, \bar{\mu} = \mu
 
@@ -868,6 +871,10 @@ def optical_absorption_singlet_approx1(eom, scan, eta, kshift=0, tol=1e-5, maxit
     log = logger.Logger(eom.stdout, eom.verbose)
 
     if imds is None: imds = eom.make_imds()
+
+    if partition:
+        eom.partition = partition.lower()
+        assert eom.partition in ['mp','full']
 
     kpts = eom.kpts
     nkpts = eom.nkpts
@@ -939,7 +946,7 @@ def optical_absorption_singlet_approx1(eom, scan, eta, kshift=0, tol=1e-5, maxit
     return -1./np.pi*spectrum.imag, x0
 
 
-def optical_absorption_singlet_approx2(eom, scan, eta, kshift=0, tol=1e-5, maxiter=500, imds=None, x0=None, **kwargs):
+def optical_absorption_singlet_approx2(eom, scan, eta, kshift=0, tol=1e-5, maxiter=500, imds=None, x0=None, partition=None, **kwargs):
     """Compute approximate spectra assuming:
             lambda = 0
 
@@ -956,6 +963,10 @@ def optical_absorption_singlet_approx2(eom, scan, eta, kshift=0, tol=1e-5, maxit
     log = logger.Logger(eom.stdout, eom.verbose)
 
     if imds is None: imds = eom.make_imds()
+
+    if partition:
+        eom.partition = partition.lower()
+        assert eom.partition in ['mp','full']
 
     kpts = eom.kpts
     nkpts = eom.nkpts
@@ -1030,7 +1041,7 @@ def optical_absorption_singlet_approx2(eom, scan, eta, kshift=0, tol=1e-5, maxit
     return -1./np.pi*spectrum.imag, x0
 
 
-def optical_absorption_singlet(eom, scan, eta, kshift=0, tol=1e-5, maxiter=500, eris=None, imds=None, x0=None, **kwargs):
+def optical_absorption_singlet(eom, scan, eta, kshift=0, tol=1e-5, maxiter=500, eris=None, imds=None, x0=None, partition=None, **kwargs):
     """Compute full CCSD spectra.
 
     Args:
@@ -1050,6 +1061,10 @@ def optical_absorption_singlet(eom, scan, eta, kshift=0, tol=1e-5, maxiter=500, 
     if getattr(eom._cc, "l1", None) is None or getattr(eom._cc, "l2", None) is None:
         print("Missing lambdas. Computing them now...")
         eom._cc.solve_lambda(eris=eris, imds=imds)
+
+    if partition:
+        eom.partition = partition.lower()
+        assert eom.partition in ['mp','full']
 
     kpts = eom.kpts
     nkpts = eom.nkpts
