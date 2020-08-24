@@ -30,7 +30,7 @@ from pyscf.pbc.cc.kccsd_rhf import _get_epq
 from pyscf.pbc.cc.kccsd_t_rhf import _get_epqr
 from pyscf.pbc.lib import kpts_helper
 from pyscf.pbc.mp.kmp2 import (get_frozen_mask, get_nocc, get_nmo,
-                               padded_mo_coeff, padding_k_idx)  # noqa
+                               padded_mo_coeff, padded_mo_energy, padding_k_idx)  # noqa
 
 einsum = lib.einsum
 
@@ -883,8 +883,7 @@ def optical_absorption_singlet_approx1(eom, scan, eta, kshift=0, tol=1e-5, maxit
     nvir = nmo - nocc
     kconserv2 = eom.get_kconserv_ee_r2(kshift)
 
-    _scf = eom._cc._scf
-    dipole = get_dipole_mo(_scf, "occ", "vir")
+    dipole = get_dipole_mo(eom, "occ", "vir")
     
     # solve linear equations A.x = b
     ieta = 1j*eta
@@ -901,7 +900,7 @@ def optical_absorption_singlet_approx1(eom, scan, eta, kshift=0, tol=1e-5, maxit
     b_vector = np.asarray(b_vector)
     b_size = b_vector.shape[1]
     # get the \phi_0 component of b vector
-    b0 = einsum('xkpp->x', get_dipole_mo(_scf, "all", "all"))
+    b0 = einsum('xkpp->x', get_dipole_mo(eom, "all", "all"))
     if any(abs(b0) > 1e-6):
         logger.warn(eom, 'Large b0 detected! b0 (x,y,z) = {}). Consider adding b0.conj() * x0 contribution to spectra'.format(b0))
 
@@ -982,7 +981,7 @@ def optical_absorption_singlet_approx2(eom, scan, eta, kshift=0, tol=1e-5, maxit
     # dipole[:,:,:nocc,nocc:] = dipole_ov
     # dipole[:,:,nocc:,:nocc] = dipole_ov.transpose(0,1,3,2).conj()
 
-    dipole = get_dipole_mo(eom._cc._scf, "all", "all")
+    dipole = get_dipole_mo(eom, "all", "all")
 
     # b = <\Phi_{\alpha} | \bar{\dipole} | \Phi_0>
     # b is needed to solve a.x=b linear equations
@@ -1073,7 +1072,7 @@ def optical_absorption_singlet(eom, scan, eta, kshift=0, tol=1e-5, maxiter=500, 
     nvir = nmo - nocc
     kconserv2 = eom.get_kconserv_ee_r2(kshift)
 
-    dipole = get_dipole_mo(eom._cc._scf, "all", "all")
+    dipole = get_dipole_mo(eom, "all", "all")
 
     # b = <\Phi_{\alpha} | \bar{\dipole} | \Phi_0>
     # b is needed to solve a.x=b linear equations
@@ -1135,13 +1134,13 @@ def optical_absorption_singlet(eom, scan, eta, kshift=0, tol=1e-5, maxiter=500, 
     return -1./np.pi*spectrum.imag, x0
      
 
-def get_dipole_mo(scf, pblock="occ", qblock="vir"):
+def get_dipole_mo(eom, pblock="occ", qblock="vir"):
     """[summary]
 
     TODO add kshift argument.
 
     Args:
-        scf ([type]): [description]
+        eom ([type]): [description]
         pblock (str, optional): 'occ', 'vir', 'all'. Defaults to "occ".
         qblock (str, optional): 'occ', 'vir', 'all'. Defaults to "vir".
 
@@ -1150,12 +1149,12 @@ def get_dipole_mo(scf, pblock="occ", qblock="vir"):
     """
     # TODO figure out why 'cint1e_ipovlp_cart' causes shape mismatch for `ip_ao` and `mo_coeff` when basis='gth-dzvp'. 
     # Meanwhile, let's use 'cint1e_ipovlp_sph' or 'int1e_ipovlp' because they seems to be fine.
-    kpts = scf.kpts
+    kpts = eom.kpts
     nkpts = len(kpts)
-    nelectron = scf.cell.atom_charges().sum() - scf.cell.charge
-    nocc = nelectron // 2
-    nmo = len(scf.mo_energy[0])
+    nocc = eom.nocc
+    nmo = eom.nmo
     dtype = np.complex
+    scf = eom._cc._scf
 
     # int1e_ipovlp gives overlap gradients, i.e. d/dr
     # To get momentum operator, use (-i) * int1e_ipovlp
@@ -1163,12 +1162,14 @@ def get_dipole_mo(scf, pblock="occ", qblock="vir"):
     ip_ao = np.asarray(ip_ao, dtype=dtype).transpose(1,0,2,3)  # with shape (naxis, nkpts, nmo, nmo)
     ip_ao *= -1j
 
+    # padding mo_coeff and mo_energy
+    mo_coeff = padded_mo_coeff(eom._cc, scf.mo_coeff)
+    mo_energy = padded_mo_energy(eom._cc, scf.mo_energy)
     # for x in range(3):
     #     for k in range(nkpts):
     #         print(f"\naxis:{x}, kpt:{k}, dipole AO diagonals:{ip_ao[x,k].diagonal()}")
 
     # I.p matrix in MO basis (only the occ-vir block) 
-    mo_coeff = np.asarray(scf.mo_coeff, dtype=dtype)
     def get_range(key):
         if key in ["occ", "all"]:
             start = 0
@@ -1184,13 +1185,12 @@ def get_dipole_mo(scf, pblock="occ", qblock="vir"):
 
     ip_mo = np.empty((3, nkpts, plen, qlen), dtype=mo_coeff[0].dtype)
     for k in range(nkpts):
-        pmo = mo_coeff[k, :, pstart:pend]
-        qmo = mo_coeff[k, :, qstart:qend]
+        pmo = mo_coeff[k][:, pstart:pend]
+        qmo = mo_coeff[k][:, qstart:qend]
         for x in range(3):
             ip_mo[x, k] = reduce(np.dot, (pmo.T.conj(), ip_ao[x, k], qmo))
 
     # eia = \epsilon_a - \epsilon_i
-    mo_energy = scf.mo_energy
     p_mo_e = [mo_energy[k][pstart:pend] for k in range(nkpts)]
     q_mo_e = [mo_energy[k][qstart:qend] for k in range(nkpts)]
 
