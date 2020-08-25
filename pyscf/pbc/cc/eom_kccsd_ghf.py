@@ -1824,10 +1824,14 @@ class EOMEE(eom_rccsd.EOM):
         nkpts = kpts.shape[0]
         a = cell.lattice_vectors() / (2 * np.pi)
 
+        # Since kshift must be chosen as the difference between kpts,
+        # we should shift the origin back to Gamma
+        shifts = np.asarray([kv - kpts[0] for kv in kpts])
+
         kconserv_r2 = np.zeros((nkpts, nkpts, nkpts), dtype=int)
         kvKLM = kpts[:, None, None, :] - kpts[:, None, :] + kpts
         # Apply k shift
-        kvKLM = kvKLM - kpts[kshift]
+        kvKLM = kvKLM - shifts[kshift]
         for N, kvN in enumerate(kpts):
             kvKLMN = np.einsum('wx,klmx->wklm', a, kvKLM - kvN)
             # check whether (1/(2pi) k_{KLMN} dot a) is an integer
