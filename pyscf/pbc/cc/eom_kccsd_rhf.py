@@ -1084,7 +1084,7 @@ def optical_absorption_singlet(eom, scan, eta, kshift=0, tol=1e-5, maxiter=500, 
         logger.warn(eom, 'Large b0 detected! b0 (x,y,z) = {}). Consider adding b0.conj() * x0 contribution to spectra'.format(b0))
 
     # e = <\Phi_0 | (1+\Lambda) \bar{\dipole^{\dagger}} | \Phi_{\alpha}>
-    e0, e_vector = get_effective_dipole_right(eom, dipole, kshift)
+    e0, e_vector = get_effective_dipole_right(eom, dipole, kshift, ov_oovv=b_vector)
 
     # solve linear equations A.x = b
     ieta = 1j*eta
@@ -1254,6 +1254,7 @@ def get_effective_dipole_left(eom, dipole, kshift=0):
 
     for ki in range(nkpts):
         # ki - ka = kshift
+        # TODO confirm if (ki - ka) equals kshift or -kshift
         ka = kconserv1[ki]
         # mu_ia <- - d_mi t_ma
         #  km = ka
@@ -1266,6 +1267,20 @@ def get_effective_dipole_left(eom, dipole, kshift=0):
             mu1[:,ki] -= einsum('xme,miae->xia', dov[:,km], t2[km,ki,ka])
             # mu_ia <- - d_me t_ie t_ma
             mu1[:,ki] -= einsum('xme,ie,ma->xia', dov[:,km], t1[ki], t1[km])
+
+    # Build imds to avoid Nk^4 step
+    imd_oo = np.zeros_like(doo)
+    imd_vv = np.zeros_like(dvv)
+    for km in range(nkpts):
+        # M_mi = d_me t_ie
+        #  km - ke = kshift, and ki - ke = 0
+        #  => km - ki = kshift
+        ki = kconserv1[km]
+        imd_oo[:, km] += einsum('xme,ie->xmi', dov[:,km], t1[ki])
+        # M_eb = d_me t_mb
+        #  km - ke = kshift
+        ke = kconserv1[km]
+        imd_vv[:, ke] += einsum('xme,mb->xeb', dov[:,km], t1[km])
 
     for ki, kj, ka in kpts_helper.loop_kkk(nkpts):
         # ki + kj - ka - kb = kshift
@@ -1283,17 +1298,30 @@ def get_effective_dipole_left(eom, dipole, kshift=0):
         mu2[:,ki,kj,ka] += einsum('xbe,ijae->xijab', dvv[:,kb], t2[ki,kj,ka])
         # mu_ijab <- d_ae t_jibe
         mu2[:,ki,kj,ka] += einsum('xae,jibe->xijab', dvv[:,ka], t2[kj,ki,kb])
-        for km in range(nkpts):
-            # km - ke = kshift
-            ke = kconserv1[km]
-            # mu_ijab <- - d_me t_ie t_mjab
-            mu2[:,ki,kj,ka] -= einsum('xme,ie,mjab->xijab', dov[:,km], t1[ki], t2[km,kj,ka])
-            # mu_ijab <- - d_me t_je t_miba
-            mu2[:,ki,kj,ka] -= einsum('xme,je,miba->xijab', dov[:,km], t1[kj], t2[km,ki,kb])
-            # mu_ijab <- - d_me t_mb t_jiea
-            mu2[:,ki,kj,ka] -= einsum('xme,mb,jiea->xijab', dov[:,km], t1[km], t2[kj,ki,ke])
-            # mu_ijab <- - d_me t_ma t_ijeb
-            mu2[:,ki,kj,ka] -= einsum('xme,ma,ijeb->xijab', dov[:,km], t1[km], t2[ki,kj,ke])
+        
+        # mu_ijab <- - d_me t_ie t_mjab
+        #          = - M_mi t_mjab
+        #  km - ki = kshift
+        km = kconserv1[ki]
+        mu2[:,ki,kj,ka] -= einsum('xmi,mjab->xijab', imd_oo[:,km], t2[km,kj,ka])
+
+        # mu_ijab <- - d_me t_je t_miba
+        #          = - M_mj t_miba
+        #  km - kj = kshift
+        km = kconserv1[kj]
+        mu2[:,ki,kj,ka] -= einsum('xmj,miba->xijab', imd_oo[:,km], t2[km,ki,kb])
+
+        # mu_ijab <- - d_me t_mb t_jiea
+        #          = - M_eb t_jiea
+        #  ke - kb = kshift
+        ke = kconserv1[kb]
+        mu2[:,ki,kj,ka] -= einsum('xeb,jiea->xijab', imd_vv[:,ke], t2[kj,ki,ke])
+
+        # mu_ijab <- - d_me t_ma t_ijeb
+        #          = - M_ea t_ijeb
+        #  ke - ka = kshift
+        ke = kconserv1[ka]
+        mu2[:,ki,kj,ka] -= einsum('xea,ijeb->xijab', imd_vv[:,ke], t2[ki,kj,ke])
 
     result = []
     for x in range(3):
@@ -1305,7 +1333,7 @@ def get_effective_dipole_left(eom, dipole, kshift=0):
     return mu0, np.asarray(result)
 
 
-def get_effective_onebody(eom, onebody, kshift=0):
+def get_effective_onebody(eom, onebody, kshift=0, ov_oovv=None):
     cput0 = (time.clock(), time.time())
     log = logger.Logger(eom.stdout, eom.verbose)
 
@@ -1336,7 +1364,8 @@ def get_effective_onebody(eom, onebody, kshift=0):
     # Dvo and Dvvoo
     Dvo = np.zeros((3, nkpts, nvir, nocc), dtype=dtype)
     Dvvoo = np.zeros((3, nkpts, nkpts, nkpts, nvir, nvir, nocc, nocc), dtype=dtype)
-    _, ov_oovv = get_effective_dipole_left(eom, onebody, kshift)
+    if ov_oovv is None:
+        ov_oovv = get_effective_dipole_left(eom, onebody, kshift)[1]
     
     Dov_tmp = np.zeros((3, nkpts, nocc, nvir), dtype=dtype)
     Doovv_tmp = np.zeros((3, nkpts, nkpts, nkpts, nocc, nocc, nvir, nvir), dtype=dtype)
@@ -1401,7 +1430,7 @@ def get_effective_onebody(eom, onebody, kshift=0):
     return Doo, Dvv, Dov, Dvo, Dvvvo, Dovoo, Dvvoo
 
 
-def get_effective_dipole_right(eom, dipole, kshift=0):
+def get_effective_dipole_right(eom, dipole, kshift=0, ov_oovv=None):
     cput0 = (time.clock(), time.time())
     log = logger.Logger(eom.stdout, eom.verbose)
 
@@ -1429,7 +1458,7 @@ def get_effective_dipole_right(eom, dipole, kshift=0):
 
     t1 = eom._cc.t1
     l1, l2 = eom._cc.l1, eom._cc.l2
-    Doo, Dvv, Dov, Dvo, Dvvvo, Dovoo, Dvvoo = get_effective_onebody(eom, d_adj, kshift)
+    Doo, Dvv, Dov, Dvo, Dvvvo, Dovoo, Dvvoo = get_effective_onebody(eom, d_adj, kshift, ov_oovv=ov_oovv)
 
     mu0 = np.zeros(3, dtype=dtype)
     mu1 = np.zeros((3, *(l1.shape)), dtype=dtype)
