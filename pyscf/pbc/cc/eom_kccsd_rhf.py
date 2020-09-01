@@ -914,14 +914,14 @@ def optical_absorption_singlet_approx1(eom, scan, eta, kshift=0, tol=1e-5, maxit
 
     for i, omega in enumerate(omega_list):
         matvec = lambda vec: eeccsd_matvec_singlet(eom, vec, kshift, imds=imds) * (-1.) + (omega + ieta) * vec
-        A = scipy.sparse.linalg.LinearOperator((b_size, b_size), matvec=matvec, dtype=np.complex)        
+        A = scipy.sparse.linalg.LinearOperator((b_size, b_size), matvec=matvec, dtype=diag.dtype)        
 
         # preconditioner
         # P should be close to A, but easy to solve. We choose P = H diags shifted by omega + ieta. 
         P = scipy.sparse.diags(diag * (-1.) + omega + ieta, format='csc', dtype=diag.dtype)
         # M is the inverse of P.
         M_x = lambda x: scipy.sparse.linalg.spsolve(P, x)
-        M = scipy.sparse.linalg.LinearOperator((b_size, b_size), M_x)        
+        M = scipy.sparse.linalg.LinearOperator((b_size, b_size), M_x, dtype=diag.dtype)        
 
         for x in range(3):
 
@@ -1007,14 +1007,14 @@ def optical_absorption_singlet_approx2(eom, scan, eta, kshift=0, tol=1e-5, maxit
 
     for i, omega in enumerate(omega_list):
         matvec = lambda vec: eeccsd_matvec_singlet(eom, vec, kshift, imds=imds) * (-1.) + (omega + ieta) * vec
-        A = scipy.sparse.linalg.LinearOperator((b_size, b_size), matvec=matvec, dtype=np.complex)        
+        A = scipy.sparse.linalg.LinearOperator((b_size, b_size), matvec=matvec, dtype=diag.dtype)        
 
         # preconditioner
         # P should be close to A, but easy to solve. We choose P = H diags shifted by omega + ieta. 
         P = scipy.sparse.diags(diag * (-1.) + omega + ieta, format='csc', dtype=diag.dtype)
         # M is the inverse of P.
         M_x = lambda x: scipy.sparse.linalg.spsolve(P, x)
-        M = scipy.sparse.linalg.LinearOperator((b_size, b_size), M_x)        
+        M = scipy.sparse.linalg.LinearOperator((b_size, b_size), M_x, dtype=diag.dtype)        
 
         for x in range(3):
 
@@ -1101,14 +1101,14 @@ def optical_absorption_singlet(eom, scan, eta, kshift=0, tol=1e-5, maxiter=500, 
 
     for i, omega in enumerate(omega_list):
         matvec = lambda vec: eeccsd_matvec_singlet(eom, vec, kshift, imds=imds) * (-1.) + (omega + ieta) * vec
-        A = scipy.sparse.linalg.LinearOperator((b_size, b_size), matvec=matvec, dtype=np.complex)        
+        A = scipy.sparse.linalg.LinearOperator((b_size, b_size), matvec=matvec, dtype=diag.dtype)        
 
         # preconditioner
         # P should be close to A, but easy to solve. We choose P = H diags shifted by omega + ieta. 
         P = scipy.sparse.diags(diag * (-1.) + omega + ieta, format='csc', dtype=diag.dtype)
         # M is the inverse of P.
         M_x = lambda x: scipy.sparse.linalg.spsolve(P, x)
-        M = scipy.sparse.linalg.LinearOperator((b_size, b_size), M_x)        
+        M = scipy.sparse.linalg.LinearOperator((b_size, b_size), M_x, dtype=diag.dtype)        
 
         for x in range(3):
 
