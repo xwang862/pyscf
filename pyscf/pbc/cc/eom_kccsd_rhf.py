@@ -917,11 +917,9 @@ def optical_absorption_singlet_approx1(eom, scan, eta, kshift=0, tol=1e-5, maxit
         A = scipy.sparse.linalg.LinearOperator((b_size, b_size), matvec=matvec, dtype=diag.dtype)        
 
         # preconditioner
-        # P should be close to A, but easy to solve. We choose P = H diags shifted by omega + ieta. 
-        P = scipy.sparse.diags(diag * (-1.) + omega + ieta, format='csc', dtype=diag.dtype)
-        # M is the inverse of P.
-        M_x = lambda x: scipy.sparse.linalg.spsolve(P, x)
-        M = scipy.sparse.linalg.LinearOperator((b_size, b_size), M_x, dtype=diag.dtype)        
+        # M is the inverse of P, where P should be close to A, but easy to solve. 
+        # We choose P = H_diags shifted by omega + ieta.
+        M = scipy.sparse.diags(np.reciprocal(diag * (-1.) + omega + ieta), format='csc', dtype=diag.dtype)
 
         for x in range(3):
 
@@ -1010,11 +1008,9 @@ def optical_absorption_singlet_approx2(eom, scan, eta, kshift=0, tol=1e-5, maxit
         A = scipy.sparse.linalg.LinearOperator((b_size, b_size), matvec=matvec, dtype=diag.dtype)        
 
         # preconditioner
-        # P should be close to A, but easy to solve. We choose P = H diags shifted by omega + ieta. 
-        P = scipy.sparse.diags(diag * (-1.) + omega + ieta, format='csc', dtype=diag.dtype)
-        # M is the inverse of P.
-        M_x = lambda x: scipy.sparse.linalg.spsolve(P, x)
-        M = scipy.sparse.linalg.LinearOperator((b_size, b_size), M_x, dtype=diag.dtype)        
+        # M is the inverse of P, where P should be close to A, but easy to solve. 
+        # We choose P = H_diags shifted by omega + ieta.
+        M = scipy.sparse.diags(np.reciprocal(diag * (-1.) + omega + ieta), format='csc', dtype=diag.dtype)
 
         for x in range(3):
 
@@ -1104,11 +1100,9 @@ def optical_absorption_singlet(eom, scan, eta, kshift=0, tol=1e-5, maxiter=500, 
         A = scipy.sparse.linalg.LinearOperator((b_size, b_size), matvec=matvec, dtype=diag.dtype)        
 
         # preconditioner
-        # P should be close to A, but easy to solve. We choose P = H diags shifted by omega + ieta. 
-        P = scipy.sparse.diags(diag * (-1.) + omega + ieta, format='csc', dtype=diag.dtype)
-        # M is the inverse of P.
-        M_x = lambda x: scipy.sparse.linalg.spsolve(P, x)
-        M = scipy.sparse.linalg.LinearOperator((b_size, b_size), M_x, dtype=diag.dtype)        
+        # M is the inverse of P, where P should be close to A, but easy to solve. 
+        # We choose P = H_diags shifted by omega + ieta.
+        M = scipy.sparse.diags(np.reciprocal(diag * (-1.) + omega + ieta), format='csc', dtype=diag.dtype)
 
         for x in range(3):
 
