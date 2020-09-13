@@ -2412,11 +2412,28 @@ class _IMDS:
         logger.timer_debug1(self, 'EOM-CCSD(T)a IP/EA intermediates', *cput0)
         return self
 
-    def make_ee(self, ee_partition=None):
+    def make_ee(self, ee_partition=None, part=None):
+        required_parts = ["shared", "ip", "ea"]
+        if part is None:
+            part = required_parts
+        else:
+            if not (isinstance(part, (list, tuple)) and np.all([key in required_parts for key in part])):
+                raise ValueError("kwarg `part` can only be list/tuple of 'shared', 'ip', 'ea'")
+            print(f"\nComputing following parts: {part}")
+
         self._make_shared_1e()
-        if self._made_shared_2e is False:
-            self._make_shared_2e()
-            self._made_shared_2e = True
+        # Rename imds to match the notations in pyscf.cc.eom_rccsd
+        self.Foo = self.Loo
+        self.Fvv = self.Lvv
+
+        if "shared" in part:
+            if self._made_shared_2e is False:
+                self._make_shared_2e()
+                self._made_shared_2e = True
+            # Rename imds to match the notations in pyscf.cc.eom_rccsd
+            self.woOvV = self.Woovv
+            self.woVvO = self.Wovvo
+            self.woVoV = self.Wovov
 
         cput0 = (time.clock(), time.time())
         log = logger.Logger(self.stdout, self.verbose)
@@ -2424,34 +2441,30 @@ class _IMDS:
         t1, t2, eris = self.t1, self.t2, self.eris
         kconserv = self.kconserv
 
-        # Rename imds to match the notations in pyscf.cc.eom_rccsd
-        self.Foo = self.Loo
-        self.Fvv = self.Lvv
-        self.woOvV = self.Woovv
-        self.woVvO = self.Wovvo
-        self.woVoV = self.Wovov
+        if "ip" in part:
+            if not self.made_ip_imds:
+                # 0 or 1 virtuals
+                self.woOoO = imd.Woooo(t1, t2, eris, kconserv)
+                self.woOoV = imd.Wooov(t1, t2, eris, kconserv)
+                self.woVoO = imd.Wovoo(t1, t2, eris, kconserv)
+            else:
+                self.woOoO = self.Woooo
+                self.woOoV = self.Wooov
+                self.woVoO = self.Wovoo
 
-        if not self.made_ip_imds:
-            # 0 or 1 virtuals
-            self.woOoO = imd.Woooo(t1, t2, eris, kconserv)
-            self.woOoV = imd.Wooov(t1, t2, eris, kconserv)
-            self.woVoO = imd.Wovoo(t1, t2, eris, kconserv)
-        else:
-            self.woOoO = self.Woooo
-            self.woOoV = self.Wooov
-            self.woVoO = self.Wovoo
+        if "ea" in part:
+            if not self.made_ea_imds:
+                # 3 or 4 virtuals
+                self.wvOvV = imd.Wvovv(t1, t2, eris, kconserv)
+                self.wvVvV = imd.Wvvvv(t1, t2, eris, kconserv)
+                self.wvVvO = imd.Wvvvo(t1, t2, eris, kconserv, self.wvVvV)
+            else:
+                self.wvOvV = self.Wvovv
+                self.wvVvV = self.Wvvvv
+                self.wvVvO = self.Wvvvo
 
-        if not self.made_ea_imds:
-            # 3 or 4 virtuals
-            self.wvOvV = imd.Wvovv(t1, t2, eris, kconserv)
-            self.wvVvV = imd.Wvvvv(t1, t2, eris, kconserv)
-            self.wvVvO = imd.Wvvvo(t1, t2, eris, kconserv, self.wvVvV)
-        else:
-            self.wvOvV = self.Wvovv
-            self.wvVvV = self.Wvvvv
-            self.wvVvO = self.Wvvvo
-
-        self.made_ee_imds = True
+        if part == required_parts:
+            self.made_ee_imds = True
         log.timer('EOM-CCSD EE intermediates', *cput0)
 
     def get_Wvvvv(self, ka, kb, kc):

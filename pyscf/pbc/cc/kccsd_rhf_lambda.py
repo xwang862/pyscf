@@ -40,11 +40,11 @@ def kernel(cc, eris=None, t1=None, t2=None, l1=None, l2=None, imds=None, max_cyc
 
     return ccsd_lambda.kernel(cc, eris, t1, t2, l1, l2, max_cycle=max_cycle, tol=tol, verbose=verbose, fintermediates=imds, fupdate=update_lambda)
 
-def make_intermediates(cc, t1=None, t2=None, eris=None):
+def make_intermediates(cc, t1=None, t2=None, eris=None, part=None):
     from pyscf.pbc.cc.eom_kccsd_rhf import _IMDS
     if eris is None: eris = cc.ao2mo(cc.mo_coeff)
     imds = _IMDS(cc, eris)
-    imds.make_ee()
+    imds.make_ee(part=part)
     return imds
 
 def update_lambda(cc, t1, t2, l1, l2, eris, imds):
