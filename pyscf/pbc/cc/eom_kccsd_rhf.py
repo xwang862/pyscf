@@ -1106,7 +1106,7 @@ def optical_absorption_singlet(eom, scan, eta, kshift=0, tol=1e-5, maxiter=500, 
 
         for x in range(3):
 
-            sol, info = LinearSolver(A, b_vector[x], x0=x0[x], tol=tol, maxiter=maxiter, M=M, callback=counter)
+            sol, info = LinearSolver(A, b_vector[x], x0=x0[x], tol=tol, maxiter=maxiter, M=M, callback=counter, **kwargs)
             if info == 0:
                 print('Frequency', np.round(omega,3), 'converged in', counter.niter, 'iterations')
             else:
