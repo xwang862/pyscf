@@ -1993,9 +1993,15 @@ def eeccsd_diag(eom, kshift=0, imds=None):
         Hr1[ki] -= np.einsum('iaia->ia', imds.woVoV[ki, ka, ki])
 
     Hr2 = np.zeros((nkpts, nkpts, nkpts, nocc, nocc, nvir, nvir), dtype=t1.dtype)
-    # TODO Allow partition='mp'
     if eom.partition == "mp":
-        raise NotImplementedError
+        foo = imds.eris.fock[:, :nocc, :nocc]
+        fvv = imds.eris.fock[:, nocc:, nocc:]
+        for ki, kj, ka in kpts_helper.loop_kkk(nkpts):
+            kb = kconserv_r2[ki, ka, kj]
+            Hr2[ki, kj, ka] -= foo[ki].diagonal()[:, None, None, None]
+            Hr2[ki, kj, ka] -= foo[kj].diagonal()[None, :, None, None]
+            Hr2[ki, kj, ka] += fvv[ka].diagonal()[None, None, :, None]
+            Hr2[ki, kj, ka] += fvv[kb].diagonal()[None, None, None, :]
     else:
         for ki, kj, ka in kpts_helper.loop_kkk(nkpts):
             kb = kconserv_r2[ki, ka, kj]
