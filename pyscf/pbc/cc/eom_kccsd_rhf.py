@@ -1152,7 +1152,22 @@ def eeccsd_matvec_singlet(eom, vector, kshift, imds=None, diag=None):
 
     # 2h2p-2h2p block
     if eom.partition == 'mp':
-        raise NotImplementedError
+        fock = imds.eris.fock
+        foo = fock[:, :nocc, :nocc]
+        fvv = fock[:, nocc:, nocc:]
+        for ki, kj, ka in kpts_helper.loop_kkk(nkpts):
+            # ki + kj - ka - kb = kshift
+            kb = kconserv_r2[ki, ka, kj]
+            # r_ijab <= - f_mj r_imab
+            #  km = kj
+            Hr2[ki, kj, ka] -= einsum('mj,imab->ijab', foo[kj], r2[ki, kj, ka])
+            # r_ijab <= - f_mi r_jmba
+            #  km = ki
+            Hr2[ki, kj, ka] -= einsum('mi,jmba->ijab', foo[ki], r2[kj, ki, kb])
+            # r_ijab <= f_be r_ijae
+            Hr2[ki, kj, ka] += einsum('be,ijae->ijab', fvv[kb], r2[ki, kj, ka])
+            # r_ijab <= f_ae r_jibe
+            Hr2[ki, kj, ka] += einsum('ae,jibe->ijab', fvv[ka], r2[kj, ki, kb])        
     elif eom.partition == 'full':
         if diag is None:
             diag = eom.get_diag(kshift, imds)
