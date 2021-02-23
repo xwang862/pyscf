@@ -1485,7 +1485,8 @@ class EOMEE(eom_kgccsd.EOMEE):
 
     def make_imds(self, eris=None):
         imds = _IMDS(self._cc, eris)
-        imds.make_ee()
+        partition = getattr(self, 'partition', None)
+        imds.make_ee(partition)
         return imds
 
 
