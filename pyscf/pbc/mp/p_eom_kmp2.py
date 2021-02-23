@@ -25,6 +25,7 @@ from pyscf import lib
 from pyscf.lib import logger
 from pyscf.pbc.cc import eom_kccsd_rhf as eom_krccsd
 from pyscf.pbc.cc import eom_kccsd_ghf as eom_kgccsd
+from pyscf.pbc.cc import kintermediates_rhf as imd
 
 from pyscf.pbc.mp.kmp2 import (get_frozen_mask, get_nocc, get_nmo,
                                padded_mo_coeff, padding_k_idx)  # noqa
@@ -68,6 +69,11 @@ class PEOMMP2EESinglet(eom_krccsd.EOMEESinglet):
 
     def ao2mo(self, mo_coeff=None):
         return _ERIS(self, mo_coeff)
+
+    def make_imds(self, eris=None):
+        imds = _IMDS(self, eris)
+        imds.make_ee()
+        return imds
 
 
 #######################################
@@ -296,3 +302,22 @@ class _ERIS:
             # cput1 = log.timer_debug1('transforming vvvv', *cput1)
 
         log.timer('P-EOM-MP2 integral transformation', *cput0)
+
+
+class _IMDS(eom_krccsd._IMDS):
+    def __init__(self, mp, eris=None):
+        nkpts, nocc, nvir = (mp.t2.shape[x] for x in (0, 3, 5))
+        dtype = mp.t2.dtype
+        mp.t1 = np.zeros((nkpts, nocc, nvir), dtype=dtype)
+        eom_krccsd._IMDS.__init__(mp, eris)
+
+    def make_ip(self, ip_partition='mp'):
+        eom_krccsd._IMDS.make_ip(ip_partition)
+
+    def make_ea(self, ea_partition='mp'):
+        eom_krccsd._IMDS.make_ea(ea_partition)
+
+    def make_ee(self, ee_partition='mp'):
+        eom_krccsd._IMDS.make_ee(ee_partition)
+
+
