@@ -33,13 +33,13 @@ from pyscf.pbc.mp.kmp2 import (get_frozen_mask, get_nocc, get_nmo,
 einsum = lib.einsum
 
 def ee_matvec_singlet(eom, nroots=1, koopmans=False, guess=None, left=False,
-                      eris=None, imds=None, diag=None, partition='mp',
+                      eris=None, imds=None, diag=None,
                       kptlist=None, dtype=None):
     """See `eom_kgccsd.kernel()` for a description of arguments. 
     """
     eom.converged, eom.e, eom.v  \
             = eom_kgccsd.kernel_ee(eom, nroots, koopmans, guess, left, eris=eris,
-                                   imds=imds, diag=diag, partition=partition,
+                                   imds=imds, diag=diag, partition=eom.partition,
                                    kptlist=kptlist, dtype=dtype)
     return eom.e, eom.v
 
@@ -63,6 +63,7 @@ class PEOMMP2EESinglet(eom_krccsd.EOMEESinglet):
     Ref: Joshua J. Goings, Marco Caricato, Michael J. Frisch, and Xiaosong Li, J. Chem. Phys. 141, 164116 (2014)
     """
     def __init__(self, mp):
+        self.partition = 'mp'
         eom_krccsd.EOMEESinglet.__init__(self, mp)
 
     matvec = ee_matvec_singlet
