@@ -839,6 +839,9 @@ def eomee_ccsd_singlet(eom, nroots=1, koopmans=False, guess=None, left=False,
                        eris=None, imds=None, diag=None, partition=None,
                        kptlist=None, dtype=None):
     '''See `eom_kgccsd.kernel()` for a description of arguments.'''
+    if partition:
+        eom.partition = partition.lower()
+        assert eom.partition in ['mp', 'full']
     eom.converged, eom.e, eom.v  \
             = eom_kgccsd.kernel_ee(eom, nroots, koopmans, guess, left, eris=eris,
                                    imds=imds, diag=diag, partition=partition,
