@@ -1751,22 +1751,28 @@ class _IMDS:
 
         if not self.made_ip_imds:
             # 0 or 1 virtuals
-            self.woOoO = imd.Woooo(t1, t2, eris, kconserv)
+            if ee_partition != 'mp':
+                self.woOoO = imd.Woooo(t1, t2, eris, kconserv)
             self.woOoV = imd.Wooov(t1, t2, eris, kconserv)
             self.woVoO = imd.Wovoo(t1, t2, eris, kconserv)
         else:
-            self.woOoO = self.Woooo
+            if ee_partition != 'mp':
+                self.woOoO = self.Woooo
             self.woOoV = self.Wooov
             self.woVoO = self.Wovoo
 
         if not self.made_ea_imds:
             # 3 or 4 virtuals
             self.wvOvV = imd.Wvovv(t1, t2, eris, kconserv)
-            self.wvVvV = imd.Wvvvv(t1, t2, eris, kconserv)
+            if ee_partition != 'mp':
+                self.wvVvV = imd.Wvvvv(t1, t2, eris, kconserv)
+            else:
+                self.wvVvV = None
             self.wvVvO = imd.Wvvvo(t1, t2, eris, kconserv, self.wvVvV)
         else:
             self.wvOvV = self.Wvovv
-            self.wvVvV = self.Wvvvv
+            if ee_partition != 'mp':            
+                self.wvVvV = self.Wvvvv
             self.wvVvO = self.Wvvvo
 
         self.made_ee_imds = True
