@@ -50,6 +50,7 @@ def kernel(mp, mo_energy, mo_coeff, verbose=logger.NOTE, with_t2=WITH_T2):
     nocc = mp.nocc
     nvir = nmo - nocc
     nkpts = mp.nkpts
+    dtype = mo_coeff[0].dtype
 
     eia = np.zeros((nocc,nvir))
     eijab = np.zeros((nocc,nocc,nvir,nvir))
@@ -57,7 +58,7 @@ def kernel(mp, mo_energy, mo_coeff, verbose=logger.NOTE, with_t2=WITH_T2):
     fao2mo = mp._scf.with_df.ao2mo
     kconserv = mp.khelper.kconserv
     emp2 = 0.
-    oovv_ij = np.zeros((nkpts,nocc,nocc,nvir,nvir), dtype=mo_coeff[0].dtype)
+    oovv_ij = np.zeros((nkpts,nocc,nocc,nvir,nvir), dtype=dtype)
 
     mo_e_o = [mo_energy[k][:nocc] for k in range(nkpts)]
     mo_e_v = [mo_energy[k][nocc:] for k in range(nkpts)]
@@ -66,7 +67,7 @@ def kernel(mp, mo_energy, mo_coeff, verbose=logger.NOTE, with_t2=WITH_T2):
     nonzero_opadding, nonzero_vpadding = padding_k_idx(mp, kind="split")
 
     if with_t2:
-        t2 = np.zeros((nkpts, nkpts, nkpts, nocc, nocc, nvir, nvir), dtype=complex)
+        t2 = np.zeros((nkpts, nkpts, nkpts, nocc, nocc, nvir, nvir), dtype=dtype)
     else:
         t2 = None
 
