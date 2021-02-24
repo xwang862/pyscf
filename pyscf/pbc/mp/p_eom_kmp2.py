@@ -25,14 +25,14 @@ from pyscf import lib
 from pyscf.lib import logger
 from pyscf.pbc.cc import eom_kccsd_rhf as eom_krccsd
 from pyscf.pbc.cc import eom_kccsd_ghf as eom_kgccsd
-from pyscf.pbc.cc import kintermediates_rhf as imd
 
+from pyscf.pbc.cc.kintermediates_rhf import _new
 from pyscf.pbc.mp.kmp2 import (get_frozen_mask, get_nocc, get_nmo,
                                padded_mo_coeff, padding_k_idx)  # noqa
 
 einsum = lib.einsum
 
-def ee_matvec_singlet(eom, nroots=1, koopmans=False, guess=None, left=False,
+def eomee_mp2_singlet(eom, nroots=1, koopmans=False, guess=None, left=False,
                       eris=None, imds=None, diag=None,
                       kptlist=None, dtype=None):
     """See `eom_kgccsd.kernel()` for a description of arguments. 
@@ -63,16 +63,19 @@ class PEOMMP2EESinglet(eom_krccsd.EOMEESinglet):
     Ref: Joshua J. Goings, Marco Caricato, Michael J. Frisch, and Xiaosong Li, J. Chem. Phys. 141, 164116 (2014)
     """
     def __init__(self, mp):
-        self.partition = 'mp'
+        self._mp = mp
         eom_krccsd.EOMEESinglet.__init__(self, mp)
+        self.partition = 'mp'
 
-    matvec = ee_matvec_singlet
+    kernel = eomee_mp2_singlet
 
     def ao2mo(self, mo_coeff=None):
-        return _ERIS(self, mo_coeff)
+        return _ERIS(self._mp, mo_coeff)
 
-    def make_imds(self, eris=None):
-        imds = _IMDS(self, eris)
+    def make_imds(self, eris=None, mo_coeff=None):
+        if eris is None:
+            eris = self.ao2mo(mo_coeff)
+        imds = _IMDS(self._mp, eris)
         imds.make_ee()
         return imds
 
@@ -310,15 +313,208 @@ class _IMDS(eom_krccsd._IMDS):
         nkpts, nocc, nvir = (mp.t2.shape[x] for x in (0, 3, 5))
         dtype = mp.t2.dtype
         mp.t1 = np.zeros((nkpts, nocc, nvir), dtype=dtype)
-        eom_krccsd._IMDS.__init__(mp, eris)
+        eom_krccsd._IMDS.__init__(self, mp, eris)
 
-    def make_ip(self, ip_partition='mp'):
-        eom_krccsd._IMDS.make_ip(ip_partition)
+    def _make_shared_1e(self):
+        cput0 = (time.clock(), time.time())
+        log = logger.Logger(self.stdout, self.verbose)
 
-    def make_ea(self, ea_partition='mp'):
-        eom_krccsd._IMDS.make_ea(ea_partition)
+        t2, eris = self.t2, self.eris
+        kconserv = self.kconserv
+        self.Foo = Foo(t2, eris, kconserv)
+        self.Fvv = Fvv(t2, eris, kconserv)
+        self.Fov = Fov(t2, eris, kconserv)
 
-    def make_ee(self, ee_partition='mp'):
-        eom_krccsd._IMDS.make_ee(ee_partition)
+        log.timer('EOM-MP2 shared one-electron intermediates', *cput0)
+
+    def _make_shared_2e(self):
+        cput0 = (time.clock(), time.time())
+        log = logger.Logger(self.stdout, self.verbose)
+
+        t2, eris = self.t2, self.eris
+        kconserv = self.kconserv
+
+        if self._fimd is not None:
+            nkpts, nocc, nvir = (t2.shape[x] for x in (0, 3, 5))
+            ovov_dest = self._fimd.create_dataset('ovov', (nkpts, nkpts, nkpts, nocc, nvir, nocc, nvir), t2.dtype.char)
+            ovvo_dest = self._fimd.create_dataset('ovvo', (nkpts, nkpts, nkpts, nocc, nvir, nvir, nocc), t2.dtype.char)
+        else:
+            ovov_dest = ovvo_dest = None
+
+        # 2 virtuals
+        self.woVoV = Wovov(t2, eris, kconserv, ovov_dest)
+        self.woVvO = Wovvo(t2, eris, kconserv, ovvo_dest)
+
+        log.timer('EOM-MP2 shared two-electron intermediates', *cput0)
+
+    def make_ip(self):
+        raise NotImplementedError
+
+    def make_ea(self):
+        raise NotImplementedError
+
+    def make_ee(self):
+        self._make_shared_1e()
+        if self._made_shared_2e is False:
+            self._make_shared_2e()
+            self._made_shared_2e = True
+
+        cput0 = (time.clock(), time.time())
+        log = logger.Logger(self.stdout, self.verbose)
+
+        t2, eris = self.t2, self.eris
+        kconserv = self.kconserv
+
+        if self._fimd is not None:
+            nkpts, nocc, nvir = t2.shape
+            ovoo_dest = self._fimd.create_dataset('ovoo', (nkpts, nkpts, nkpts, nocc, nvir, nocc, nocc), t2.dtype.char)
+            vvvo_dest = self._fimd.create_dataset('vvvo', (nkpts, nkpts, nkpts, nvir, nvir, nvir, nocc), t2.dtype.char)
+
+        else:
+            ovoo_dest = vvvo_dest = None
+
+        # 0 or 1 virtuals, needed for IP, EE
+        self.woOoV = eris.ooov
+        self.woVoO = Wovoo(t2, eris, kconserv, ovoo_dest)
+        # 3 or 4 virtuals, needed for EA, EE
+        self.wvOvV = eris.vovv
+        self.wvVvO = Wvvvo(t2, eris, kconserv, vvvo_dest)
+        
+        log.timer('EOM-MP2 EE intermediates', *cput0)
 
 
+
+#######################################
+#
+# The following set of intermediate equations are similar to those in kintermediates_rhf
+# 
+# The only difference is that all t1-related parts are removed
+#
+def Foo(t2, eris, kconserv):
+    nkpts, nocc, nvir = (t2.shape[x] for x in (0, 3, 5))
+    Fki = np.empty((nkpts,nocc,nocc),dtype=t2.dtype)
+    for ki in range(nkpts):
+        kk = ki
+        Fki[ki] = eris.fock[ki,:nocc,:nocc].copy()
+        for kl in range(nkpts):
+            for kc in range(nkpts):
+                kd = kconserv[kk,kc,kl]
+                Soovv = 2*eris.oovv[kk,kl,kc] - eris.oovv[kk,kl,kd].transpose(0,1,3,2)
+                Fki[ki] += einsum('klcd,ilcd->ki',Soovv,t2[ki,kl,kc])
+    return Fki
+
+def Fvv(t2, eris, kconserv):
+    nkpts, nocc, nvir = (t2.shape[x] for x in (0, 3, 5))
+    Fac = np.empty((nkpts,nvir,nvir),dtype=t2.dtype)
+    for ka in range(nkpts):
+        kc = ka
+        Fac[ka] = eris.fock[ka,nocc:,nocc:].copy()
+        for kl in range(nkpts):
+            for kk in range(nkpts):
+                kd = kconserv[kk,kc,kl]
+                Soovv = 2*eris.oovv[kk,kl,kc] - eris.oovv[kk,kl,kd].transpose(0,1,3,2)
+                Fac[ka] += -einsum('klcd,klad->ac',Soovv,t2[kk,kl,ka])
+    return Fac
+
+def Fov(t2, eris, kconserv):
+    nkpts, nocc, nvir = (t2.shape[x] for x in (0, 3, 5))
+    Fkc = np.empty((nkpts,nocc,nvir),dtype=t2.dtype)
+    Fkc[:] = eris.fock[:,:nocc,nocc:].copy()
+    return Fkc
+
+def Wovov(t2, eris, kconserv, out=None):
+    nkpts, nocc, nvir = (t2.shape[x] for x in (0, 3, 5))
+    Wkbid = _new(eris.ovov.shape, t2.dtype, out)
+    for kk in range(nkpts):
+        for kb in range(nkpts):
+            for ki in range(nkpts):
+                kd = kconserv[kk,ki,kb]
+                #   kk + kl - kc - kd = 0
+                # => kc = kk - kd + kl
+                ovov = eris.ovov[kk,kb,ki].copy()
+                for kl in range(nkpts):
+                    kc = kconserv[kk,kd,kl]
+                    ovov -= einsum('klcd,ilcb->kbid',eris.oovv[kk,kl,kc],t2[ki,kl,kc])
+                Wkbid[kk,kb,ki] = ovov
+    return Wkbid
+
+def Wovvo(t2, eris, kconserv, out=None):
+    nkpts, nocc, nvir = (t2.shape[x] for x in (0, 3, 5))
+    Wkaci = _new((nkpts,nkpts,nkpts,nocc,nvir,nvir,nocc), t2.dtype, out)
+    for kk in range(nkpts):
+        for ka in range(nkpts):
+            for kc in range(nkpts):
+                ki = kconserv[kk,kc,ka]
+                # ovvo[kk,ka,kc,ki] => voov[ka,kk,ki,kc]
+                ovvo = np.asarray(eris.voov[ka,kk,ki]).transpose(1,0,3,2).copy()
+                for kl in range(nkpts):
+                    kd = kconserv[ki,ka,kl]
+                    St2 = 2.*t2[ki,kl,ka] - t2[kl,ki,ka].transpose(1,0,2,3)
+                    ovvo +=  einsum('klcd,ilad->kaci',eris.oovv[kk,kl,kc],St2)
+                    ovvo += -einsum('kldc,ilad->kaci',eris.oovv[kk,kl,kd],t2[ki,kl,ka])
+                Wkaci[kk,ka,kc] = ovvo
+    return Wkaci
+
+def Wovoo(t2, eris, kconserv, out=None):
+    nkpts, nocc, nvir = (t2.shape[x] for x in (0, 3, 5))
+    FFov = eris.fock[:,:nocc,nocc:]
+
+    Wkbij = _new((nkpts,nkpts,nkpts,nocc,nvir,nocc,nocc), t2.dtype, out)
+    for kk in range(nkpts):
+        for kb in range(nkpts):
+            for ki in range(nkpts):
+                kj = kconserv[kk,ki,kb]
+                ovoo = np.array(eris.ooov[ki,kj,kk]).transpose(2,3,0,1).conj()
+                for kd in range(nkpts):
+                    # kk + kl - ki - kd = 0
+                    # => kl = ki - kk + kd
+                    kl = kconserv[ki,kk,kd]
+                    St2 = 2.*t2[kl,kj,kd] - t2[kj,kl,kd].transpose(1,0,2,3)
+                    ovoo += einsum('klid,ljdb->kbij',  eris.ooov[kk,kl,ki], St2)
+                    ovoo += einsum('lkid,ljdb->kbij', -eris.ooov[kl,kk,ki], t2[kl,kj,kd])
+                    kl = kconserv[kb,ki,kd]
+                    ovoo += einsum('lkjd,libd->kbij', -eris.ooov[kl,kk,kj], t2[kl,ki,kb])
+
+                    # kb + kk - kd = kc
+                    #kc = kconserv[kb,kd,kk]
+                    ovoo += einsum('bkdc,jidc->kbij', eris.vovv[kb,kk,kd], t2[kj,ki,kd])
+
+                ovoo += einsum('kc,ijcb->kbij',FFov[kk], t2[ki,kj,kk])
+                Wkbij[kk,kb,ki] = ovoo
+    return Wkbij
+
+def Wvvvo(t2, eris, kconserv, out=None):
+    nkpts, nocc, nvir = (t2.shape[x] for x in (0, 3, 5))
+    Wabcj = _new((nkpts,nkpts,nkpts,nvir,nvir,nvir,nocc), t2.dtype, out)
+    FFov = eris.fock[:,:nocc,nocc:]
+
+    for ka in range(nkpts):
+        for kb in range(nkpts):
+            for kc in range(nkpts):
+                kj = kconserv[ka,kc,kb]
+                # vvvo[ka,kb,kc,kj] <= vovv[kc,kj,ka,kb].transpose(2,3,0,1).conj()
+                vvvo = np.asarray(eris.vovv[kc,kj,ka]).transpose(2,3,0,1).conj()
+
+                for kl in range(nkpts):
+                    # ka + kl - kc - kd = 0
+                    # => kd = ka - kc + kl
+                    kd = kconserv[ka,kc,kl]
+                    St2 = 2.*t2[kl,kj,kd] - t2[kl,kj,kb].transpose(0,1,3,2)
+                    vvvo += einsum('alcd,ljdb->abcj',eris.vovv[ka,kl,kc], St2)
+                    vvvo += einsum('aldc,ljdb->abcj',eris.vovv[ka,kl,kd], -t2[kl,kj,kd])
+                    # kb - kc + kl = kd
+                    kd = kconserv[kb,kc,kl]
+                    vvvo += einsum('bldc,jlda->abcj',eris.vovv[kb,kl,kd], -t2[kj,kl,kd])
+
+                    # kl + kk - kb - ka = 0
+                    # => kk = kb + ka - kl
+                    kk = kconserv[kb,kl,ka]
+                    vvvo += einsum('lkjc,lkba->abcj',eris.ooov[kl,kk,kj],t2[kl,kk,kb])
+                vvvo += einsum('lc,ljab->abcj',-FFov[kc],t2[kc,kj,ka])
+                Wabcj[ka,kb,kc] = vvvo
+    return Wabcj
+
+
+if __name__ == '__main__':
+    #TODO add an example
+    pass
