@@ -839,6 +839,9 @@ def eomee_ccsd_singlet(eom, nroots=1, koopmans=False, guess=None, left=False,
                        eris=None, imds=None, diag=None, partition=None,
                        kptlist=None, dtype=None):
     '''See `eom_kgccsd.kernel()` for a description of arguments.'''
+    if partition:
+        eom.partition = partition.lower()
+        assert eom.partition in ['mp', 'full']
     eom.converged, eom.e, eom.v  \
             = eom_kgccsd.kernel_ee(eom, nroots, koopmans, guess, left, eris=eris,
                                    imds=imds, diag=diag, partition=partition,
@@ -992,46 +995,8 @@ def eeccsd_matvec_singlet(eom, vector, kshift, imds=None, diag=None):
     kconserv_r2 = eom.get_kconserv_ee_r2(kshift)
     r1, r2 = vector_to_amplitudes_singlet(vector, nkpts, nmo, nocc, kconserv_r2)
 
-    # Build antisymmetrized tensors that will be used later
-    #   antisymmetrized r2   : rbar_ijab = 2 r_ijab - r_ijba
-    #   antisymmetrized woOoV: wbar_nmie = 2 W_nmie - W_nmei
-    #   antisymmetrized wvOvV: wbar_amfe = 2 W_amfe - W_amef
-    #   antisymmetrized woVvO: wbar_mbej = 2 W_mbej - W_mbje
-    r2bar = np.zeros_like(r2)
-    woOoV_bar = np.zeros_like(imds.woOoV)
-    wvOvV_bar = np.zeros_like(imds.wvOvV)
-    woVvO_bar = np.zeros_like(imds.woVvO)
-    for ki, kj, ka in kpts_helper.loop_kkk(nkpts):
-        # rbar_ijab = 2 r_ijab - r_ijba
-        #  ki - ka + kj - kb = kshift
-        kb = kconserv_r2[ki, ka, kj]
-        r2bar[ki, kj, ka] = 2. * r2[ki, kj, ka] - r2[ki, kj, kb].transpose(0,1,3,2)
-        # wbar_nmie = 2 W_nmie - W_nmei = 2 W_nmie - W_mnie
-        #  ki->kn, kj->km, ka->ki
-        wkn = ki
-        wkm = kj
-        wki = ka
-        #  kn + km - ki - ke = G
-        wke = kconserv[wkn, wki, wkm]
-        woOoV_bar[wkn, wkm, wki] = 2. * imds.woOoV[wkn, wkm, wki] - imds.woOoV[wkm, wkn, wki].transpose(1,0,2,3)
-        # wbar_amfe = 2 W_amfe - W_amef
-        #  ki->ka, kj->km, ka->kf, kb->ke
-        wka = ki
-        wkm = kj
-        wkf = ka
-        #  ka + km - kf - ke = G
-        wke = kconserv[wka, wkf, wkm]
-        wvOvV_bar[wka, wkm, wkf] = 2. * imds.wvOvV[wka, wkm, wkf] - imds.wvOvV[wka, wkm, wke].transpose(0,1,3,2)
-        # wbar_mbej = 2 W_mbej - W_mbje
-        #  ki->km, kj->kb, ka->ke
-        wkm = ki
-        wkb = kj
-        wke = ka
-        #  km + kb - ke - kj = G
-        wkj = kconserv[wkm, wke, wkb]
-        woVvO_bar[wkm, wkb, wke] = 2. * imds.woVvO[wkm, wkb, wke] - imds.woVoV[wkm, wkb, wkj].transpose(0,1,3,2)
-
     Hr1 = np.zeros_like(r1)
+    # 1h1p-1h1p block
     for ki in range(nkpts):
         #  ki - ka = kshift
         ka = kconserv_r1[ki]
@@ -1047,6 +1012,11 @@ def eeccsd_matvec_singlet(eom, vector, kshift, imds=None, diag=None):
             Hr1[ki] += 2. * einsum('maei,me->ia', imds.woVvO[km, ka, ke], r1[km])
             Hr1[ki] -= einsum('maie,me->ia', imds.woVoV[km, ka, ki], r1[km])
 
+    # 1h1p-2h2p block
+    for ki in range(nkpts):
+        #  ki - ka = kshift
+        ka = kconserv_r1[ki]
+        for km in range(nkpts):
             # r_ia <- F_me (2 r_imae - r_miae)
             Hr1[ki] += 2. * einsum('me,imae->ia', imds.Fov[km], r2[ki, km, ka])
             Hr1[ki] -= einsum('me,miae->ia', imds.Fov[km], r2[km, ki, ka])
@@ -1065,20 +1035,10 @@ def eeccsd_matvec_singlet(eom, vector, kshift, imds=None, diag=None):
                 Hr1[ki] += np.einsum('mnie,nmae->ia', imds.woOoV[km, kn, ki], r2[kn, km, ka])
 
     Hr2 = np.zeros_like(r2)
+    # 2h2p-1h1p block
     for ki, kj, ka in kpts_helper.loop_kkk(nkpts):
         # ki + kj - ka - kb = kshift
         kb = kconserv_r2[ki, ka, kj]
-
-        # r_ijab <= - F_mj r_imab
-        #  km = kj
-        Hr2[ki, kj, ka] -= einsum('mj,imab->ijab', imds.Foo[kj], r2[ki, kj, ka])
-        # r_ijab <= - F_mi r_jmba
-        #  km = ki
-        Hr2[ki, kj, ka] -= einsum('mi,jmba->ijab', imds.Foo[ki], r2[kj, ki, kb])
-        # r_ijab <= F_be r_ijae
-        Hr2[ki, kj, ka] += einsum('be,ijae->ijab', imds.Fvv[kb], r2[ki, kj, ka])
-        # r_ijab <= F_ae r_jibe
-        Hr2[ki, kj, ka] += einsum('ae,jibe->ijab', imds.Fvv[ka], r2[kj, ki, kb])
 
         # r_ijab <= W_abej r_ie
         #  ki - ke = kshift
@@ -1099,40 +1059,31 @@ def eeccsd_matvec_singlet(eom, vector, kshift, imds=None, diag=None):
         km = kconserv[ki, ka, kj]
         Hr2[ki, kj, ka] -= einsum('maji,mb->ijab', imds.woVoO[km, ka, kj], r1[km])
 
-        tmp = np.zeros((nocc, nocc, nvir, nvir), dtype=r2.dtype)
-        for km in range(nkpts):
-            # r_ijab <= (2 W_mbej - W_mbje) r_imae - W_mbej r_imea
-            #  km + kb - ke - kj = G
-            ke = kconserv[km, kj, kb]
-            tmp += einsum('mbej,imae->ijab', woVvO_bar[km, kb, ke], r2[ki, km, ka])
-            tmp -= einsum('mbej,imea->ijab', imds.woVvO[km, kb, ke], r2[ki, km, ke])
-            # r_ijab <= - W_maje r_imeb
-            #  km + ka - kj - ke = G
-            ke = kconserv[km, kj, ka]
-            tmp -= einsum('maje,imeb->ijab', imds.woVoV[km, ka, kj], r2[ki, km, ke])
-        Hr2[ki, kj, ka] += tmp
-        # The following two lines can be obtained by simply transposing tmp:
-        #   r_ijab <= (2 W_maei - W_maie) r_jmbe - W_maei r_jmeb
-        #   r_ijab <= - W_mbie r_jmea
-        Hr2[kj, ki, kb] += tmp.transpose(1,0,3,2)
-        tmp = None
-
-        for km in range(nkpts):
-            # r_ijab <= W_abef r_ijef
-            # Rename dummy index km -> ke
-            ke = km
-            Hr2[ki, kj, ka] += einsum('abef,ijef->ijab', imds.wvVvV[ka, kb, ke], r2[ki, kj, ke])
-            # r_ijab <= W_mnij r_mnab
-            #  km + kn - ki - kj = G
-            # => ki - km + kj - kn = G
-            kn = kconserv[ki, km, kj]
-            Hr2[ki, kj, ka] += einsum('mnij,mnab->ijab', imds.woOoO[km, kn, ki], r2[km, kn, ka])
-
-    #
-    # r_ijab <= - W_mnef t_imab (2 r_jnef - r_jnfe)
-    # r_ijab <= - W_mnef t_jmba (2 r_inef - r_infe)
-    # r_ijab <= - W_mnef t_ijae (2 r_mnbf - r_mnfb)
-    # r_ijab <= - W_mnef t_jibe (2 r_mnaf - r_mnfa)
+    # Build antisymmetrized tensors that will be used later
+    #   antisymmetrized woOoV: wbar_nmie = 2 W_nmie - W_nmei
+    #   antisymmetrized wvOvV: wbar_amfe = 2 W_amfe - W_amef
+    woOoV_bar = np.zeros_like(imds.woOoV)
+    wvOvV_bar = np.zeros_like(imds.wvOvV)
+    for ki, kj, ka in kpts_helper.loop_kkk(nkpts):
+        #  ki - ka + kj - kb = kshift
+        kb = kconserv_r2[ki, ka, kj]
+        # wbar_nmie = 2 W_nmie - W_nmei = 2 W_nmie - W_mnie
+        #  ki->kn, kj->km, ka->ki
+        wkn = ki
+        wkm = kj
+        wki = ka
+        #  kn + km - ki - ke = G
+        wke = kconserv[wkn, wki, wkm]
+        woOoV_bar[wkn, wkm, wki] = 2. * imds.woOoV[wkn, wkm, wki] - imds.woOoV[wkm, wkn, wki].transpose(1,0,2,3)
+        # wbar_amfe = 2 W_amfe - W_amef
+        #  ki->ka, kj->km, ka->kf, kb->ke
+        wka = ki
+        wkm = kj
+        wkf = ka
+        #  ka + km - kf - ke = G
+        wke = kconserv[wka, wkf, wkm]
+        wvOvV_bar[wka, wkm, wkf] = 2. * imds.wvOvV[wka, wkm, wkf] - imds.wvOvV[wka, wkm, wke].transpose(0,1,3,2)
+ 
     #
     # r_ijab <= - (2 W_nmie - W_nmei) t_jnba r_me
     # r_ijab <= - (2 W_nmje - W_nmej) t_inab r_me
@@ -1141,28 +1092,9 @@ def eeccsd_matvec_singlet(eom, vector, kshift, imds=None, diag=None):
     #
     # First, build intermediates M = W.r
     #
-    wr2_oo = np.zeros((nkpts, nocc, nocc), dtype=r2.dtype)
-    wr2_vv = np.zeros((nkpts, nvir, nvir), dtype=r2.dtype)
-    wr1_oo = np.zeros_like(wr2_oo)
-    wr1_vv = np.zeros_like(wr2_vv)
+    wr1_oo = np.zeros((nkpts, nocc, nocc), dtype=r2.dtype)
+    wr1_vv = np.zeros((nkpts, nvir, nvir), dtype=r2.dtype)
     for kj in range(nkpts):
-        # Wr2_jm = W_mnef (2 r_jnef - r_jnfe) = W_mnef rbar_jnef
-        #  km + kn - ke - kf = G
-        #  kj + kn - ke - kf = kshift
-        # => kj - km = kshift
-        km = kconserv_r1[kj]
-        # x: kn, y: ke
-        wr2_oo[kj] += einsum('xymnef,xyjnef->jm', imds.woOvV[km], r2bar[kj])
-
-        # Wr2_eb = W_mnef (2 r_mnbf - r_mnfb) = W_mnef rbar_mnbf
-        ke = kj
-        #  km + kn - ke - kf = G
-        #  km + kn - kb - kf = kshift
-        # => ke - kb = kshift
-        kb = kconserv_r1[ke]
-        # x: km, y: kn
-        wr2_vv[ke] += einsum('xymnef,xymnbf->eb', imds.woOvV[:, :, ke], r2bar[:, :, kb])
-
         # Wr1_in = (2 W_nmie - W_nmei) r_me = wbar_nmie r_me
         ki = kj
         #  kn + km - ki - ke = G
@@ -1179,30 +1111,16 @@ def eeccsd_matvec_singlet(eom, vector, kshift, imds=None, diag=None):
         # => kf - ka = kshift
         ka = kconserv_r1[kf]
         # x: km
-        wr1_vv[kf] += einsum('xamfe,xme->fa', wvOvV_bar[ka, :, kf], r1)
+        wr1_vv[kf] += einsum('xamfe,xme->fa', wvOvV_bar[ka, :, kf], r1)   
+    woOoV_bar = None
+    wvOvV_bar = None
+
     #
     # Second, compute the whole contraction
     #
     for ki, kj, ka in kpts_helper.loop_kkk(nkpts):
         # ki + kj - ka - kb = kshift
         kb = kconserv_r2[ki, ka, kj]
-        # r_ijab <= - Wr2_jm t_imab
-        #  kj - km = kshift
-        km = kconserv_r1[kj]
-        Hr2[ki, kj, ka] -= einsum('jm,imab->ijab', wr2_oo[kj], imds.t2[ki, km, ka])
-        # r_ijab <= - Wr2_im t_jmba
-        #  ki - km = kshift
-        km = kconserv_r1[ki]
-        Hr2[ki, kj, ka] -= einsum('im,jmba->ijab', wr2_oo[ki], imds.t2[kj, km, kb])
-        # r_ijab <= - Wr2_eb t_ijae
-        #  ki + kj - ka - ke = G
-        ke = kconserv[ki, ka, kj]
-        Hr2[ki, kj, ka] -= einsum('eb,ijae->ijab', wr2_vv[ke], imds.t2[ki, kj, ka])
-        # r_ijab <= - Wr2_ea t_jibe
-        #  kj + ki - kb - ke = G
-        ke = kconserv[kj, kb, ki]
-        Hr2[ki, kj, ka] -= einsum('ea,jibe->ijab', wr2_vv[ke], imds.t2[kj, ki, kb])
-
         # r_ijab <= - Wr1_in t_jnba
         #  ki - kn = kshift
         kn = kconserv_r1[ki]
@@ -1219,6 +1137,146 @@ def eeccsd_matvec_singlet(eom, vector, kshift, imds=None, diag=None):
         #  ki + kj - ka - kf = G
         kf = kconserv[ki, ka, kj]
         Hr2[ki, kj, ka] += einsum('fb,ijaf->ijab', wr1_vv[kf], imds.t2[ki, kj, ka])
+
+    # 2h2p-2h2p block
+    if eom.partition == 'mp':
+        fock = imds.eris.fock
+        foo = fock[:, :nocc, :nocc]
+        fvv = fock[:, nocc:, nocc:]
+        for ki, kj, ka in kpts_helper.loop_kkk(nkpts):
+            # ki + kj - ka - kb = kshift
+            kb = kconserv_r2[ki, ka, kj]
+            # r_ijab <= - f_mj r_imab
+            #  km = kj
+            Hr2[ki, kj, ka] -= einsum('mj,imab->ijab', foo[kj], r2[ki, kj, ka])
+            # r_ijab <= - f_mi r_jmba
+            #  km = ki
+            Hr2[ki, kj, ka] -= einsum('mi,jmba->ijab', foo[ki], r2[kj, ki, kb])
+            # r_ijab <= f_be r_ijae
+            Hr2[ki, kj, ka] += einsum('be,ijae->ijab', fvv[kb], r2[ki, kj, ka])
+            # r_ijab <= f_ae r_jibe
+            Hr2[ki, kj, ka] += einsum('ae,jibe->ijab', fvv[ka], r2[kj, ki, kb])        
+    elif eom.partition == 'full':
+        if diag is None:
+            diag = eom.get_diag(kshift, imds)
+        diag_2h2p = vector_to_amplitudes_singlet(diag, nkpts, nmo, nocc, kconserv_r2)[1]
+        Hr2 += diag_2h2p * r2
+    else:
+        # Build antisymmetrized tensors that will be used later
+        #   antisymmetrized r2   : rbar_ijab = 2 r_ijab - r_ijba
+        #   antisymmetrized woVvO: wbar_mbej = 2 W_mbej - W_mbje
+        r2bar = np.zeros_like(r2)
+        woVvO_bar = np.zeros_like(imds.woVvO)
+        for ki, kj, ka in kpts_helper.loop_kkk(nkpts):
+            # rbar_ijab = 2 r_ijab - r_ijba
+            #  ki - ka + kj - kb = kshift
+            kb = kconserv_r2[ki, ka, kj]
+            r2bar[ki, kj, ka] = 2. * r2[ki, kj, ka] - r2[ki, kj, kb].transpose(0,1,3,2)
+            # wbar_mbej = 2 W_mbej - W_mbje
+            #  ki->km, kj->kb, ka->ke
+            wkm = ki
+            wkb = kj
+            wke = ka
+            #  km + kb - ke - kj = G
+            wkj = kconserv[wkm, wke, wkb]
+            woVvO_bar[wkm, wkb, wke] = 2. * imds.woVvO[wkm, wkb, wke] - imds.woVoV[wkm, wkb, wkj].transpose(0,1,3,2)
+
+        for ki, kj, ka in kpts_helper.loop_kkk(nkpts):
+            # ki + kj - ka - kb = kshift
+            kb = kconserv_r2[ki, ka, kj]
+
+            # r_ijab <= - F_mj r_imab
+            #  km = kj
+            Hr2[ki, kj, ka] -= einsum('mj,imab->ijab', imds.Foo[kj], r2[ki, kj, ka])
+            # r_ijab <= - F_mi r_jmba
+            #  km = ki
+            Hr2[ki, kj, ka] -= einsum('mi,jmba->ijab', imds.Foo[ki], r2[kj, ki, kb])
+            # r_ijab <= F_be r_ijae
+            Hr2[ki, kj, ka] += einsum('be,ijae->ijab', imds.Fvv[kb], r2[ki, kj, ka])
+            # r_ijab <= F_ae r_jibe
+            Hr2[ki, kj, ka] += einsum('ae,jibe->ijab', imds.Fvv[ka], r2[kj, ki, kb])
+
+            tmp = np.zeros((nocc, nocc, nvir, nvir), dtype=r2.dtype)
+            for km in range(nkpts):
+                # r_ijab <= (2 W_mbej - W_mbje) r_imae - W_mbej r_imea
+                #  km + kb - ke - kj = G
+                ke = kconserv[km, kj, kb]
+                tmp += einsum('mbej,imae->ijab', woVvO_bar[km, kb, ke], r2[ki, km, ka])
+                tmp -= einsum('mbej,imea->ijab', imds.woVvO[km, kb, ke], r2[ki, km, ke])
+                # r_ijab <= - W_maje r_imeb
+                #  km + ka - kj - ke = G
+                ke = kconserv[km, kj, ka]
+                tmp -= einsum('maje,imeb->ijab', imds.woVoV[km, ka, kj], r2[ki, km, ke])
+            Hr2[ki, kj, ka] += tmp
+            # The following two lines can be obtained by simply transposing tmp:
+            #   r_ijab <= (2 W_maei - W_maie) r_jmbe - W_maei r_jmeb
+            #   r_ijab <= - W_mbie r_jmea
+            Hr2[kj, ki, kb] += tmp.transpose(1,0,3,2)
+            tmp = None
+
+            for km in range(nkpts):
+                # r_ijab <= W_abef r_ijef
+                # Rename dummy index km -> ke
+                ke = km
+                Hr2[ki, kj, ka] += einsum('abef,ijef->ijab', imds.wvVvV[ka, kb, ke], r2[ki, kj, ke])
+                # r_ijab <= W_mnij r_mnab
+                #  km + kn - ki - kj = G
+                # => ki - km + kj - kn = G
+                kn = kconserv[ki, km, kj]
+                Hr2[ki, kj, ka] += einsum('mnij,mnab->ijab', imds.woOoO[km, kn, ki], r2[km, kn, ka])
+        woVvO_bar = None
+
+        #
+        # r_ijab <= - W_mnef t_imab (2 r_jnef - r_jnfe)
+        # r_ijab <= - W_mnef t_jmba (2 r_inef - r_infe)
+        # r_ijab <= - W_mnef t_ijae (2 r_mnbf - r_mnfb)
+        # r_ijab <= - W_mnef t_jibe (2 r_mnaf - r_mnfa)
+        #
+        # First, build intermediates M = W.r
+        #
+        wr2_oo = np.zeros((nkpts, nocc, nocc), dtype=r2.dtype)
+        wr2_vv = np.zeros((nkpts, nvir, nvir), dtype=r2.dtype)
+        for kj in range(nkpts):
+            # Wr2_jm = W_mnef (2 r_jnef - r_jnfe) = W_mnef rbar_jnef
+            #  km + kn - ke - kf = G
+            #  kj + kn - ke - kf = kshift
+            # => kj - km = kshift
+            km = kconserv_r1[kj]
+            # x: kn, y: ke
+            wr2_oo[kj] += einsum('xymnef,xyjnef->jm', imds.woOvV[km], r2bar[kj])
+
+            # Wr2_eb = W_mnef (2 r_mnbf - r_mnfb) = W_mnef rbar_mnbf
+            ke = kj
+            #  km + kn - ke - kf = G
+            #  km + kn - kb - kf = kshift
+            # => ke - kb = kshift
+            kb = kconserv_r1[ke]
+            # x: km, y: kn
+            wr2_vv[ke] += einsum('xymnef,xymnbf->eb', imds.woOvV[:, :, ke], r2bar[:, :, kb])
+        r2bar = None
+
+        #
+        # Second, compute the whole contraction
+        #
+        for ki, kj, ka in kpts_helper.loop_kkk(nkpts):
+            # ki + kj - ka - kb = kshift
+            kb = kconserv_r2[ki, ka, kj]
+            # r_ijab <= - Wr2_jm t_imab
+            #  kj - km = kshift
+            km = kconserv_r1[kj]
+            Hr2[ki, kj, ka] -= einsum('jm,imab->ijab', wr2_oo[kj], imds.t2[ki, km, ka])
+            # r_ijab <= - Wr2_im t_jmba
+            #  ki - km = kshift
+            km = kconserv_r1[ki]
+            Hr2[ki, kj, ka] -= einsum('im,jmba->ijab', wr2_oo[ki], imds.t2[kj, km, kb])
+            # r_ijab <= - Wr2_eb t_ijae
+            #  ki + kj - ka - ke = G
+            ke = kconserv[ki, ka, kj]
+            Hr2[ki, kj, ka] -= einsum('eb,ijae->ijab', wr2_vv[ke], imds.t2[ki, kj, ka])
+            # r_ijab <= - Wr2_ea t_jibe
+            #  kj + ki - kb - ke = G
+            ke = kconserv[kj, kb, ki]
+            Hr2[ki, kj, ka] -= einsum('ea,jibe->ijab', wr2_vv[ke], imds.t2[kj, ki, kb])
 
     vector = amplitudes_to_vector_singlet(Hr1, Hr2, kconserv_r2)
     log.timer("matvec EOMEE Singlet", *cput0)
@@ -1243,9 +1301,15 @@ def eeccsd_diag(eom, kshift=0, imds=None):
         Hr1[ki] -= np.einsum('iaia->ia', imds.woVoV[ki, ka, ki])
 
     Hr2 = np.zeros((nkpts, nkpts, nkpts, nocc, nocc, nvir, nvir), dtype=t1.dtype)
-    # TODO Allow partition='mp'
     if eom.partition == "mp":
-        raise NotImplementedError
+        foo = imds.eris.fock[:, :nocc, :nocc]
+        fvv = imds.eris.fock[:, nocc:, nocc:]
+        for ki, kj, ka in kpts_helper.loop_kkk(nkpts):
+            kb = kconserv_r2[ki, ka, kj]
+            Hr2[ki, kj, ka] -= foo[ki].diagonal()[:, None, None, None]
+            Hr2[ki, kj, ka] -= foo[kj].diagonal()[None, :, None, None]
+            Hr2[ki, kj, ka] += fvv[ka].diagonal()[None, None, :, None]
+            Hr2[ki, kj, ka] += fvv[kb].diagonal()[None, None, None, :]
     else:
         for ki, kj, ka in kpts_helper.loop_kkk(nkpts):
             kb = kconserv_r2[ki, ka, kj]
@@ -1421,7 +1485,8 @@ class EOMEE(eom_kgccsd.EOMEE):
 
     def make_imds(self, eris=None):
         imds = _IMDS(self._cc, eris)
-        imds.make_ee()
+        partition = getattr(self, 'partition', None)
+        imds.make_ee(partition)
         return imds
 
 
@@ -1687,22 +1752,28 @@ class _IMDS:
 
         if not self.made_ip_imds:
             # 0 or 1 virtuals
-            self.woOoO = imd.Woooo(t1, t2, eris, kconserv)
+            if ee_partition != 'mp':
+                self.woOoO = imd.Woooo(t1, t2, eris, kconserv)
             self.woOoV = imd.Wooov(t1, t2, eris, kconserv)
             self.woVoO = imd.Wovoo(t1, t2, eris, kconserv)
         else:
-            self.woOoO = self.Woooo
+            if ee_partition != 'mp':
+                self.woOoO = self.Woooo
             self.woOoV = self.Wooov
             self.woVoO = self.Wovoo
 
         if not self.made_ea_imds:
             # 3 or 4 virtuals
             self.wvOvV = imd.Wvovv(t1, t2, eris, kconserv)
-            self.wvVvV = imd.Wvvvv(t1, t2, eris, kconserv)
+            if ee_partition != 'mp':
+                self.wvVvV = imd.Wvvvv(t1, t2, eris, kconserv)
+            else:
+                self.wvVvV = None
             self.wvVvO = imd.Wvvvo(t1, t2, eris, kconserv, self.wvVvV)
         else:
             self.wvOvV = self.Wvovv
-            self.wvVvV = self.Wvvvv
+            if ee_partition != 'mp':            
+                self.wvVvV = self.Wvvvv
             self.wvVvO = self.Wvvvo
 
         self.made_ee_imds = True
