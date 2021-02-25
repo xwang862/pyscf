@@ -516,5 +516,31 @@ def Wvvvo(t2, eris, kconserv, out=None):
 
 
 if __name__ == '__main__':
-    #TODO add an example
-    pass
+    from pyscf.pbc import gto, scf, mp
+    from pyscf.pbc.tools import lattice, pyscf_ase
+    
+    # Build unit cell
+    cell = gto.Cell()
+    ase_atom = lattice.get_ase_atom('c')
+    cell.atom = pyscf_ase.ase_atoms_to_pyscf(ase_atom)
+    cell.a = ase_atom.cell
+    cell.unit = 'B'
+    cell.basis = "gth-szv"
+    cell.pseudo = "gth-pade"
+    cell.verbose = 5
+    cell.build()    
+
+    # Run HF and MP2 with 1x1x2 Monkhorst-Pack k-point mesh
+    kpts = cell.make_kpts([1,1,2])
+    mymf = scf.KRHF(cell, kpts=kpts, exxdiv=None)
+    ehf = mymf.kernel()
+
+    mymp = mp.KMP2(mymf)
+    emp2 = mymp.kernel(with_t2=True)[0]
+
+    # Run P-EOM-MP2
+    myeom = PEOMMP2EESinglet(mymp)
+    eeom = myeom.kernel(nroots=3, kptlist=[0])[0]
+    print(eeom[0][0] - 0.28776335)
+    print(eeom[0][1] - 0.29057406)
+    print(eeom[0][2] - 0.29057978)
