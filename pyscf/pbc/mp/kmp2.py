@@ -562,6 +562,18 @@ def _add_padding(mp, mo_coeff, mo_energy):
     return mo_coeff, mo_energy
 
 
+def remove_madelung(mp, mo_energy):
+    # Remove Madelung correction from mo_energy 
+    from pyscf.pbc import tools
+    from pyscf.pbc.cc.ccsd import _adjust_occ
+
+    madelung = tools.madelung(mp._scf.cell, mp.kpts)
+    mo_energy = [_adjust_occ(mo_e, mp.nocc, madelung)
+                 for k, mo_e in enumerate(mo_energy)]
+
+    return mo_energy
+
+
 def make_rdm1(mp, t2=None, kind="compact"):
     r"""
     Spin-traced one-particle density matrix in the MO basis representation.
@@ -746,6 +758,14 @@ class KMP2(mp2.MP2):
     def kernel(self, mo_energy=None, mo_coeff=None, with_t2=WITH_T2):
         if mo_energy is None:
             mo_energy = self.mo_energy
+
+            # By default, MP2 inherits mo_energy from SCF.
+            # Only when exxdiv is ewald and keep_exxdiv is False, we restore 
+            # mo_energy by removing Madelung correction from occupied orbital energies.
+            keep_exxdiv = getattr(self, "keep_exxdiv", True)            
+            if self._scf.exxdiv == "ewald" and not keep_exxdiv:
+                mo_energy = self.mo_energy = remove_madelung(self, mo_energy)
+
         if mo_coeff is None:
             mo_coeff = self.mo_coeff
         if mo_energy is None or mo_coeff is None:
