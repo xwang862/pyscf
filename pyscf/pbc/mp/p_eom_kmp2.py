@@ -366,7 +366,7 @@ class _IMDS(eom_krccsd._IMDS):
         kconserv = self.kconserv
 
         if self._fimd is not None:
-            nkpts, nocc, nvir = t2.shape
+            nkpts, nocc, nvir = (t2.shape[x] for x in (0, 3, 5))
             ovoo_dest = self._fimd.create_dataset('ovoo', (nkpts, nkpts, nkpts, nocc, nvir, nocc, nocc), t2.dtype.char)
             vvvo_dest = self._fimd.create_dataset('vvvo', (nkpts, nkpts, nkpts, nvir, nvir, nvir, nocc), t2.dtype.char)
 
@@ -464,7 +464,7 @@ def Wovoo(t2, eris, kconserv, out=None):
         for kb in range(nkpts):
             for ki in range(nkpts):
                 kj = kconserv[kk,ki,kb]
-                ovoo = np.array(eris.ooov[ki,kj,kk]).transpose(2,3,0,1).conj()
+                ovoo = np.array(eris.ooov[ki,kj,kk]).transpose(2,3,0,1).conj().copy()
                 for kd in range(nkpts):
                     # kk + kl - ki - kd = 0
                     # => kl = ki - kk + kd
@@ -493,7 +493,7 @@ def Wvvvo(t2, eris, kconserv, out=None):
             for kc in range(nkpts):
                 kj = kconserv[ka,kc,kb]
                 # vvvo[ka,kb,kc,kj] <= vovv[kc,kj,ka,kb].transpose(2,3,0,1).conj()
-                vvvo = np.asarray(eris.vovv[kc,kj,ka]).transpose(2,3,0,1).conj()
+                vvvo = np.asarray(eris.vovv[kc,kj,ka]).transpose(2,3,0,1).conj().copy()
 
                 for kl in range(nkpts):
                     # ka + kl - kc - kd = 0
