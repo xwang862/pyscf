@@ -366,7 +366,7 @@ class _IMDS(eom_krccsd._IMDS):
         kconserv = self.kconserv
 
         if self._fimd is not None:
-            nkpts, nocc, nvir = t2.shape
+            nkpts, nocc, nvir = (t2.shape[x] for x in (0, 3, 5))
             ovoo_dest = self._fimd.create_dataset('ovoo', (nkpts, nkpts, nkpts, nocc, nvir, nocc, nocc), t2.dtype.char)
             vvvo_dest = self._fimd.create_dataset('vvvo', (nkpts, nkpts, nkpts, nvir, nvir, nvir, nocc), t2.dtype.char)
 
