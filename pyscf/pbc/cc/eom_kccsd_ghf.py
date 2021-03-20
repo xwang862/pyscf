@@ -1603,6 +1603,24 @@ def eeccsd_diag(eom, kshift, imds=None):
     return vector
 
 
+def eeccsd_get_init_guess(eom, kshift, nroots=1, koopmans=False, diag=None, **kwargs):
+    """Initial guess vectors of R coefficients"""
+    size = eom.vector_size(kshift)
+    dtype = getattr(diag, 'dtype', np.complex)
+    nroots = min(nroots, size)
+    guess = []
+    # TODO do Koopmans later
+    if koopmans:
+        raise NotImplementedError
+    else:
+        idx = diag.argsort()[:nroots]
+        for i in idx:
+            g = np.zeros(int(size), dtype=dtype)
+            g[i] = 1.0
+            # TODO do mask_frozen later
+            guess.append(g)
+    return guess
+
 def vector_to_amplitudes_ee(vector, kshift, nkpts, nmo, nocc, kconserv):
     '''Transform 1-dimensional array to 3- and 7-dimensional arrays, r1 and r2.
 
@@ -1704,7 +1722,8 @@ class EOMEE(eom_rccsd.EOM):
     eeccsd = eeccsd
     matvec = eeccsd_matvec
     get_diag = eeccsd_diag
-
+    get_init_guess = eeccsd_get_init_guess
+    
     @property
     def nkpts(self):
         return len(self.kpts)
@@ -1749,24 +1768,6 @@ class EOMEE(eom_rccsd.EOM):
                         size_r2 += nocc**2*nvir**2
 
         return size_r1 + size_r2
-
-    def get_init_guess(self, kshift, nroots=1, koopmans=False, diag=None, **kwargs):
-        """Initial guess vectors of R coefficients"""
-        size = self.vector_size(kshift)
-        dtype = getattr(diag, 'dtype', np.complex)
-        nroots = min(nroots, size)
-        guess = []
-        # TODO do Koopmans later
-        if koopmans:
-            raise NotImplementedError
-        else:
-            idx = diag.argsort()[:nroots]
-            for i in idx:
-                g = np.zeros(int(size), dtype=dtype)
-                g[i] = 1.0
-                # TODO do mask_frozen later
-                guess.append(g)
-        return guess
 
     def gen_matvec(self, kshift, imds=None, left=False, **kwargs):
         if imds is None: imds = self.make_imds()
