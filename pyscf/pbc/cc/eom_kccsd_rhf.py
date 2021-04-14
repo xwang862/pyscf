@@ -2165,7 +2165,6 @@ class EOMEESinglet(EOMEE):
     eomee_ccsd_singlet = eomee_ccsd_singlet
     matvec = eeccsd_matvec_singlet
     gen_matvec = eeccsd_gen_matvec
-    get_init_guess = get_init_guess_cis
     cis = cis_easy
 
     def vector_size(self, kshift=0):
@@ -2196,6 +2195,14 @@ class EOMEESinglet(EOMEE):
                 size_r2 += nov**2
 
         return size_r1 + size_r2
+
+    def get_init_guess(self, kshift, nroots=1, koopmans=False, diag=None, imds=None, **kwargs):
+        """Initial guess vectors of R coefficients"""
+        cis_guess = getattr(self, 'cis_guess', True)
+        if cis_guess:
+            return get_init_guess_cis(self, kshift, nroots, imds, **kwargs)
+        else:
+            return eom_kgccsd.eeccsd_get_init_guess(self, kshift, nroots, koopmans, diag, **kwargs)
 
     def vector_to_amplitudes(self, vector, kshift=None, nkpts=None, nmo=None, nocc=None, kconserv=None):
         if nmo is None: nmo = self.nmo
