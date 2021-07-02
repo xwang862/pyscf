@@ -973,6 +973,17 @@ def eeccsd_matvec(eom, vector, kshift, imds=None, diag=None):
     raise NotImplementedError
 
 
+def eeccsd_gen_matvec(eom, kshift, imds=None, left=False, **kwargs):
+    if imds is None: imds = eom.make_imds()
+    diag = eom.get_diag(kshift, imds)
+    if left:
+        # TODO allow left vectors to be computed
+        raise NotImplementedError
+    else:
+        matvec = lambda xs: [eom.matvec(x, kshift, imds, diag) for x in xs]
+    return matvec, diag
+
+
 def eeccsd_matvec_singlet(eom, vector, kshift, imds=None, diag=None):
     """Spin-restricted, k-point EOM-EE-CCSD equations for singlet excitation only.
     
@@ -1406,6 +1417,693 @@ def cis_easy(eom, nroots=1, kptlist=None, imds=None, **kwargs):
     return evals, evecs
 
 
+def vector_sizes_triplet(nkpts, nmo, nocc, kconserv=None):
+    nvir = nmo - nocc
+    nov = nocc * nvir
+
+    size_r1 = nkpts * nov
+
+    # packed size of r2aa
+    nocc_tril = nocc*(nocc-1)//2
+    nvir_tril = nvir*(nvir-1)//2
+    size_r2aa = 0
+    for ki, kj, ka in kpts_helper.loop_kkk(nkpts):
+        kb = kconserv[ki, ka, kj]
+        if ki == kj:
+            if ka == kb:
+                size_r2aa += nocc_tril * nvir_tril
+            elif ka > kb:
+                size_r2aa += nocc_tril * nvir**2
+        elif ki > kj:
+            if ka == kb:
+                size_r2aa += nocc**2 * nvir_tril
+            elif ka > kb:
+                size_r2aa += nocc**2 * nvir**2
+        
+    # packed size of r2ab
+    nov_tril = nov*(nov+1)//2
+    size_r2ab = 0
+    for ki, ka, kj in kpts_helper.loop_kkk(nkpts):
+        kb = kconserv[ki, ka, kj]
+        kika = ki * nkpts + ka
+        kjkb = kj * nkpts + kb
+        if kika == kjkb:
+            size_r2ab += nov_tril
+        elif kika > kjkb:
+            size_r2ab += nov**2
+
+    return size_r1, size_r2aa, size_r2ab
+
+
+def amplitudes_to_vector_triplet(r1, r2, kconserv, out=None):
+    # r1 indices: k_i, i, a
+    nkpts, nocc, nvir = r1.shape
+    nov = nocc * nvir
+
+    vector = r1.ravel()
+    r2aa, r2ab = r2
+
+    # pack r2aa
+    otril = np.tril_indices(nocc, k=-1)
+    vtril = np.tril_indices(nvir, k=-1)
+    otril = otril[0]*nocc + otril[1]
+    vtril = vtril[0]*nvir + vtril[1]
+    nocc_tril = nocc*(nocc-1)//2
+    nvir_tril = nvir*(nvir-1)//2
+
+    vector1 = np.empty(r2aa.size, dtype=r2aa.dtype)
+    offset = 0
+    for ki, kj, ka in kpts_helper.loop_kkk(nkpts):
+        kb = kconserv[ki, ka, kj]
+        oovv = r2aa[ki, kj, ka].reshape(nocc**2, nvir**2)
+        if ki == kj:
+            if ka == kb:
+                size = nocc_tril * nvir_tril
+                lib.take_2d(oovv, otril, vtril, out=vector1[offset:offset+size])
+                offset += size
+            elif ka > kb:
+                size = nocc_tril * nvir**2
+                lib.take_2d(oovv, otril, range(nvir**2), out=vector1[offset:offset+size])
+                offset += size
+        elif ki > kj:
+            if ka == kb:
+                size = nocc**2 * nvir_tril
+                lib.take_2d(oovv, range(nocc**2), vtril, out=vector1[offset:offset+size])
+                offset += size
+            elif ka > kb:
+                size = nocc**2 * nvir**2
+                lib.take_2d(oovv, range(nocc**2), range(nvir**2), out=vector1[offset:offset+size])
+                offset += size
+
+    vector = np.hstack((vector, vector1[:offset]))
+    
+    # pack r2ab
+    ovtril = np.tril_indices(nocc*nvir)
+    nov_tril = nov*(nov+1)//2
+    vector1 = np.empty(r2ab.size, dtype=r2ab.dtype)
+    offset = 0
+    for ki, ka, kj in kpts_helper.loop_kkk(nkpts):
+        kb = kconserv[ki, ka, kj]
+        # (i, j, a, b) -> (i, a, j, b)
+        ovov = r2ab[ki, kj, ka].transpose(0,2,1,3).reshape(nov, nov)
+        kika = ki * nkpts + ka
+        kjkb = kj * nkpts + kb
+        if kika == kjkb:
+            size = nov_tril
+            vector1[offset:offset+size] = ovov[ovtril[0], ovtril[1]]
+            offset += size
+        elif kika > kjkb:
+            size = nov**2
+            vector1[offset:offset+size] = ovov.ravel()
+            offset += size
+
+    vector = np.hstack((vector, vector1[:offset]))
+
+    return vector
+
+
+def vector_to_amplitudes_triplet(vector, nkpts, nmo, nocc, kconserv=None):
+    nvir = nmo - nocc
+    nov = nocc * nvir
+
+    size_r1, size_r2aa, size_r2ab = vector_sizes_triplet(nkpts, nmo, nocc, kconserv)
+    r1 = vector[:size_r1].copy().reshape(nkpts, nocc, nvir)
+
+    # unpack r2aa
+    r2aa = np.zeros((nkpts, nkpts, nkpts, nocc**2, nvir**2), dtype=vector.dtype)
+    
+    otril = np.tril_indices(nocc, k=-1)
+    vtril = np.tril_indices(nvir, k=-1)
+    nocc_tril = nocc*(nocc-1)//2
+    nvir_tril = nvir*(nvir-1)//2
+
+    vector1 = vector[size_r1:size_r1+size_r2aa].copy()
+    offset = 0
+    for ki, kj, ka in kpts_helper.loop_kkk(nkpts):
+        kb = kconserv[ki, ka, kj]
+        if ki == kj:
+            if ka == kb:
+                size = nocc_tril * nvir_tril
+                oovv_tril = vector1[offset:offset+size].reshape(nocc_tril, nvir_tril)
+                lib.takebak_2d(r2aa[ki,kj,ka], oovv_tril, otril[0]*nocc+otril[1], vtril[0]*nvir+vtril[1])
+                lib.takebak_2d(r2aa[ki,kj,ka], oovv_tril, otril[1]*nocc+otril[0], vtril[1]*nvir+vtril[0])
+                oovv_tril = -oovv_tril
+                lib.takebak_2d(r2aa[ki,kj,ka], oovv_tril, otril[0]*nocc+otril[1], vtril[1]*nvir+vtril[0])
+                lib.takebak_2d(r2aa[ki,kj,ka], oovv_tril, otril[1]*nocc+otril[0], vtril[0]*nvir+vtril[1])
+                offset += size
+            elif ka > kb:
+                size = nocc_tril * nvir**2
+                oovv_tril = vector1[offset:offset+size].reshape(nocc_tril, nvir**2)
+                lib.takebak_2d(r2aa[ki,kj,ka], oovv_tril, otril[0]*nocc+otril[1], range(nvir**2))
+                tmp = oovv_tril.reshape(nocc_tril, nvir, nvir).transpose(0, 2, 1).reshape(nocc_tril, nvir**2)
+                lib.takebak_2d(r2aa[ki,kj,kb], tmp, otril[1]*nocc+otril[0], range(nvir**2))
+                oovv_tril = -oovv_tril
+                lib.takebak_2d(r2aa[ki,kj,ka], oovv_tril, otril[1]*nocc+otril[0], range(nvir**2))
+                tmp = -tmp
+                lib.takebak_2d(r2aa[ki,kj,kb], tmp, otril[0]*nocc+otril[1], range(nvir**2))
+                offset += size
+        elif ki > kj:
+            if ka == kb:
+                size = nocc**2 * nvir_tril
+                oovv_tril = vector1[offset:offset+size].reshape(nocc**2, nvir_tril)
+                lib.takebak_2d(r2aa[ki,kj,ka], oovv_tril, range(nocc**2), vtril[0]*nvir+vtril[1])
+                tmp = oovv_tril.reshape(nocc, nocc, nvir_tril).transpose(1, 0, 2).reshape(nocc**2, nvir_tril)
+                lib.takebak_2d(r2aa[kj,ki,ka], tmp, range(nocc**2), vtril[1]*nvir+vtril[0])
+                oovv_tril = -oovv_tril
+                lib.takebak_2d(r2aa[ki,kj,ka], oovv_tril, range(nocc**2), vtril[1]*nvir+vtril[0])
+                tmp = -tmp
+                lib.takebak_2d(r2aa[kj,ki,ka], tmp, range(nocc**2), vtril[0]*nvir+vtril[1])
+                offset += size
+            elif ka > kb:
+                size = nocc**2 * nvir**2
+                oovv = vector1[offset:offset+size].reshape(nocc, nocc, nvir, nvir)
+                tmp = oovv.reshape(nocc**2, nvir**2)  #ij_ab
+                lib.takebak_2d(r2aa[ki,kj,ka], tmp, range(nocc**2), range(nvir**2))
+                tmp = oovv.transpose(1,0,3,2).reshape(nocc**2, nvir**2)  #ji_ba
+                lib.takebak_2d(r2aa[kj,ki,kb], tmp, range(nocc**2), range(nvir**2))
+                tmp = -oovv.transpose(1,0,2,3).reshape(nocc**2, nvir**2)  #ji_ab
+                lib.takebak_2d(r2aa[kj,ki,ka], tmp, range(nocc**2), range(nvir**2))
+                tmp = -oovv.transpose(0,1,3,2).reshape(nocc**2, nvir**2)  #ij_ba
+                lib.takebak_2d(r2aa[ki,kj,kb], tmp, range(nocc**2), range(nvir**2))
+                offset += size        
+    r2aa = r2aa.reshape(nkpts, nkpts, nkpts, nocc, nocc, nvir, nvir)
+
+    # unpack r2ab
+    r2ab = np.zeros((nkpts, nkpts, nkpts, nov, nov), dtype=vector.dtype)
+    ovtril = np.tril_indices(nov)
+    nov_tril = nov*(nov+1)//2
+
+    vector1 = vector[size_r1+size_r2aa:].copy()
+    offset = 0
+    for ki, ka, kj in kpts_helper.loop_kkk(nkpts):
+        kb = kconserv[ki, ka, kj]
+        kika = ki * nkpts + ka
+        kjkb = kj * nkpts + kb
+        if kika == kjkb:
+            size = nov_tril
+            ovov_tril = vector1[offset:offset+size]
+            r2ab[ki, kj, ka, ovtril[0], ovtril[1]] = ovov_tril
+            r2ab[kj, ki, kb, ovtril[1], ovtril[0]] = -ovov_tril
+            offset += size
+        elif kika > kjkb:
+            size = nov**2
+            ovov_tril = vector1[offset:offset+size].reshape(nov, nov)
+            r2ab[ki, kj, ka] = ovov_tril
+            r2ab[kj, ki, kb] = -ovov_tril.transpose()
+            offset += size
+    r2ab = r2ab.reshape(nkpts, nkpts, nkpts, nocc, nvir, nocc, nvir).transpose(0,1,2,3,5,4,6)
+
+    return r1, (r2aa, r2ab)    
+
+def amplitudes_to_vector_s4(t1, t2, out=None):
+    nocc, nvir = t1.shape
+    nov = nocc * nvir
+    size = nov + nocc*(nocc-1)//2*nvir*(nvir-1)//2
+    vector = np.ndarray(size, t1.dtype, buffer=out)
+    vector[:nov] = t1.ravel()
+    otril = np.tril_indices(nocc, k=-1)
+    vtril = np.tril_indices(nvir, k=-1)
+    otril = otril[0]*nocc + otril[1]
+    vtril = vtril[0]*nvir + vtril[1]
+    lib.take_2d(t2.reshape(nocc**2,nvir**2), otril, vtril, out=vector[nov:])
+    return vector
+
+def vector_to_amplitudes_s4(vector, nmo, nocc):
+    nvir = nmo - nocc
+    nov = nocc * nvir
+    size = nov + nocc*(nocc-1)//2*nvir*(nvir-1)//2
+    t1 = vector[:nov].copy().reshape((nocc,nvir))
+    t2 = np.zeros((nocc,nocc,nvir,nvir), dtype=vector.dtype)
+    t2 = _unpack_4fold(vector[nov:size], nocc, nvir)
+    return t1, t2
+
+def _unpack_4fold(c2vec, nocc, nvir):
+    t2 = np.zeros((nocc**2,nvir**2), dtype=c2vec.dtype)
+    if nocc > 1 and nvir > 1:
+        t2tril = c2vec.reshape(nocc*(nocc-1)//2,nvir*(nvir-1)//2)
+        otril = np.tril_indices(nocc, k=-1)
+        vtril = np.tril_indices(nvir, k=-1)
+        lib.takebak_2d(t2, t2tril, otril[0]*nocc+otril[1], vtril[0]*nvir+vtril[1])
+        lib.takebak_2d(t2, t2tril, otril[1]*nocc+otril[0], vtril[1]*nvir+vtril[0])
+        t2tril = -t2tril
+        lib.takebak_2d(t2, t2tril, otril[0]*nocc+otril[1], vtril[1]*nvir+vtril[0])
+        lib.takebak_2d(t2, t2tril, otril[1]*nocc+otril[0], vtril[0]*nvir+vtril[1])
+    return t2.reshape(nocc,nocc,nvir,nvir)
+    
+
+def eeccsd_diag_triplet(eom, kshift=0, imds=None):
+    '''Diagonal elements of similarity-transformed Hamiltonian for triplets'''
+    if imds is None: imds = eom.make_imds()
+    t1, t2 = imds.t1, imds.t2
+    nkpts, nocc, nvir = t1.shape
+    kconserv = eom.kconserv
+    kconserv_r1 = eom.get_kconserv_ee_r1(kshift)
+    kconserv_r2 = eom.get_kconserv_ee_r2(kshift)
+
+    Hr1 = np.zeros((nkpts, nocc, nvir), dtype=t1.dtype)
+
+    for ki in range(nkpts):
+        ka = kconserv_r1[ki]
+        Hr1[ki] -= imds.Foo[ki].diagonal()[:,None]
+        Hr1[ki] += imds.Fvv[ka].diagonal()[None,:]
+        Hr1[ki] += np.einsum('iaai->ia', imds.woVvO[ki, ka, ka])
+        Hr1[ki] -= np.einsum('iaia->ia', imds.woVoV[ki, ka, ki])
+
+    Hr2ab = np.zeros((nkpts, nkpts, nkpts, nocc, nocc, nvir, nvir), dtype=t1.dtype)
+    # TODO Allow partition='mp'
+    if eom.partition == "mp":
+        raise NotImplementedError
+    else:
+        for ki, kj, ka in kpts_helper.loop_kkk(nkpts):
+            kb = kconserv_r2[ki, ka, kj]
+            Hr2ab[ki, kj, ka] -= imds.Foo[ki].diagonal()[:, None, None, None]
+            Hr2ab[ki, kj, ka] -= imds.Foo[kj].diagonal()[None, :, None, None]
+            Hr2ab[ki, kj, ka] += imds.Fvv[ka].diagonal()[None, None, :, None]
+            Hr2ab[ki, kj, ka] += imds.Fvv[kb].diagonal()[None, None, None, :]
+
+            Hr2ab[ki, kj, ka] += np.einsum('jbbj->jb', imds.woVvO[kj, kb, kb])[None, :, None, :]
+            Hr2ab[ki, kj, ka] -= np.einsum('jbjb->jb', imds.woVoV[kj, kb, kj])[None, :, None, :]
+            Hr2ab[ki, kj, ka] -= np.einsum('jaja->ja', imds.woVoV[kj, ka, kj])[None, :, :, None]
+            Hr2ab[ki, kj, ka] -= np.einsum('ibib->ib', imds.woVoV[ki, kb, ki])[:, None, None, :]
+            Hr2ab[ki, kj, ka] += np.einsum('iaai->ia', imds.woVvO[ki, ka, ka])[:, None, :, None]
+            Hr2ab[ki, kj, ka] -= np.einsum('iaia->ia', imds.woVoV[ki, ka, ki])[:, None, :, None]
+            Hr2ab[ki, kj, ka] += np.einsum('abab->ab', imds.wvVvV[ka, kb, ka])[None, None, :, :]
+            Hr2ab[ki, kj, ka] += np.einsum('ijij->ij', imds.woOoO[ki, kj, ki])[:, :, None, None]
+
+            # ki - ka + km - kb = G
+            # => ka - ki + kb - km = G
+            km = kconserv[ka, ki, kb]
+            Hr2ab[ki, kj, ka] -= np.einsum('imab,imab->iab', imds.woOvV[ki, km, ka], imds.t2[ki, km, ka])[:, None, :, :]
+            # km - ka + kj - kb = G
+            # => ka - kj + kb - km = G
+            km = kconserv[ka, kj, kb]
+            Hr2ab[ki, kj, ka] -= np.einsum('mjab,mjab->jab', imds.woOvV[km, kj, ka], imds.t2[km, kj, ka])[None, :, :, :]
+            # ki - ka + kj - ke = G
+            Hr2ab[ki, kj, ka] -= np.einsum('ijae,ijae->ija', imds.woOvV[ki, kj, ka], imds.t2[ki, kj, ka])[:, :, :, None]
+            # ki - ke + kj - kb = G
+            ke = kconserv[ki, kb, kj]
+            Hr2ab[ki, kj, ka] -= np.einsum('ijeb,ijeb->ijb', imds.woOvV[ki, kj, ke], imds.t2[ki, kj, ke])[:, :, None, :]
+
+    Hr2aa = np.copy(Hr2ab)
+
+    norm = np.linalg.norm
+    print(f"PBC diag Hr1 norm: {norm(Hr1)}, Hr2aa norm: {norm(Hr2aa)}, Hr2ab norm: {norm(Hr2ab)}")
+
+    vector = amplitudes_to_vector_triplet(Hr1, (Hr2aa, Hr2ab), kconserv_r2)
+    return vector
+
+
+def eeccsd_matvec_triplet(eom, vector, kshift, imds=None, diag=None):
+    cput0 = (time.clock(), time.time())
+    log = logger.Logger(eom.stdout, eom.verbose)
+
+    if imds is None: imds = eom.make_imds()
+    nocc = eom.nocc
+    nmo = eom.nmo
+    nvir = nmo - nocc
+    nkpts = eom.nkpts
+    kconserv = imds.kconserv
+    kconserv_r1 = eom.get_kconserv_ee_r1(kshift)
+    kconserv_r2 = eom.get_kconserv_ee_r2(kshift)
+    r1, r2 = vector_to_amplitudes_triplet(vector, nkpts, nmo, nocc, kconserv_r2)
+    r2aa, r2ab = r2
+
+    # Build antisymmetrized tensors that will be used later
+    # r2aa is taken to be antisymmetrised at all times - no action needed
+
+    t2_bar = np.zeros_like(imds.t2)
+    wvovv_bar = np.zeros_like(imds.wvOvV)
+    wooov_bar = np.zeros_like(imds.woOoV)
+    wovvo_bar = np.zeros_like(imds.woVvO)
+    woovv_bar = np.zeros_like(imds.woOvV)
+    wvvvo_bar = np.zeros_like(imds.wvVvO)
+    wovoo_bar = np.zeros_like(imds.woVoO)
+    wvvvv_bar = np.zeros_like(imds.wvVvV)
+    woooo_bar = np.zeros_like(imds.woOoO)
+
+    for ki, kj, ka in kpts_helper.loop_kkk(nkpts):
+        # t2bar_ijab = r_ijab - r_ijba
+        #  ki - ka + kj - kb = kshift
+        kb = kconserv[ki, ka, kj]
+        t2_bar[ki, kj, ka] = imds.t2[ki, kj, ka] - imds.t2[ki, kj, kb].transpose(0,1,3,2)
+        # Wbar_cjab = W_cjab - W_cjba
+        #  ki->kc, kj->kj, ka->ka, kb->kb
+        wkc, wkj, wka, wkb = ki, kj, ka, kb
+        wvovv_bar[wkc, wkj, wka] = imds.wvOvV[wkc, wkj, wka] - imds.wvOvV[wkc, wkj, wkb].transpose(0,1,3,2)
+        # Wbar_ijkb = W_ijkb - W_jikb
+        #  ki->ki, kj->kj, ka->kk, kb->kb
+        wki, wkj, wkk, wkb = ki, kj, ka, kb
+        wooov_bar[wki, wkj, wkk] = imds.woOoV[wki, wkj, wkk] - imds.woOoV[wkj, wki, wkk].transpose(1,0,2,3)
+        # Wbar_iabj = W_iabj - W_iajb
+        #  ki->ki, kj->ka, ka->kb, kb->kj
+        wki, wka, wkb, wkj = ki, kj, ka, kb
+        wovvo_bar[wki, wka, wkb] = imds.woVvO[wki, wka, wkb] - imds.woVoV[wki, wka, wkj].transpose(0,1,3,2)
+        # Wbar_ijab = W_ijab - W_ijba
+        #  ki->ki, kj->kj, ka->ka, kb->kb
+        wki, wkj, wka, wkb = ki, kj, ka, kb
+        woovv_bar[wki, wkj, wka] = imds.woOvV[wki, wkj, wka] - imds.woOvV[wki, wkj, wkb].transpose(0,1,3,2)
+        # Wbar_abci = W_abci - W_baci
+        #  ki->ka, kj->kb, ka->kc, kb->ki
+        wka, wkb, wkc, wki = ki, kj, ka, kb
+        wvvvo_bar[wka, wkb, wkc] = imds.wvVvO[wka, wkb, wkc] - imds.wvVvO[wkb, wka, wkc].transpose(1,0,2,3)
+        # Wbar_iajk = W_iajk - W_iakj
+        #  ki->ki, kj->ka, ka->kj, kb->kk
+        wki, wka, wkj, wkk = ki, kj, ka, kb
+        wovoo_bar[wki, wka, wkj] = imds.woVoO[wki, wka, wkj] - imds.woVoO[wki, wka, wkk].transpose(0,1,3,2)
+        # Wbar_abcd = W_abcd - W_abdc
+        #  ki->ka, kj->kb, ka->kc, kb->kd
+        wka, wkb, wkc, wkd = ki, kj, ka, kb
+        wvvvv_bar[wka, wkb, wkc] = imds.wvVvV[wka, wkb, wkc] - imds.wvVvV[wka, wkb, wkd].transpose(0,1,3,2)
+        # Wbar_ijkl = W_ijkl - W_ijlk
+        #  ki->ki, kj->kj, ka->kk, kb->kl
+        wki, wkj, wkk, wkl = ki, kj, ka, kb
+        woooo_bar[wki, wkj, wkk] = imds.woOoO[wki, wkj, wkk] - imds.woOoO[wki, wkj, wkl].transpose(0,1,3,2)
+
+    Hr1 = np.zeros_like(r1)
+    for ki in range(nkpts):
+        #  ki - ka = kshift
+        ka = kconserv_r1[ki]
+        # r_ia <- - F_ki r_ka
+        # => kk = ki
+        kk = ki
+        Hr1[ki] -= einsum('ki,ka->ia', imds.Foo[kk], r1[kk])  #1
+        # r_ia <- F_ac r_ic
+        Hr1[ki] += einsum('ac,ic->ia', imds.Fvv[ka], r1[ki])  #2
+
+        for kk in range(nkpts):
+            # r_ia <- F_kc (r_ikac + r_iKaC)
+            Hr1[ki] += einsum('kc,ikac->ia', imds.Fov[kk], r2aa[ki,kk,ka])  #3
+            Hr1[ki] += einsum('kc,ikac->ia', imds.Fov[kk], r2ab[ki,kk,ka])  #4
+
+            # r_ia <- (W_ak[ic] - W_aKiC) r_kc
+            # => kk - kc = kshift
+            kc = kconserv_r1[kk]
+            Hr1[ki] += einsum('kaci,kc->ia', wovvo_bar[kk,ka,kc], r1[kk])  #5
+            Hr1[ki] -= einsum('kaci,kc->ia', imds.woVvO[kk,ka,kc], r1[kk])  #6
+
+            for kc in range(nkpts):
+                # r_ia <- (1/2) W_ak[cd] r_ikcd
+                Hr1[ki] += 0.5 * einsum('akcd,ikcd->ia', wvovv_bar[ka,kk,kc], r2aa[ki,kk,kc])  #7
+                # r_ia <- W_aKcD r_iKcD
+                Hr1[ki] += einsum('akcd,ikcd->ia', imds.wvOvV[ka,kk,kc], r2ab[ki,kk,kc])  #8
+
+            for kl in range(nkpts):
+                # r_ia <- - (1/2) W_kl[ic] r_klac)
+                Hr1[ki] -= 0.5 * einsum('klic,klac->ia', wooov_bar[kk,kl,ki], r2aa[kk,kl,ka])  #9
+                # r_ia <- - W_kLiC r_kLaC
+                Hr1[ki] -= einsum('klic,klac->ia', imds.woOoV[kk,kl,ki], r2ab[kk,kl,ka])  #10
+
+    Hr2aa = np.zeros_like(r2aa)
+    for ki, kj, ka in kpts_helper.loop_kkk(nkpts):
+        #  ki - ka + kj - kb = kshift
+        kb = kconserv_r2[ki, ka, kj]
+        # r_ijab <= - (1/2) F_kj r_ikab
+        # => kk = kj
+        kk = kj
+        Hr2aa[ki,kj,ka] -= 0.5 * einsum('kj,ikab->ijab', imds.Foo[kk], r2aa[ki,kk,ka])  #11
+        # r_ijab <= (1/2) F_bc r_ijac
+        Hr2aa[ki,kj,ka] += 0.5 * einsum('bc,ijac->ijab', imds.Fvv[kb], r2aa[ki,kj,ka])  #12
+
+        # r_ijab <= (1/2) W_ab[cj] r_ic
+        # => ki - kc = kshift
+        kc = kconserv_r1[ki]
+        Hr2aa[ki,kj,ka] += 0.5 * einsum('abcj,ic->ijab', wvvvo_bar[ka,kb,kc], r1[ki])  #13
+        # r_ijab <= - (1/2) W_kb[ij] r_ka
+        # => kk + kb - ki - kj = G
+        # => ki - kb + kj - kk = G
+        kk = kconserv[ki, kb, kj]
+        Hr2aa[ki,kj,ka] -= 0.5 * einsum('kbij,ka->ijab', wovoo_bar[kk,kb,ki], r1[kk])  #14
+
+        for kk in range(nkpts):
+            # r_ijab <= - W_kb[cj] r_ikac
+            # => ki - ka + kk - kc = kshift
+            kc = kconserv_r2[ki, ka, kk]
+            Hr2aa[ki,kj,ka] += einsum('kbcj,ikac->ijab', wovvo_bar[kk,kb,kc], r2aa[ki,kk,ka])  #15
+            # r_ijab <= - W_KbCj r_iKaC
+            Hr2aa[ki,kj,ka] += einsum('kbcj,ikac->ijab', imds.woVvO[kk,kb,kc], r2ab[ki,kk,ka])  #16
+
+        for kc in range(nkpts):
+            # r_ijab <= (1/8) W_ab[cd] r_ijcd
+            Hr2aa[ki,kj,ka] += 0.125 * einsum('abcd,ijcd->ijab', wvvvv_bar[ka,kb,kc], r2aa[ki,kj,kc])  #17
+
+        for kk in range(nkpts):
+            # r_ijab <= (1/8) W_kl[ij] r_klab
+            # => kk + kl - ki - kj = G
+            # => ki - kk + kj - kl = G
+            kl = kconserv[ki, kk, kj]
+            Hr2aa[ki,kj,ka] += 0.125 * einsum('klij,klab->ijab', woooo_bar[kk,kl,ki], r2aa[kk,kl,ka])  #18
+
+    #
+    # r_ijab <= - t_ik[ab] (0.25 * W_kl[cd] r_jlcd + 0.5 * W_kLcD r_jLcD)
+    #
+
+    # tmp_jk = - (0.25 * W_kl[cd] r_jlcd + 0.5 * W_kLcD r_jLcD)
+    tmp = np.zeros((nkpts, nocc, nocc), dtype=r1.dtype)    
+    for kj in range(nkpts):
+        # => kk + kl - kc - kd = G
+        #    kj + kl - kc - kd = kshift
+        # => kj - kk = kshift
+        kk = kconserv_r1[kj]
+        for kl in range(nkpts):
+            for kc in range(nkpts):
+                tmp[kj] -= 0.25 * einsum('klcd,jlcd->jk', woovv_bar[kk,kl,kc], r2aa[kj,kl,kc])
+                tmp[kj] -= 0.5 * einsum('klcd,jlcd->jk', imds.woOvV[kk,kl,kc], r2ab[kj,kl,kc])
+
+    # r_ijab <= t_ik[ab] * tmp_jk
+    for ki, kj, ka in kpts_helper.loop_kkk(nkpts):
+        # kj - kk = kshift
+        kk = kconserv_r1[kj]
+        Hr2aa[ki,kj,ka] += einsum('ikab,jk->ijab', t2_bar[ki,kk,ka], tmp[kj])  #19
+
+    #
+    # r_ijab <= + 0.5 * t_ik[ab] (- W_kl[jc] r_lc + W_kLjC r_LC)
+    #
+
+    # tmp_jk = (- W_kl[jc] r_lc + W_kLjC r_LC)
+    tmp = np.zeros((nkpts, nocc, nocc), dtype=r1.dtype)    
+    for kj in range(nkpts):
+        # => kk + kl - kj - kc = G
+        #    kl - kc = kshift
+        # => kj - kk = kshift
+        kk = kconserv_r1[kj]
+        for kl in range(nkpts):
+            tmp[kj] -= einsum('kljc,lc->jk', wooov_bar[kk,kl,kj], r1[kl])
+            tmp[kj] += einsum('kljc,lc->jk', imds.woOoV[kk,kl,kj], r1[kl])
+
+    # r_ijab <= 0.5 * t_ik[ab] * tmp_jk
+    for ki, kj, ka in kpts_helper.loop_kkk(nkpts):
+        # kj - kk = kshift
+        kk = kconserv_r1[kj]
+        Hr2aa[ki,kj,ka] += 0.5 * einsum('ikab,jk->ijab', t2_bar[ki,kk,ka], tmp[kj])  #20
+
+    #        
+    # r_ijab <= - t_ij[ac] (0.25 * W_kl[cd] r_klbd + 0.5 * W_kLcD r_kLbD)
+    #
+
+    # tmp_cb = - (0.25 * W_kl[cd] r_klbd + 0.5 * W_kLcD r_kLbD)
+    tmp = np.zeros((nkpts, nvir, nvir), dtype=r1.dtype)
+    for kc in range(nkpts):
+        # => kk + kl - kc - kd = G
+        #    kk + kl - kb - kd = kshift
+        # => kc - kb = kshift
+        kb = kconserv_r1[kc]
+        for kk in range(nkpts):
+            for kl in range(nkpts):
+                tmp[kc] -= 0.25 * einsum('klcd,klbd->cb', woovv_bar[kk,kl,kc], r2aa[kk,kl,kb])
+                tmp[kc] -= 0.5 * einsum('klcd,klbd->cb', imds.woOvV[kk,kl,kc], r2ab[kk,kl,kb])
+
+    # r_ijab <= t_ij[ac] * tmp_cb
+    for ki, kj, ka in kpts_helper.loop_kkk(nkpts):
+        # ki - ka + kj - kc = G
+        kc = kconserv[ki, ka, kj]
+        Hr2aa[ki,kj,ka] += einsum('ijac,cb->ijab', t2_bar[ki,kj,ka], tmp[kc])  #21
+
+    #
+    # r_ijab <= 0.5 * t_ij[ac] (W_bk[cd] r_kd - W_bKcD r_KD)
+    #
+
+    # tmp_cb = W_bk[cd] r_kd - W_bKcD r_KD
+    tmp = np.zeros((nkpts, nvir, nvir), dtype=r1.dtype)
+    for kc in range(nkpts):
+        # => kb + kk - kc - kd = G 
+        #    kk - kd = kshift
+        # => kc - kb = kshift
+        kb = kconserv_r1[kc]
+        for kk in range(nkpts):
+            tmp[kc] += einsum('bkcd,kd->cb', wvovv_bar[kb,kk,kc], r1[kk])
+            tmp[kc] -= einsum('bkcd,kd->cb', imds.wvOvV[kb,kk,kc], r1[kk])
+
+    # r_ijab <= 0.5 * t_ij[ac] tmp_cb
+    for ki, kj, ka in kpts_helper.loop_kkk(nkpts):
+        # ki - ka + kj - kc = G
+        kc = kconserv[ki, ka, kj]
+        Hr2aa += 0.5 * einsum('ijac,cb->ijab', t2_bar[ki,kj,ka], tmp[kc])  #22
+
+    #----------------------------------------------------------
+
+    Hr2ab = np.zeros_like(r2ab)
+
+    for ki, kj, ka in kpts_helper.loop_kkk(nkpts):
+        #  ki - ka + kj - kb = kshift
+        kb = kconserv_r2[ki, ka, kj]
+        # r_iJaB <= - F_KJ r_iKaB
+        # => kk = kj
+        kk = kj
+        Hr2ab[ki,kj,ka] -= einsum('kj,ikab->ijab', imds.Foo[kk], r2ab[ki,kk,ka])  #23
+        # r_iJaB <= F_BC r_iJaC
+        Hr2ab[ki,kj,ka] += einsum('bc,ijac->ijab', imds.Fvv[kb], r2ab[ki,kj,ka])  #24
+
+        # r_iJaB <= W_aBcJ r_ic
+        # => ki - kc = kshift
+        kc = kconserv_r1[ki]
+        Hr2ab[ki,kj,ka] += einsum('abcj,ic->ijab', imds.wvVvO[ka,kb,kc], r1[ki])  #25
+        # r_iJaB <= - W_kBiJ r_ka
+        # => kk + kb - ki - kj = G
+        # => ki - kb + kj - kk = G
+        kk = kconserv[ki, kb, kj]
+        Hr2ab[ki,kj,ka] -= einsum('kbij,ka->ijab', imds.woVoO[kk,kb,ki], r1[kk])  #26
+        
+        for kk in range(nkpts):
+            # r_iJaB <= W_kBcJ r_ikac
+            # => ki + kk - ka - kc = kshift
+            kc = kconserv_r2[ki, ka, kk]
+            Hr2ab[ki,kj,ka] += einsum('kbcj,ikac->ijab', imds.woVvO[kk,kb,kc], r2aa[ki,kk,ka])  #27
+
+            # r_iJaB <= W_KB[CJ] r_iKaC
+            # => ki - ka + kk - kc = kshift
+            kc = kconserv_r2[ki, ka, kk]
+            Hr2ab[ki,kj,ka] += einsum('kbcj,ikac->ijab', wovvo_bar[kk,kb,kc], r2ab[ki,kk,ka])  #28
+
+            # r_iJaB <= -W_kBiC r_kJaC
+            Hr2ab[ki,kj,ka] -= einsum('kbic,kjac->ijab', imds.woVoV[kk,kb,ki], r2ab[kk,kj,ka])  #29 Missing diagram!
+
+        for kc in range(nkpts):
+            # r_ijab <= 0.5 W_aBcD r_iJcD
+            Hr2ab[ki,kj,ka] += 0.5 * einsum('abcd,ijcd->ijab', imds.wvVvV[ka,kb,kc], r2ab[ki,kj,kc])  #31
+        
+        for kk in range(nkpts):
+            # r_ijab <= 0.5 W_kLiJ r_kLaB
+            # => kk + kl - ki - kj = G
+            # => ki - kk + kj - kl = G
+            kl = kconserv[ki, kk, kj]
+            Hr2ab[ki,kj,ka] += 0.5 * einsum('klij,klab->ijab', imds.woOoO[kk,kl,ki], r2ab[kk,kl,ka])  #32
+
+    #
+    # r_iJaB <= + t_iKaB (W_lKdC r_lJdC + 0.5 * W_KL[CD] r_JLCD)
+    #
+
+    # tmp_jk = W_lKdC r_lJdC + 0.5 * W_KL[CD] r_JLCD
+    tmp = np.zeros((nkpts, nocc, nocc), dtype=r1.dtype)
+    for kj in range(nkpts):
+        # => kl + kk - kd - kc = G
+        #    kl + kj - kd - kc = kshift
+        # => kj - kk = kshift
+        kk = kconserv_r1[kj]
+        for kl in range(nkpts):
+            for kc in range(nkpts):
+                tmp[kj] += einsum('klcd,jlcd->jk', imds.woOvV[kk,kl,kc], r2ab[kj,kl,kc])
+                tmp[kj] += 0.5 * einsum('klcd,jlcd->jk', woovv_bar[kk,kl,kc], r2aa[kj,kl,kc])
+
+    # r_iJaB <= t_iKaB tmp_jk
+    for ki, kj, ka in kpts_helper.loop_kkk(nkpts):
+        # kj - kk = kshift
+        kk = kconserv_r1[kj]
+        Hr2ab[ki,kj,ka] += einsum('ikab,jk->ijab', imds.t2[ki,kk,ka], tmp[kj])  #33
+
+    #
+    # r_iJaB <= + t_iKaB (- W_lKcJ r_lc + W_KL[JC] r_LC)
+    #
+
+    # tmp_jk = - W_lKcJ r_lc + W_KL[JC] r_LC
+    tmp = np.zeros((nkpts, nocc, nocc), dtype=r1.dtype)
+    for kj in range(nkpts):
+        # => kl + kk - kc - kj = G
+        #    kl - kc = kshift
+        # => kj - kk = kshift
+        kk = kconserv_r1[kj]
+        for kl in range(nkpts):
+            # kl - kc = kshift
+            kc = kconserv_r1[kl]
+            tmp[kj] -= einsum('kljc,lc->jk', imds.woOoV[kk,kl,kj], r1[kl])
+            tmp[kj] += einsum('kljc,lc->jk', wooov_bar[kk,kl,kj], r1[kl])
+
+    # r_iJaB <= + t_iKaB tmp_jk
+    for ki, kj, ka in kpts_helper.loop_kkk(nkpts):
+        # kj - kk = kshift
+        kk = kconserv_r1[kj]
+        Hr2ab[ki,kj,ka] += einsum('ikab,jk->ijab', imds.t2[ki,kk,ka], tmp[kj])  #34
+
+    #
+    # r_iJaB <= + t_iJaC (W_lKdC r_lKdB + 0.5 * W_KL[CD] r_KLBD)
+    #
+
+    # tmp_cb = W_lKdC r_lKdB + 0.5 * W_KL[CD] r_KLBD
+    tmp = np.zeros((nkpts, nvir, nvir), dtype=r1.dtype)
+    for kc in range(nkpts):
+        # => kl + kk - kd - kc = G
+        #    kl + kk - kd - kb = kshift
+        # => kc - kb = kshift
+        kb = kconserv_r1[kc]
+        for kl in range(nkpts):
+            for kk in range(nkpts):
+                tmp[kc] += einsum('klcd,klbd->cb', imds.woOvV[kk,kl,kc], r2ab[kk,kl,kb])
+                tmp[kc] += 0.5 * einsum('klcd,klbd->cb', woovv_bar[kk,kl,kc], r2aa[kk,kl,kb])
+
+    # r_iJaB <= + t_iJaC tmp_cb
+    for ki, kj, ka in kpts_helper.loop_kkk(nkpts):
+        # ki + kj - ka - kc = G
+        kc = kconserv[ki, ka, kj]
+        Hr2ab[ki,kj,ka] += einsum('ijac,cb->ijab', imds.t2[ki,kj,ka], tmp[kc])  #35
+
+    #
+    # r_iJaB <= + t_iJaC (W_kBdC r_kd - W_BK[CD] r_KD)
+    #
+
+    # tmp_cb = W_kBdC r_kd - W_BK[CD] r_KD
+    tmp = np.zeros((nkpts, nvir, nvir), dtype=r1.dtype)
+    for kc in range(nkpts):
+        # => kk + kb - kd - kc = G
+        #    kk - kd = kshift
+        # => kc - kb = kshift
+        kb = kconserv_r1[kc]
+        for kk in range(nkpts):
+            tmp[kc] += einsum('bkcd,kd->cb', imds.wvOvV[kb,kk,kc], r1[kk])
+            tmp[kc] -= einsum('bkcd,kd->cb', wvovv_bar[kb,kk,kc], r1[kk])
+
+    # r_iJaB <= + t_iJaC tmp_cb
+    for ki, kj, ka in kpts_helper.loop_kkk(nkpts):
+        # ki + kj - ka - kc = G
+        kc = kconserv[ki, ka, kj]
+        Hr2ab[ki,kj,ka] += einsum('ijac,cb->ijab', imds.t2[ki,kj,ka], tmp[kc])  #36
+
+    #
+    # Finally, antisymmetrize Hr2
+    #
+
+    # Hr2aa(i,j,a,b) = Hr2aa(i,j,a,b) - Hr2aa(i,j,b,a) - Hr2aa(j,i,a,b) + Hr2aa(j,i,b,a)
+    tmp = np.zeros_like(Hr2aa)
+    for ki, kj, ka in kpts_helper.loop_kkk(nkpts):
+        kb = kconserv_r2[ki, ka, kj]
+        tmp[ki, kj, ka] += Hr2aa[ki, kj, ka]
+        tmp[ki, kj, ka] -= Hr2aa[ki, kj, kb].transpose(0,1,3,2)
+        tmp[ki, kj, ka] -= Hr2aa[kj, ki, ka].transpose(1,0,2,3)
+        tmp[ki, kj, ka] += Hr2aa[kj, ki, kb].transpose(1,0,3,2)
+    Hr2aa[:] = tmp[:]
+    tmp = None
+
+    # Hr2ab(i,j,a,b) = Hr2ab(i,j,a,b) - Hr2ab(j,i,b,a)
+    tmp = np.zeros_like(Hr2ab)
+    for ki, kj, ka in kpts_helper.loop_kkk(nkpts):
+        kb = kconserv_r2[ki, ka, kj]
+        tmp[ki, kj, ka] += Hr2ab[ki, kj, ka]
+        tmp[ki, kj, ka] -= Hr2ab[kj, ki, kb].transpose(1,0,3,2)
+    Hr2ab[:] = tmp[:]
+    tmp = None
+
+    log.timer("matvec EOMEE Triplet", *cput0)
+    return vector
+
+
 class EOMEE(eom_kgccsd.EOMEE):
     kernel = eeccsd
     eeccsd = eeccsd
@@ -1429,6 +2127,7 @@ class EOMEESinglet(EOMEE):
     kernel = eomee_ccsd_singlet
     eomee_ccsd_singlet = eomee_ccsd_singlet
     matvec = eeccsd_matvec_singlet
+    gen_matvec = eeccsd_gen_matvec
     get_init_guess = get_init_guess_cis
     cis = cis_easy
 
@@ -1461,16 +2160,6 @@ class EOMEESinglet(EOMEE):
 
         return size_r1 + size_r2
 
-    def gen_matvec(self, kshift, imds=None, left=False, **kwargs):
-        if imds is None: imds = self.make_imds()
-        diag = self.get_diag(kshift, imds)
-        if left:
-            # TODO allow left vectors to be computed
-            raise NotImplementedError
-        else:
-            matvec = lambda xs: [self.matvec(x, kshift, imds, diag) for x in xs]
-        return matvec, diag
-
     def vector_to_amplitudes(self, vector, kshift=None, nkpts=None, nmo=None, nocc=None, kconserv=None):
         if nmo is None: nmo = self.nmo
         if nocc is None: nocc = self.nocc
@@ -1484,9 +2173,32 @@ class EOMEESinglet(EOMEE):
 
 
 class EOMEETriplet(EOMEE):
+    kernel = eomee_ccsd_singlet
+    eomee_ccsd_triplet = eomee_ccsd_singlet
+    matvec = eeccsd_matvec_triplet
+    get_diag = eeccsd_diag_triplet
+    gen_matvec = eeccsd_gen_matvec
 
     def vector_size(self, kshift=0):
-        return None
+        nocc = self.nocc
+        nmo = self.nmo
+        nkpts = self.nkpts
+        kconserv = self.get_kconserv_ee_r2(kshift)
+
+        size_r1, size_r2aa, size_r2ab = vector_sizes_triplet(nkpts, nmo, nocc, kconserv)
+
+        return size_r1 + size_r2aa + size_r2ab
+
+    def vector_to_amplitudes(self, vector, kshift=None, nkpts=None, nmo=None, nocc=None, kconserv=None):
+        if nmo is None: nmo = self.nmo
+        if nocc is None: nocc = self.nocc
+        if nkpts is None: nkpts = self.nkpts
+        if kconserv is None: kconserv = self.get_kconserv_ee_r2(kshift)
+        return vector_to_amplitudes_triplet(vector, nkpts, nmo, nocc, kconserv)
+
+    def amplitudes_to_vector(self, r1, r2, kshift=None, kconserv=None):
+        if kconserv is None: kconserv = self.get_kconserv_ee_r2(kshift)
+        return amplitudes_to_vector_triplet(r1, r2, kconserv)
 
 
 class EOMEESpinFlip(EOMEE):
