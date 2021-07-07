@@ -2100,6 +2100,8 @@ def eeccsd_matvec_triplet(eom, vector, kshift, imds=None, diag=None):
     Hr2ab[:] = tmp[:]
     tmp = None
 
+    vector = amplitudes_to_vector_triplet(Hr1, (Hr2aa,Hr2ab), kconserv_r2)
+
     log.timer("matvec EOMEE Triplet", *cput0)
     return vector
 
