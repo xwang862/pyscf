@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-cmake_minimum_required (VERSION 2.8)
+cmake_minimum_required (VERSION 3.5)
 project (pyscf)
 
 if (NOT CMAKE_BUILD_TYPE)
@@ -31,9 +31,25 @@ if (CMAKE_COMPILER_IS_GNUCC) # Does it skip the link flag on old OsX?
 endif()
 set(CMAKE_C_FLAGS "-Wall ${CMAKE_C_FLAGS}")
 
-if (${CMAKE_MAJOR_VERSION}.${CMAKE_MINOR_VERSION}.${CMAKE_PATCH_VERSION} VERSION_GREATER 3.0.0)
-  cmake_policy(SET CMP0042 NEW)
+option(BUILD_MARCH_NATIVE "gcc flag -march=native" off)
+if (BUILD_MARCH_NATIVE)
+  include(CheckCCompilerFlag)
+  CHECK_C_COMPILER_FLAG("-march=native" COMPILER_SUPPORTS_MARCH_NATIVE)
+  if(COMPILER_SUPPORTS_MARCH_NATIVE)
+    if ("${CMAKE_C_COMPILER_ID}" STREQUAL "Intel")
+      message("Add CFLAGS -march=native -unroll-aggressive")
+      set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -unroll-aggressive -ipo")
+      set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fno-math-errno")
+    else()
+      message("Add CFLAGS -march=native -ftree-vectorize")
+      set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -march=native -funroll-loops -ftree-vectorize")
+      set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fno-math-errno")
+    endif()
+  endif()
 endif()
+
+
+cmake_policy(SET CMP0042 NEW)
 
 set(CMAKE_INCLUDE_CURRENT_DIR ON)
 
@@ -81,27 +97,6 @@ endif()
 #  OUTPUT_VARIABLE NUMPY_INCLUDE)
 #include_directories(${PYTHON_INCLUDE_DIRS} ${NUMPY_INCLUDE})
 
-
-include(ExternalProject)
-option(BUILD_LIBCINT "Using libcint for analytical gaussian integral" ON)
-option(WITH_F12 "Compling F12 integrals" ON)
-if(BUILD_LIBCINT)
-if(NOT EXISTS "${PROJECT_SOURCE_DIR}/deps/include/cint.h")
-  ExternalProject_Add(libcint
-    GIT_REPOSITORY https://github.com/sunqm/libcint.git
-    GIT_TAG v4.0.7
-    PREFIX ${PROJECT_BINARY_DIR}/deps
-    INSTALL_DIR ${PROJECT_SOURCE_DIR}/deps
-    CMAKE_ARGS -DWITH_F12=${WITH_F12} -DWITH_RANGE_COULOMB=1
-            -DWITH_FORTRAN=0 -DWITH_CINT2_INTERFACE=0 -DMIN_EXPCUTOFF=20
-            -DKEEP_GOING=1
-            -DCMAKE_INSTALL_PREFIX:PATH=<INSTALL_DIR>
-            -DCMAKE_INSTALL_LIBDIR:PATH=lib -DBLA_VENDOR=${BLA_VENDOR}
-            -DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}
-            -DBLAS_LIBRARIES=${BLAS_LIBRARIES}
-  )
-endif()
-endif()
 include_directories(${PROJECT_SOURCE_DIR})
 include_directories(${PROJECT_SOURCE_DIR}/deps/include)
 include_directories(${CMAKE_INSTALL_PREFIX}/include)
@@ -131,15 +126,41 @@ add_subdirectory(vhf)
 add_subdirectory(ao2mo)
 add_subdirectory(mcscf)
 add_subdirectory(cc)
-add_subdirectory(icmpspt)
-add_subdirectory(shciscf)
 add_subdirectory(ri)
 #add_subdirectory(localizer)
-add_subdirectory(hci)
 add_subdirectory(pbc)
-add_subdirectory(extras/mbd)
-add_subdirectory(semiempirical)
 add_subdirectory(agf2)
+
+# Overwrite CMAKE_C_CREATE_SHARED_LIBRARY in Modules/CMakeCInformation.cmake
+# to remove the SONAME flag in the so file. The soname information causes
+# dynamic link error when importing libcint library.
+set(C_LINK_TEMPLATE "<CMAKE_C_COMPILER> <CMAKE_SHARED_LIBRARY_C_FLAGS> <LANGUAGE_COMPILE_FLAGS> <LINK_FLAGS> <CMAKE_SHARED_LIBRARY_CREATE_C_FLAGS> -o <TARGET> <OBJECTS> <LINK_LIBRARIES>")
+set(CXX_LINK_TEMPLATE "<CMAKE_CXX_COMPILER> <CMAKE_SHARED_LIBRARY_CXX_FLAGS> <LANGUAGE_COMPILE_FLAGS> <LINK_FLAGS> <CMAKE_SHARED_LIBRARY_CREATE_CXX_FLAGS> -o <TARGET> <OBJECTS> <LINK_LIBRARIES>")
+
+include(ExternalProject)
+option(BUILD_LIBCINT "Using libcint for analytical gaussian integral" ON)
+option(WITH_F12 "Compling F12 integrals" ON)
+if(BUILD_LIBCINT)
+if(NOT EXISTS "${PROJECT_SOURCE_DIR}/deps/include/cint.h")
+  ExternalProject_Add(libcint
+    GIT_REPOSITORY https://github.com/sunqm/libcint.git
+    GIT_TAG v4.4.1
+    PREFIX ${PROJECT_BINARY_DIR}/deps
+    INSTALL_DIR ${PROJECT_SOURCE_DIR}/deps
+    CMAKE_ARGS -DWITH_F12=${WITH_F12} -DWITH_RANGE_COULOMB=1
+            -DWITH_FORTRAN=0 -DWITH_CINT2_INTERFACE=0 -DMIN_EXPCUTOFF=20
+            -DKEEP_GOING=1
+            -DCMAKE_INSTALL_PREFIX:PATH=<INSTALL_DIR>
+            -DCMAKE_INSTALL_LIBDIR:PATH=lib -DBLA_VENDOR=${BLA_VENDOR}
+            -DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}
+            -DBLAS_LIBRARIES=${BLAS_LIBRARIES}
+            -DCMAKE_C_CREATE_SHARED_LIBRARY=${C_LINK_TEMPLATE}
+            -DBUILD_MARCH_NATIVE=${BUILD_MARCH_NATIVE}
+  )
+  add_dependencies(cgto libcint)
+  add_dependencies(ao2mo libcint)
+endif()
+endif()
 
 option(ENABLE_LIBXC "Using libxc for XC functional library" ON)
 option(ENABLE_XCFUN "Using xcfun for XC functional library" ON)
@@ -147,20 +168,25 @@ option(BUILD_LIBXC "Download and build libxc library" ON)
 option(BUILD_XCFUN "Download and build xcfun library" ON)
 
 if(NOT DISABLE_DFT)
+add_subdirectory(dft)
+
 #if(NOT EXISTS "${PROJECT_SOURCE_DIR}/deps/include/xc.h" AND
 #    ENABLE_LIBXC AND BUILD_LIBXC)
 if(ENABLE_LIBXC AND BUILD_LIBXC)
   ExternalProject_Add(libxc
     #GIT_REPOSITORY https://gitlab.com/libxc/libxc.git
     #GIT_TAG master
-    URL https://gitlab.com/libxc/libxc/-/archive/4.3.4/libxc-4.3.4.tar.gz
+    URL https://gitlab.com/libxc/libxc/-/archive/5.1.2/libxc-5.1.2.tar.gz
     PREFIX ${PROJECT_BINARY_DIR}/deps
     INSTALL_DIR ${PROJECT_SOURCE_DIR}/deps
     CMAKE_ARGS -DCMAKE_BUILD_TYPE=RELEASE -DBUILD_SHARED_LIBS=1
             -DCMAKE_INSTALL_PREFIX:PATH=<INSTALL_DIR>
             -DCMAKE_INSTALL_LIBDIR:PATH=lib
             -DENABLE_FORTRAN=0 -DDISABLE_KXC=0 -DDISABLE_LXC=1
+            -DCMAKE_C_CREATE_SHARED_LIBRARY=${C_LINK_TEMPLATE}
   )
+  add_dependencies(xc_itrf libxc)
+  add_dependencies(dft libxc)
 endif() # ENABLE_LIBXC
 
 #if(NOT EXISTS "${PROJECT_SOURCE_DIR}/deps/include/xcfun.h" AND
@@ -179,34 +205,12 @@ if(ENABLE_XCFUN AND BUILD_XCFUN)
     CMAKE_ARGS -DCMAKE_BUILD_TYPE=RELEASE -DBUILD_SHARED_LIBS=1
             -DXCFUN_MAX_ORDER=3 -DENABLE_TESTALL=0
             -DCMAKE_INSTALL_PREFIX:PATH=<INSTALL_DIR>
+            -DCMAKE_CXX_CREATE_SHARED_LIBRARY=${CXX_LINK_TEMPLATE}
   )
+  add_dependencies(xcfun_itrf libxcfun)
+  add_dependencies(dft libxcfun)
 endif() # ENABLE_XCFUN
-add_subdirectory(dft)
 endif() # DISABLE_DFT
-
-option(ENABLE_TBLIS "Using tblis tensor contraction library" OFF)
-
-if(ENABLE_TBLIS)
-if(NOT EXISTS "${PROJECT_SOURCE_DIR}/deps/include/tblis/tblis.h")
-  ExternalProject_Add(libtblis
-    GIT_REPOSITORY https://github.com/devinamatthews/tblis.git
-    GIT_TAG master
-    PREFIX ${PROJECT_BINARY_DIR}/deps
-    INSTALL_DIR ${PROJECT_SOURCE_DIR}/deps
-    #INSTALL_COMMAND "make install && cp <SOURCE_DIR>/src/python/tblis_einsum.py ${PROJECT_SOURCE_DIR}"
-    CONFIGURE_COMMAND <SOURCE_DIR>/configure --prefix=<INSTALL_DIR> --libdir=<INSTALL_DIR>/lib
-          CC=${CMAKE_C_COMPILER} CXX=${CMAKE_CXX_COMPILER}
-  )
-endif()
-
-add_library(tblis_einsum SHARED np_helper/as_einsum.cxx)
-set_target_properties(tblis_einsum PROPERTIES
-  LIBRARY_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}
-  COMPILE_FLAGS "-std=c++11")
-target_link_libraries(tblis_einsum tblis)
-# add_dependencies(tblis_einsum libtblis)
-endif() # ENABLE_TBLIS
-
 
 if(EXISTS "${PROJECT_SOURCE_DIR}/cmake.user.inc")
   include("${PROJECT_SOURCE_DIR}/cmake.user.inc")

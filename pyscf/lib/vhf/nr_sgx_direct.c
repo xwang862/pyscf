@@ -18,13 +18,13 @@
 
 #include <stdlib.h>
 #include <stdio.h>
-#include <string.h>
 #include <assert.h>
 #include <math.h>
 //#include <omp.h>
 #include "config.h"
 #include "cint.h"
 #include "nr_direct.h"
+#include "gto/gto.h"
 
 #define MAX(I,J)        ((I) > (J) ? (I) : (J))
 
@@ -43,10 +43,6 @@ typedef struct {
         void (*finalize)(SGXJKArray *, double *);
         void (*sanity_check)(int *shls_slice);
 } SGXJKOperator;
-
-int GTOmax_shell_dim(const int *ao_loc, const int *shls_slice, int ncenter);
-int GTOmax_cache_size(int (*intor)(), int *shls_slice, int ncenter,
-                      int *atm, int natm, int *bas, int nbas, double *env);
 
 #define DECLARE_ALL \
         const int *atm = envs->atm; \

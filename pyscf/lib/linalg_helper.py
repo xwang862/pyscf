@@ -164,6 +164,41 @@ def eigh_by_blocks(h, s=None, labels=None):
     idx = numpy.argsort(es)
     return es[idx], cs[:,idx]
 
+def _fill_heff_hermitian(heff, xs, ax, xt, axt, dot):
+    nrow = len(axt)
+    row1 = len(ax)
+    row0 = row1 - nrow
+    for ip, i in enumerate(range(row0, row1)):
+        for jp, j in enumerate(range(row0, i)):
+            heff[i,j] = dot(xt[ip].conj(), axt[jp])
+            heff[j,i] = heff[i,j].conj()
+        heff[i,i] = dot(xt[ip].conj(), axt[ip]).real
+
+    for i in range(row0):
+        axi = numpy.asarray(ax[i])
+        for jp, j in enumerate(range(row0, row1)):
+            heff[j,i] = dot(xt[jp].conj(), axi)
+            heff[i,j] = heff[j,i].conj()
+        axi = None
+    return heff
+
+def _fill_heff(heff, xs, ax, xt, axt, dot):
+    nrow = len(axt)
+    row1 = len(ax)
+    row0 = row1 - nrow
+    for ip, i in enumerate(range(row0, row1)):
+        for jp, j in enumerate(range(row0, row1)):
+            heff[i,j] = dot(xt[ip].conj(), axt[jp])
+
+    for i in range(row0):
+        axi = numpy.asarray(ax[i])
+        xi = numpy.asarray(xs[i])
+        for jp, j in enumerate(range(row0, row1)):
+            heff[i,j] = dot(xi.conj(), axt[jp])
+            heff[j,i] = dot(xt[jp].conj(), axi)
+        axi = xi = None
+    return heff
+
 def davidson(aop, x0, precond, tol=1e-12, max_cycle=50, max_space=12,
              lindep=DAVIDSON_LINDEP, max_memory=MAX_MEMORY,
              dot=numpy.dot, callback=None,
@@ -255,10 +290,11 @@ def davidson(aop, x0, precond, tol=1e-12, max_cycle=50, max_space=12,
         return e, x
 
 def davidson1(aop, x0, precond, tol=1e-12, max_cycle=50, max_space=12,
-             lindep=DAVIDSON_LINDEP, max_memory=MAX_MEMORY,
-             dot=numpy.dot, callback=None,
-             nroots=1, lessio=False, pick=None, verbose=logger.WARN,
-             follow_state=FOLLOW_STATE, tol_residual=None):
+              lindep=DAVIDSON_LINDEP, max_memory=MAX_MEMORY,
+              dot=numpy.dot, callback=None,
+              nroots=1, lessio=False, pick=None, verbose=logger.WARN,
+              follow_state=FOLLOW_STATE, tol_residual=None,
+              fill_heff=_fill_heff_hermitian):
     r'''Davidson diagonalization method to solve  a c = e c.  Ref
     [1] E.R. Davidson, J. Comput. Phys. 17 (1), 87-94 (1975).
     [2] http://people.inf.ethz.ch/arbenz/ewp/Lnotes/chapter11.pdf
@@ -417,20 +453,9 @@ def davidson1(aop, x0, precond, tol=1e-12, max_cycle=50, max_space=12,
         elast = e
         vlast = v
         conv_last = conv
-        for i in range(space):
-            if head <= i < head+rnow:
-                axi = axt[i-head].conj()
-                for k in range(i-head+1):
-                    heff[i,head+k] = dot(axi, xt[k])
-                    heff[head+k,i] = heff[i,head+k].conj()
-            else:
-                axi = numpy.asarray(ax[i]).conj()
-                for k in range(rnow):
-                    heff[i,head+k] = dot(axi, xt[k])
-                    heff[head+k,i] = heff[i,head+k].conj()
-            axi = None
-        xt = axt = None
 
+        fill_heff(heff, xs, ax, xt, axt, dot)
+        xt = axt = None
         w, v = scipy.linalg.eigh(heff[:space,:space])
         if callable(pick):
             w, v, idx = pick(w, v, nroots, locals())
@@ -533,7 +558,7 @@ def davidson1(aop, x0, precond, tol=1e-12, max_cycle=50, max_space=12,
                   icyc, space, max_dx_norm, e, de[ide], norm_min)
         if len(xt) == 0:
             log.debug('Linear dependency in trial subspace. |r| for each state %s',
-                     dx_norm)
+                      dx_norm)
             conv = [conv[k] or (norm < toloose) for k,norm in enumerate(dx_norm)]
             break
 
@@ -734,7 +759,7 @@ def davidson_nosym1(aop, x0, precond, tol=1e-12, max_cycle=50, max_space=12,
                     dot=numpy.dot, callback=None,
                     nroots=1, lessio=False, left=False, pick=pick_real_eigs,
                     verbose=logger.WARN, follow_state=FOLLOW_STATE,
-                    tol_residual=None):
+                    tol_residual=None, fill_heff=_fill_heff):
     if isinstance(verbose, logger.Logger):
         log = verbose
     else:
@@ -814,17 +839,9 @@ def davidson_nosym1(aop, x0, precond, tol=1e-12, max_cycle=50, max_space=12,
         elast = e
         vlast = v
         conv_last = conv
-        for i in range(rnow):
-            for k in range(rnow):
-                heff[head+k,head+i] = dot(xt[k].conj(), axt[i])
-        for i in range(head):
-            axi = numpy.asarray(ax[i])
-            xi = numpy.asarray(xs[i])
-            for k in range(rnow):
-                heff[head+k,i] = dot(xt[k].conj(), axi)
-                heff[i,head+k] = dot(xi.conj(), axt[k])
-            axi = xi = None
 
+        fill_heff(heff, xs, ax, xt, axt, dot)
+        xt = axt = None
         w, v = scipy.linalg.eig(heff[:space,:space])
         w, v, idx = pick(w, v, nroots, locals())
         if SORT_EIG_BY_SIMILARITY:
@@ -926,7 +943,7 @@ def davidson_nosym1(aop, x0, precond, tol=1e-12, max_cycle=50, max_space=12,
                   icyc, space, max_dx_norm, e, de[ide], norm_min)
         if len(xt) == 0:
             log.debug('Linear dependency in trial subspace. |r| for each state %s',
-                     dx_norm)
+                      dx_norm)
             conv = [conv[k] or (norm < toloose) for k,norm in enumerate(dx_norm)]
             break
 
@@ -1025,9 +1042,9 @@ def dgeev(abop, x0, precond, type=1, tol=1e-12, max_cycle=50, max_space=12,
         return e, x
 
 def dgeev1(abop, x0, precond, type=1, tol=1e-12, max_cycle=50, max_space=12,
-          lindep=DAVIDSON_LINDEP, max_memory=MAX_MEMORY,
-          dot=numpy.dot, callback=None,
-          nroots=1, lessio=False, verbose=logger.WARN, tol_residual=None):
+           lindep=DAVIDSON_LINDEP, max_memory=MAX_MEMORY,
+           dot=numpy.dot, callback=None,
+           nroots=1, lessio=False, verbose=logger.WARN, tol_residual=None):
     '''Davidson diagonalization method to solve  A c = e B c.
 
     Args:
@@ -1234,7 +1251,7 @@ def dgeev1(abop, x0, precond, type=1, tol=1e-12, max_cycle=50, max_space=12,
                   icyc, space, max(dx_norm), e, de[ide], norm)
         if len(xt) == 0:
             log.debug('Linear dependency in trial subspace. |r| for each state %s',
-                     dx_norm)
+                      dx_norm)
             conv = all(norm < toloose for norm in dx_norm)
             break
 

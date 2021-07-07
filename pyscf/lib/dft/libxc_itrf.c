@@ -22,7 +22,6 @@
 
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 #include <assert.h>
 #include <xc.h>
 #define MAX(X,Y) ((X) > (Y) ? (X) : (Y))
@@ -395,6 +394,19 @@ int LIBXC_is_meta_gga(int xc_id)
         return mgga;
 }
 
+int LIBXC_needs_laplacian(int xc_id)
+{
+        xc_func_type func;
+        int lapl;
+        if(xc_func_init(&func, xc_id, XC_UNPOLARIZED) != 0){
+                fprintf(stderr, "XC functional %d not found\n", xc_id);
+                exit(1);
+        }
+        lapl = func.info->flags & XC_FLAGS_NEEDS_LAPLACIAN ? 1 : 0;
+        xc_func_end(&func);
+        return lapl;
+}
+
 int LIBXC_is_hybrid(int xc_id)
 {
         xc_func_type func;
@@ -706,7 +718,7 @@ void LIBXC_eval_xc(int nfn, int *fn_id, double *fac, double *omega,
 
         int outlen = xc_output_length(nvar, deriv);
         // output buffer is zeroed in the Python caller
-        //memset(output, 0, sizeof(double) * np*outlen);
+        //NPdset0(output, np*outlen);
 
         double *ebuf = malloc(sizeof(double) * np);
         double *vbuf = NULL;
@@ -764,6 +776,9 @@ void LIBXC_eval_xc(int nfn, int *fn_id, double *fac, double *omega,
                 // func->cam_beta does not update the coefficients accordingly.
                 //func->cam_alpha = alpha;
                 //func->cam_beta  = beta;
+                // However, the parameters can be set with the libxc function
+                //void xc_func_set_ext_params_name(xc_func_type *p, const char *name, double par);
+                // since libxc 5.1.0
 #if defined XC_SET_RELATIVITY
                 xc_lda_x_set_params(&func, relativity);
 #endif
@@ -825,4 +840,37 @@ void LIBXC_functional_numbers(int *list)
 char * LIBXC_functional_name(int ifunc)
 {
   return xc_functional_get_name(ifunc);
+}
+
+const char * LIBXC_version()
+{
+  return xc_version_string();
+}
+
+const char * LIBXC_reference()
+{
+  return xc_reference();
+}
+
+const char * LIBXC_reference_doi()
+{
+  return xc_reference_doi();
+}
+
+void LIBXC_xc_reference(int xc_id, const char **refs)
+{
+        xc_func_type func;
+        if(xc_func_init(&func, xc_id, XC_UNPOLARIZED) != 0){
+                fprintf(stderr, "XC functional %d not found\n", xc_id);
+                exit(1);
+        }
+
+        int i;
+        for (i = 0; i < XC_MAX_REFERENCES; i++) {
+                if (func.info->refs[i] == NULL || func.info->refs[i]->ref == NULL) {
+                        refs[i] = NULL;
+                        break;
+                }
+                refs[i] = func.info->refs[i]->ref;
+        }
 }
