@@ -1323,6 +1323,13 @@ def kernel_ee(eom, nroots=1, koopmans=False, guess=None, left=False,
     evecs = [None]*len(kptlist)
     convs = [None]*len(kptlist)
 
+    user_guess = False
+    # reserve the name `guess` for next steps
+    guess_provided = np.copy(guess)
+    if guess is not None:
+        assert guess_provided.shape[:2] == (len(kptlist), nroots)
+        user_guess = True
+
     for k, kshift in enumerate(kptlist):
         print("\nkshift =", kshift)
         # vector size and thus, nroots depend on kshift in the case of even nkpts,
@@ -1332,15 +1339,16 @@ def kernel_ee(eom, nroots=1, koopmans=False, guess=None, left=False,
         matvec, diag = eom.gen_matvec(kshift, imds, left=left, **kwargs)
         if diag.size != size:
             raise ValueError("Number of diagonal elements in effective H does not match R vector size")
-        # TODO update `diag` in case of frozen orbitals
 
-        # TODO allow user provided guess vector
-        # Since vector_size may change with kshift, it is difficult for users to
-        # provide guesses. Similarly, `guess` from the previous `kshift` may not
-        # work for the current `kshift` due to different vector_size. Thus for
-        # now we keep `user_guess` false, and always compute `guess` on our own.
-        user_guess = False
-        guess = eom.get_init_guess(kshift, nroots, koopmans=koopmans, diag=diag, imds=imds)
+        if user_guess:
+            for g in guess_provided[k]:
+                assert(g.size == size)
+            guess = guess_provided[k]
+            log.note("User provided guess will be used")
+        else:
+            guess = eom.get_init_guess(kshift, nroots, koopmans=koopmans, diag=diag, imds=imds)
+            log.note("Computed guess will be used")
+
         for ig, g in enumerate(guess):
             guess_norm = np.linalg.norm(g)
             guess_norm_tol = LOOSE_ZERO_TOL
