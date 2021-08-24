@@ -20,13 +20,12 @@
 4-component Dirac-Kohn-Sham
 '''
 
-import time
+
 import numpy
 from pyscf import lib
 from pyscf.lib import logger
 from pyscf.scf import dhf
 from pyscf.dft import rks
-from pyscf.dft import r_numint
 
 
 def get_veff(ks, mol=None, dm=None, dm_last=0, vhf_last=0, hermi=1):
@@ -61,7 +60,7 @@ def get_veff(ks, mol=None, dm=None, dm_last=0, vhf_last=0, hermi=1):
     '''
     if mol is None: mol = ks.mol
     if dm is None: dm = ks.make_rdm1()
-    t0 = (time.clock(), time.time())
+    t0 = (logger.process_clock(), logger.perf_counter())
 
     ground_state = (isinstance(dm, numpy.ndarray) and dm.ndim == 2)
 
@@ -130,6 +129,7 @@ energy_elec = rks.energy_elec
 class DKS(rks.KohnShamDFT, dhf.DHF):
     '''Dirac-Kohn-Sham'''
     def __init__(self, mol, xc='LDA,VWN'):
+        from pyscf.dft import r_numint
         dhf.DHF.__init__(self, mol)
         rks.KohnShamDFT.__init__(self, xc)
         self._numint = r_numint.RNumInt()
@@ -167,21 +167,3 @@ class RDKS(DKS, dhf.RDHF):
     x2c = x2c1e
 
 RKS = RDKS
-
-if __name__ == '__main__':
-    from pyscf import gto
-    mol = gto.Mole()
-    mol.verbose = 7
-    mol.output = '/dev/null'#'out_rks'
-
-    mol.atom.extend([['He', (0.,0.,0.)], ])
-    mol.basis = { 'He': 'cc-pvdz'}
-    #mol.grids = { 'He': (10, 14),}
-    mol.build()
-
-    m = DKS(mol)
-    print(m.kernel())
-
-    m = DKS(mol).x2c()
-    print(m.kernel())
-

@@ -27,6 +27,7 @@ import re
 import platform
 import gc
 import time
+
 import json
 import ctypes
 import numpy
@@ -51,7 +52,7 @@ from pyscf.data.elements import ELEMENTS, ELEMENTS_PROTON, \
         _rm_digit, charge, _symbol, _std_symbol, _atom_symbol, is_ghost_atom, \
         _std_symbol_without_ghost
 
-from pyscf.lib.exceptions import BasisNotFoundError
+from pyscf.lib.exceptions import BasisNotFoundError, PointGroupSymmetryError
 import warnings
 
 # For code compatibility in python-2 and python-3
@@ -83,6 +84,8 @@ PTR_RINV_ZETA   = 7
 PTR_RANGE_OMEGA = 8
 PTR_F12_ZETA    = 9
 PTR_GTG_ZETA    = 10
+NGRIDS          = 11
+PTR_GRIDS       = 12
 AS_RINV_ORIG_ATOM = 17
 AS_ECPBAS_OFFSET = 18
 AS_NECPBAS      = 19
@@ -304,7 +307,7 @@ def format_atom(atoms, origin=0, axes=None,
             (A, a, Angstrom, angstrom, Ang, ang), the coordinates are in the
             unit of angstrom;  If a number is given, the number are considered
             as the Bohr value (in angstrom), which should be around 0.53.
-            Set unit=1 if wishing to reserve the unit of the coordinates.
+            Set unit=1 if wishing to preserve the unit of the coordinates.
 
     Returns:
         "atoms" in the internal format. The internal format is
@@ -535,19 +538,19 @@ def to_uncontracted_cartesian_basis(mol):
         ncart = (l+1)*(l+2)//2
         es = mol.bas_exp(ib)
         cs = mol._libcint_ctr_coeff(ib)
-        np, nc = cs.shape
+        nprim = cs.shape[0]
         norm = gto_norm(l, es)
         c = numpy.einsum('pi,p,xm->pxim', cs, 1./norm, c2s[l])
-        contr_coeff.append(c.reshape(np*ncart,-1))
+        contr_coeff.append(c.reshape(nprim*ncart,-1))
 
         pexp = mol._bas[ib,PTR_EXP]
         pc = mol._bas[ib,PTR_COEFF]
-        bs = numpy.empty((np,8), dtype=numpy.int32)
+        bs = numpy.empty((nprim,8), dtype=numpy.int32)
         bs[:] = mol._bas[ib]
         bs[:,NCTR_OF] = bs[:,NPRIM_OF] = 1
-        bs[:,PTR_EXP] = numpy.arange(pexp, pexp+np)
-        bs[:,PTR_COEFF] = numpy.arange(pc, pc+np)
-        _env[pc:pc+np] = norm
+        bs[:,PTR_EXP] = numpy.arange(pexp, pexp+nprim)
+        bs[:,PTR_COEFF] = numpy.arange(pc, pc+nprim)
+        _env[pc:pc+nprim] = norm
         _bas.append(bs)
 
     pmol._bas = numpy.asarray(numpy.vstack(_bas), dtype=numpy.int32)
@@ -720,7 +723,7 @@ def conc_mol(mol1, mol2):
     return mol3
 
 # <bas-of-mol1|intor|bas-of-mol2>
-def intor_cross(intor, mol1, mol2, comp=None):
+def intor_cross(intor, mol1, mol2, comp=None, grids=None):
     r'''1-electron integrals from two molecules like
 
     .. math::
@@ -739,6 +742,8 @@ def intor_cross(intor, mol1, mol2, comp=None):
     Kwargs:
         comp : int
             Components of the integrals, e.g. int1e_ipovlp_sph has 3 components
+        grids : ndarray
+            Coordinates of grids for the int1e_grids integrals
 
     Returns:
         ndarray of 1-electron integrals, can be either 2-dim or 3-dim, depending on comp
@@ -756,6 +761,12 @@ def intor_cross(intor, mol1, mol2, comp=None):
     nbas2 = len(mol2._bas)
     atmc, basc, envc = conc_env(mol1._atm, mol1._bas, mol1._env,
                                 mol2._atm, mol2._bas, mol2._env)
+    if '_grids' in intor:
+        assert grids is not None
+        envc = numpy.append(envc, grids.ravel())
+        envc[NGRIDS] = grids.shape[0]
+        envc[PTR_GRIDS] = envc.size - grids.size
+
     shls_slice = (0, nbas1, nbas1, nbas1+nbas2)
 
     if (intor.endswith('_sph') or intor.startswith('cint') or
@@ -804,8 +815,10 @@ def make_bas_env(basis_add, atom_id=0, ptr=0):
         if not b:  # == []
             continue
         angl = b[0]
-        #if angl in [6, 7]:
-        #    print('libcint may have large error for ERI of i function')
+        if angl > 14:
+            sys.stderr.write('Warning: integral library does not support basis '
+                             'with angular momentum > 14\n')
+
         if isinstance(b[1], int):
             kappa = b[1]
             b_coeff = numpy.array(sorted(list(b[2:]), reverse=True))
@@ -815,8 +828,8 @@ def make_bas_env(basis_add, atom_id=0, ptr=0):
         es = b_coeff[:,0]
         cs = b_coeff[:,1:]
         nprim, nctr = cs.shape
+        cs = numpy.einsum('pi,p->pi', cs, gto_norm(angl, es))
         if NORMALIZE_GTO:
-            cs = numpy.einsum('pi,p->pi', cs, gto_norm(angl, es))
             cs = _nomalize_contracted_ao(angl, es, cs)
 
         _env.append(es)
@@ -902,7 +915,7 @@ def make_env(atoms, basis, pre_env=[], nucmod={}, nucprop={}):
             elif puresymb in _basdic:
                 b = _basdic[puresymb].copy()
             else:
-                sys.stderr.write('Warn: Basis not found for atom %d %s\n' % (ia, symb))
+                sys.stderr.write('Warning: Basis not found for atom %d %s\n' % (ia, symb))
                 continue
         b[:,ATOM_OF] = ia
         _bas.append(b)
@@ -1334,15 +1347,6 @@ def energy_nuc(mol, charges=None, coords=None):
     if charges is None: charges = mol.atom_charges()
     if len(charges) <= 1:
         return 0
-    #e = 0
-    #for j in range(len(mol._atm)):
-    #    q2 = charges[j]
-    #    r2 = coords[j]
-    #    for i in range(j):
-    #        q1 = charges[i]
-    #        r1 = coords[i]
-    #        r = numpy.linalg.norm(r1-r2)
-    #        e += q1 * q2 / r
     rr = inter_distance(mol, coords)
     rr[numpy.diag_indices_from(rr)] = 1e200
     if CHECK_GEOM and numpy.any(rr < 1e-5):
@@ -1650,7 +1654,12 @@ def aoslice_by_atom(mol, ao_loc=None):
     '''
     if ao_loc is None:
         ao_loc = mol.ao_loc_nr()
+
     aorange = numpy.empty((mol.natm,4), dtype=int)
+
+    if mol.natm == 0:
+        return aorange
+
     bas_atom = mol._bas[:,ATOM_OF]
     delimiter = numpy.where(bas_atom[0:-1] != bas_atom[1:])[0] + 1
 
@@ -2061,8 +2070,7 @@ class Mole(lib.StreamObject):
     >>> mol.charge = 1
     >>> mol.build()
     <class 'pyscf.gto.mole.Mole'> has no attributes Charge
-
-    '''
+    '''  # noqa: E501
 
     verbose = getattr(__config__, 'VERBOSE', logger.NOTE)
 
@@ -2241,18 +2249,24 @@ class Mole(lib.StreamObject):
 
     pack = pack
 
+    @classmethod
     @lib.with_doc(unpack.__doc__)
-    def unpack(self, moldic):
+    def unpack(cls, moldic):
         return unpack(moldic)
+
+    @lib.with_doc(unpack.__doc__)
     def unpack_(self, moldic):
         self.__dict__.update(moldic)
         return self
 
     dumps = dumps
 
+    @classmethod
     @lib.with_doc(loads.__doc__)
-    def loads(self, molstr):
+    def loads(cls, molstr):
         return loads(molstr)
+
+    @lib.with_doc(loads.__doc__)
     def loads_(self, molstr):
         self.__dict__.update(loads(molstr).__dict__)
         return self
@@ -2409,15 +2423,13 @@ class Mole(lib.StreamObject):
 
         if isinstance(self.symmetry, (str, unicode)):
             self.symmetry = str(symm.std_symb(self.symmetry))
-            self.groupname, axes = symm.subgroup(self.symmetry, axes)
-            prop_atoms = self.format_atom(self._atom, orig, axes, 'Bohr')
-            if symm.check_given_symm(self.groupname, prop_atoms, self._basis):
-                self.topgroup = self.symmetry
-            else:
-                raise RuntimeWarning('Unable to identify input symmetry %s.\n'
-                                     'Try symmetry="%s" with geometry (unit="Bohr")\n%s' %
-                                     (self.symmetry, self.topgroup,
-                                      '\n'.join([str(a) for a in prop_atoms])))
+            try:
+                self.groupname, axes = symm.as_subgroup(self.topgroup, axes,
+                                                        self.symmetry)
+            except PointGroupSymmetryError:
+                raise PointGroupSymmetryError(
+                    'Unable to identify input symmetry %s. Try symmetry="%s"' %
+                    (self.symmetry, self.topgroup))
         else:
             self.groupname, axes = symm.as_subgroup(self.topgroup, axes,
                                                     self.symmetry_subgroup)
@@ -2513,27 +2525,11 @@ class Mole(lib.StreamObject):
                           (numpy.__version__, scipy.__version__))
         self.stdout.write('Date: %s\n' % time.ctime())
         import pyscf
-        pyscfdir = os.path.abspath(os.path.join(__file__, '..', '..'))
         self.stdout.write('PySCF version %s\n' % pyscf.__version__)
-        self.stdout.write('PySCF path  %s\n' % pyscfdir)
-        try:
-            with open(os.path.join(pyscfdir, '..', '.git', 'ORIG_HEAD'), 'r') as f:
-                self.stdout.write('GIT ORIG_HEAD %s' % f.read())
-        except IOError:
-            pass
-        try:
-            head = os.path.join(pyscfdir, '..', '.git', 'HEAD')
-            with open(head, 'r') as f:
-                head = f.read().splitlines()[0]
-                self.stdout.write('GIT HEAD      %s\n' % head)
-            # or command(git log -1 --pretty=%H)
-            if head.startswith('ref:'):
-                branch = os.path.basename(head)
-                head = os.path.join(pyscfdir, '..', '.git', head.split(' ')[1])
-                with open(head, 'r') as f:
-                    self.stdout.write('GIT %s branch  %s' % (branch, f.read()))
-        except IOError:
-            pass
+        info = lib.repo_info(os.path.join(__file__, '..', '..'))
+        self.stdout.write('PySCF path  %s\n' % info['path'])
+        if 'git' in info:
+            self.stdout.write(info['git'] + '\n')
 
         self.stdout.write('\n')
         for key in os.environ:
@@ -2629,7 +2625,7 @@ class Mole(lib.StreamObject):
                 exps = self.bas_exp(i)
                 logger.debug1(self, 'bas %d, expnt(s) = %s', i, str(exps))
 
-        logger.info(self, 'CPU time: %12.2f', time.clock())
+        logger.info(self, 'CPU time: %12.2f', logger.process_clock())
         return self
 
     def set_common_origin(self, coord):
@@ -2863,11 +2859,14 @@ class Mole(lib.StreamObject):
             mol.build(False, False)
 
         if mol.verbose >= logger.INFO:
-            logger.info(mol, 'New geometry (unit %s)', unit)
-            coords = mol.atom_coords()
-            for ia in range(mol.natm):
-                logger.info(mol, ' %3d %-4s %16.12f %16.12f %16.12f',
-                            ia+1, mol.atom_symbol(ia), *coords[ia])
+            logger.info(mol, 'New geometry')
+            for ia, atom in enumerate(mol._atom):
+                coorda = tuple([x * param.BOHR for x in atom[1]])
+                coordb = tuple([x for x in atom[1]])
+                coords = coorda + coordb
+                logger.info(mol, ' %3d %-4s %16.12f %16.12f %16.12f AA  '
+                            '%16.12f %16.12f %16.12f Bohr\n',
+                            ia+1, mol.atom_symbol(ia), *coords)
         return mol
 
     def update(self, chkfile):
@@ -2881,6 +2880,11 @@ class Mole(lib.StreamObject):
     def has_ecp(self):
         '''Whether pseudo potential is used in the system.'''
         return len(self._ecpbas) > 0 or self._pseudo
+
+    def has_ecp_soc(self):
+        '''Whether spin-orbit coupling is enabled in ECP.'''
+        return (len(self._ecpbas) > 0 and
+                numpy.any(self._ecpbas[:,SO_TYPE_OF] == 1))
 
 
 #######################################################
@@ -2976,12 +2980,12 @@ class Mole(lib.StreamObject):
         if unit[:3].upper() == 'ANG':
             return self._env[ptr:ptr+3] * param.BOHR
         else:
-            return self._env[ptr:ptr+3]
+            return self._env[ptr:ptr+3].copy()
 
     def atom_coords(self, unit='Bohr'):
         '''np.asarray([mol.atom_coords(i) for i in range(mol.natm)])'''
         ptr = self._atm[:,PTR_COORD]
-        c = self._env[numpy.vstack((ptr,ptr+1,ptr+2)).T]
+        c = self._env[numpy.vstack((ptr,ptr+1,ptr+2)).T].copy()
         if unit[:3].upper() == 'ANG':
             c *= param.BOHR
         return c
@@ -3033,7 +3037,7 @@ class Mole(lib.StreamObject):
         '''
         atm_id = self.bas_atom(bas_id)
         ptr = self._atm[atm_id,PTR_COORD]
-        return self._env[ptr:ptr+3]
+        return self._env[ptr:ptr+3].copy()
 
     def bas_atom(self, bas_id):
         r'''The atom (0-based id) that the given basis sits on
@@ -3048,7 +3052,7 @@ class Mole(lib.StreamObject):
         >>> mol.bas_atom(7)
         1
         '''
-        return self._bas[bas_id,ATOM_OF]
+        return self._bas[bas_id,ATOM_OF].copy()
 
     def bas_angular(self, bas_id):
         r'''The angular momentum associated with the given basis
@@ -3063,7 +3067,7 @@ class Mole(lib.StreamObject):
         >>> mol.bas_atom(7)
         2
         '''
-        return self._bas[bas_id,ANG_OF]
+        return self._bas[bas_id,ANG_OF].copy()
 
     def bas_nctr(self, bas_id):
         r'''The number of contracted GTOs for the given shell
@@ -3078,7 +3082,7 @@ class Mole(lib.StreamObject):
         >>> mol.bas_atom(3)
         3
         '''
-        return self._bas[bas_id,NCTR_OF]
+        return self._bas[bas_id,NCTR_OF].copy()
 
     def bas_nprim(self, bas_id):
         r'''The number of primitive GTOs for the given shell
@@ -3093,7 +3097,7 @@ class Mole(lib.StreamObject):
         >>> mol.bas_atom(3)
         11
         '''
-        return self._bas[bas_id,NPRIM_OF]
+        return self._bas[bas_id,NPRIM_OF].copy()
 
     def bas_kappa(self, bas_id):
         r'''Kappa (if l < j, -l-1, else l) of the given shell
@@ -3108,7 +3112,7 @@ class Mole(lib.StreamObject):
         >>> mol.bas_kappa(3)
         0
         '''
-        return self._bas[bas_id,KAPPA_OF]
+        return self._bas[bas_id,KAPPA_OF].copy()
 
     def bas_exp(self, bas_id):
         r'''exponents (ndarray) of the given shell
@@ -3125,13 +3129,14 @@ class Mole(lib.StreamObject):
         '''
         nprim = self.bas_nprim(bas_id)
         ptr = self._bas[bas_id,PTR_EXP]
-        return self._env[ptr:ptr+nprim]
+        return self._env[ptr:ptr+nprim].copy()
 
     def _libcint_ctr_coeff(self, bas_id):
         nprim = self.bas_nprim(bas_id)
         nctr = self.bas_nctr(bas_id)
         ptr = self._bas[bas_id,PTR_COEFF]
         return self._env[ptr:ptr+nprim*nctr].reshape(nctr,nprim).T
+
     def bas_ctr_coeff(self, bas_id):
         r'''Contract coefficients (ndarray) of the given shell
 
@@ -3216,7 +3221,7 @@ class Mole(lib.StreamObject):
         return self
 
     def intor(self, intor, comp=None, hermi=0, aosym='s1', out=None,
-              shls_slice=None):
+              shls_slice=None, grids=None):
         '''Integral generator.
 
         Args:
@@ -3233,6 +3238,9 @@ class Mole(lib.StreamObject):
                 | 0 : no symmetry assumed (default)
                 | 1 : hermitian
                 | 2 : anti-hermitian
+
+            grids : ndarray
+                Coordinates of grids for the int1e_grids integrals
 
         Returns:
             ndarray of 1-electron integrals, can be either 2-dim or 3-dim, depending on comp
@@ -3259,16 +3267,21 @@ class Mole(lib.StreamObject):
             # may not be consistent. calling .build() may leads to wrong intor env.
             #self.build(False, False)
         intor = self._add_suffix(intor)
+        bas = self._bas
+        env = self._env
         if 'ECP' in intor:
             assert(self._ecp is not None)
             bas = numpy.vstack((self._bas, self._ecpbas))
-            self._env[AS_ECPBAS_OFFSET] = len(self._bas)
-            self._env[AS_NECPBAS] = len(self._ecpbas)
+            env[AS_ECPBAS_OFFSET] = len(self._bas)
+            env[AS_NECPBAS] = len(self._ecpbas)
             if shls_slice is None:
                 shls_slice = (0, self.nbas, 0, self.nbas)
-        else:
-            bas = self._bas
-        return moleintor.getints(intor, self._atm, bas, self._env,
+        elif '_grids' in intor:
+            assert grids is not None
+            env = numpy.append(env, grids.ravel())
+            env[NGRIDS] = grids.shape[0]
+            env[PTR_GRIDS] = env.size - grids.size
+        return moleintor.getints(intor, self._atm, bas, env,
                                  shls_slice, comp, hermi, aosym, out=out)
 
     def _add_suffix(self, intor, cart=None):
@@ -3282,7 +3295,7 @@ class Mole(lib.StreamObject):
                 intor = intor + '_sph'
         return intor
 
-    def intor_symmetric(self, intor, comp=None):
+    def intor_symmetric(self, intor, comp=None, grids=None):
         '''One-electron integral generator. The integrals are assumed to be hermitian
 
         Args:
@@ -3293,6 +3306,8 @@ class Mole(lib.StreamObject):
         Kwargs:
             comp : int
                 Components of the integrals, e.g. int1e_ipovlp_sph has 3 components.
+            grids : ndarray
+                Coordinates of grids for the int1e_grids integrals
 
         Returns:
             ndarray of 1-electron integrals, can be either 2-dim or 3-dim, depending on comp
@@ -3306,9 +3321,9 @@ class Mole(lib.StreamObject):
          [-0.67146312+0.j  0.00000000+0.j -1.69771092+0.j  0.00000000+0.j]
          [ 0.00000000+0.j -0.67146312+0.j  0.00000000+0.j -1.69771092+0.j]]
         '''
-        return self.intor(intor, comp, 1, aosym='s4')
+        return self.intor(intor, comp, 1, aosym='s4', grids=grids)
 
-    def intor_asymmetric(self, intor, comp=None):
+    def intor_asymmetric(self, intor, comp=None, grids=None):
         '''One-electron integral generator. The integrals are assumed to be anti-hermitian
 
         Args:
@@ -3319,6 +3334,8 @@ class Mole(lib.StreamObject):
         Kwargs:
             comp : int
                 Components of the integrals, e.g. int1e_ipovlp has 3 components.
+            grids : ndarray
+                Coordinates of grids for the int1e_grids integrals
 
         Returns:
             ndarray of 1-electron integrals, can be either 2-dim or 3-dim, depending on comp
@@ -3332,10 +3349,10 @@ class Mole(lib.StreamObject):
          [-0.67146312+0.j  0.00000000+0.j -1.69771092+0.j  0.00000000+0.j]
          [ 0.00000000+0.j -0.67146312+0.j  0.00000000+0.j -1.69771092+0.j]]
         '''
-        return self.intor(intor, comp, 2, aosym='a4')
+        return self.intor(intor, comp, 2, aosym='a4', grids=grids)
 
     @lib.with_doc(moleintor.getints_by_shell.__doc__)
-    def intor_by_shell(self, intor, shells, comp=None):
+    def intor_by_shell(self, intor, shells, comp=None, grids=None):
         intor = self._add_suffix(intor)
         if 'ECP' in intor:
             assert(self._ecp is not None)
@@ -3519,11 +3536,9 @@ def _parse_nuc_mod(str_or_int_or_fn):
     return nucmod
 
 def _update_from_cmdargs_(mol):
-    # Ipython shell conflicts with optparse
-    # pass sys.args when using ipython
     try:
-        __IPYTHON__
-        #sys.stderr.write('Warn: Ipython shell catchs sys.args\n')
+        # Detect whether in Ipython shell
+        __IPYTHON__  # noqa:
         return
     except Exception:
         pass

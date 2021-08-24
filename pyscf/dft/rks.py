@@ -20,7 +20,8 @@
 Non-relativistic restricted Kohn-Sham
 '''
 
-import time
+
+import textwrap
 import numpy
 from pyscf import lib
 from pyscf.lib import logger
@@ -29,7 +30,6 @@ from pyscf.scf import hf
 from pyscf.scf import _vhf
 from pyscf.scf import jk
 from pyscf.dft import gen_grid
-from pyscf.dft import numint
 from pyscf import __config__
 
 
@@ -65,7 +65,7 @@ def get_veff(ks, mol=None, dm=None, dm_last=0, vhf_last=0, hermi=1):
     '''
     if mol is None: mol = ks.mol
     if dm is None: dm = ks.make_rdm1()
-    t0 = (time.clock(), time.time())
+    t0 = (logger.process_clock(), logger.perf_counter())
 
     ground_state = (isinstance(dm, numpy.ndarray) and dm.ndim == 2)
 
@@ -89,8 +89,8 @@ def get_veff(ks, mol=None, dm=None, dm_last=0, vhf_last=0, hermi=1):
     else:
         max_memory = ks.max_memory - lib.current_memory()[0]
         n, exc, vxc = ni.nr_rks(mol, ks.grids, ks.xc, dm, max_memory=max_memory)
-        if ks.nlc != '':
-            assert('VV10' in ks.nlc.upper())
+        if ks.nlc:
+            assert 'VV10' in ks.nlc.upper()
             _, enlc, vnlc = ni.nr_rks(mol, ks.nlcgrids, ks.xc+'__'+ks.nlc, dm,
                                       max_memory=max_memory)
             exc += enlc
@@ -186,7 +186,7 @@ def get_vsap(ks, mol=None):
         matrix Vsap = Vnuc + J + Vxc.
     '''
     if mol is None: mol = ks.mol
-    t0 = (time.clock(), time.time())
+    t0 = (logger.process_clock(), logger.perf_counter())
 
     if ks.grids.coords is None:
         ks.grids.build(with_non0tab=True)
@@ -277,6 +277,7 @@ def define_xc_(ks, description, xctype='LDA', hyb=0, rsh=(0,0,0)):
 
 
 def _dft_common_init_(mf, xc='LDA,VWN'):
+    from pyscf.dft import numint
     mf.xc = xc
     mf.nlc = ''
     mf.grids = gen_grid.Grids(mf.mol)
@@ -360,14 +361,26 @@ class KohnShamDFT(object):
         self._numint.omega = float(v)
 
     def dump_flags(self, verbose=None):
-        logger.info(self, 'XC functionals = %s', self.xc)
+        log = logger.new_logger(self, verbose)
+        log.info('XC library %s version %s\n    %s',
+                 self._numint.libxc.__name__,
+                 self._numint.libxc.__version__,
+                 self._numint.libxc.__reference__)
+
+        if log.verbose >= logger.INFO:
+            log.info('XC functionals = %s', self.xc)
+            if hasattr(self._numint.libxc, 'xc_reference'):
+                log.info(textwrap.indent('\n'.join(self._numint.libxc.xc_reference(self.xc)), '    '))
+
         if self.nlc!='':
-            logger.info(self, 'NLC functional = %s', self.nlc)
-        logger.info(self, 'small_rho_cutoff = %g', self.small_rho_cutoff)
+            log.info('NLC functional = %s', self.nlc)
+
         self.grids.dump_flags(verbose)
         if self.nlc!='':
-            logger.info(self, '** Following is NLC Grids **')
+            log.info('** Following is NLC Grids **')
             self.nlcgrids.dump_flags(verbose)
+
+        log.info('small_rho_cutoff = %g', self.small_rho_cutoff)
         return self
 
     define_xc_ = define_xc_
@@ -495,25 +508,3 @@ class RKS(KohnShamDFT, hf.RHF):
     def nuc_grad_method(self):
         from pyscf.grad import rks as rks_grad
         return rks_grad.Gradients(self)
-
-
-if __name__ == '__main__':
-    from pyscf import gto
-    from pyscf.dft import xcfun
-    mol = gto.Mole()
-    mol.verbose = 7
-    mol.output = '/dev/null'#'out_rks'
-
-    mol.atom.extend([['He', (0.,0.,0.)], ])
-    mol.basis = { 'He': 'cc-pvdz'}
-    #mol.grids = { 'He': (10, 14),}
-    mol.build()
-
-    m = RKS(mol)
-    m.xc = 'b88,lyp'
-    print(m.scf())  # -2.8978518405
-
-    m = RKS(mol)
-    m._numint.libxc = xcfun
-    m.xc = 'b88,lyp'
-    print(m.scf())  # -2.8978518405

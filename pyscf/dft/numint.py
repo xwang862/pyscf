@@ -28,7 +28,8 @@ except (ImportError, OSError):
         from pyscf.dft import xcfun
         libxc = xcfun
     except (ImportError, OSError):
-        raise ImportError('XC functional libraries (libxc or XCfun) are not available.')
+        warnings.warn('XC functional libraries (libxc or XCfun) are not available.')
+        raise
 
 from pyscf.dft.gen_grid import make_mask, BLKSIZE
 from pyscf import __config__
@@ -323,7 +324,7 @@ def eval_rho2(mol, ao, mo_coeff, mo_occ, non0tab=None, xctype='LDA',
             rho[5] -= rho5 * .5
     return rho
 
-def _vv10nlc(rho,coords,vvrho,vvweight,vvcoords,nlc_pars):
+def _vv10nlc(rho, coords, vvrho, vvweight, vvcoords, nlc_pars):
     thresh=1e-8
 
     #output
@@ -579,7 +580,7 @@ def _dot_ao_dm(mol, ao, dm, non0tab, shls_slice, ao_loc, out=None):
     '''return numpy.dot(ao, dm)'''
     ngrids, nao = ao.shape
     if nao < SWITCH_SIZE:
-        return lib.dot(dm.T, ao.T).T
+        return lib.dot(numpy.asarray(dm, order='C').T, ao.T).T
 
     if not ao.flags.f_contiguous:
         ao = lib.transpose(ao)
@@ -849,7 +850,6 @@ def nr_rks(ni, mol, grids, xc_code, dms, relativity=0, hermi=0,
         ao_deriv = 1
         for ao, mask, weight, coords \
                 in ni.block_loop(mol, grids, nao, ao_deriv, max_memory):
-            ngrid = weight.size
             aow = numpy.ndarray(ao[0].shape, order='F', buffer=aow)
             for idm in range(nset):
                 rho = make_rho(idm, ao, mask, 'GGA')
@@ -859,18 +859,14 @@ def nr_rks(ni, mol, grids, xc_code, dms, relativity=0, hermi=0,
                 den = rho[0] * weight
                 nelec[idm] += den.sum()
                 excsum[idm] += numpy.dot(den, exc)
-# ref eval_mat function
+                # ref eval_mat function
                 wv = _rks_gga_wv0(rho, vxc, weight)
                 #:aow = numpy.einsum('npi,np->pi', ao, wv, out=aow)
                 aow = _scale_ao(ao, wv, out=aow)
                 vmat[idm] += _dot_ao_ao(mol, ao[0], aow, mask, shls_slice, ao_loc)
                 rho = exc = vxc = wv = None
     elif xctype == 'NLC':
-        nlc_pars = ni.nlc_coeff(xc_code[:-6])
-        if nlc_pars == [0,0]:
-            raise NotImplementedError('VV10 cannot be used with %s. '
-                                      'The supported functionals are %s' %
-                                      (xc_code[:-6], ni.libxc.VV10_XC))
+        nlc_pars = ni.nlc_coeff(xc_code)
         ao_deriv = 1
         vvrho=numpy.empty([nset,4,0])
         vvweight=numpy.empty([nset,0])
@@ -896,7 +892,8 @@ def nr_rks(ni, mol, grids, xc_code, dms, relativity=0, hermi=0,
             aow = numpy.ndarray(ao[0].shape, order='F', buffer=aow)
             for idm in range(nset):
                 rho = make_rho(idm, ao, mask, 'GGA')
-                exc, vxc = _vv10nlc(rho,coords,vvrho[idm],vvweight[idm],vvcoords[idm],nlc_pars)
+                exc, vxc = _vv10nlc(rho, coords,
+                                    vvrho[idm], vvweight[idm], vvcoords[idm], nlc_pars)
                 den = rho[0] * weight
                 nelec[idm] += den.sum()
                 excsum[idm] += numpy.dot(den, exc)
@@ -937,6 +934,10 @@ def nr_rks(ni, mol, grids, xc_code, dms, relativity=0, hermi=0,
                 vmat[idm] += _dot_ao_ao(mol, ao[3], wv*ao[3], mask, shls_slice, ao_loc)
 
                 rho = exc = vxc = vrho = wv = None
+    elif xctype == 'HF':
+        pass
+    else:
+        raise NotImplementedError(f'numint.nr_uks for functional {xc_code}')
 
     for i in range(nset):
         vmat[i] = vmat[i] + vmat[i].conj().T
@@ -1098,6 +1099,10 @@ def nr_uks(ni, mol, grids, xc_code, dms, relativity=0, hermi=0,
                 vmat[1,idm] += _dot_ao_ao(mol, ao[2], wv*ao[2], mask, shls_slice, ao_loc)
                 vmat[1,idm] += _dot_ao_ao(mol, ao[3], wv*ao[3], mask, shls_slice, ao_loc)
                 rho_a = rho_b = exc = vxc = vrho = wva = wvb = None
+    elif xctype == 'HF':
+        pass
+    else:
+        raise NotImplementedError(f'numint.nr_uks for functional {xc_code}')
 
     for i in range(nset):
         vmat[0,i] = vmat[0,i] + vmat[0,i].conj().T
@@ -2075,16 +2080,14 @@ _NumInt = NumInt
 
 
 if __name__ == '__main__':
-    import time
     from pyscf import gto
     from pyscf import dft
 
-    mol = gto.M(
-        atom = [
+    mol = gto.M(atom=[
         ["O" , (0. , 0.     , 0.)],
         [1   , (0. , -0.757 , 0.587)],
         [1   , (0. , 0.757  , 0.587)] ],
-        basis = '6311g**',)
+        basis='6311g**')
     mf = dft.RKS(mol)
     mf.grids.atom_grid = {"H": (30, 194), "O": (30, 194),}
     mf.grids.prune = None
@@ -2094,7 +2097,6 @@ if __name__ == '__main__':
     numpy.random.seed(1)
     dm1 = numpy.random.random((dm.shape))
     dm1 = lib.hermi_triu(dm1)
-    print(time.clock())
     res = mf._numint.nr_vxc(mol, mf.grids, mf.xc, dm1, spin=0)
     print(res[1] - -37.084047825971282)
     res = mf._numint.nr_vxc(mol, mf.grids, mf.xc, (dm1,dm1), spin=1)
@@ -2103,4 +2105,3 @@ if __name__ == '__main__':
     print(res[1] - -8.6313329288394947)
     res = mf._numint.nr_vxc(mol, mf.grids, mf.xc, (dm,dm), spin=1)
     print(res[1] - -21.520301399504582)
-    print(time.clock())
