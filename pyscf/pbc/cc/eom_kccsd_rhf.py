@@ -1434,7 +1434,7 @@ def vector_sizes_triplet(nkpts, nmo, nocc, kconserv=None):
                 size_r2aa += nocc**2 * nvir_tril
             elif ka > kb:
                 size_r2aa += nocc**2 * nvir**2
-        
+
     # packed size of r2ab
     nov_tril = nov*(nov+1)//2
     size_r2ab = 0
@@ -1491,7 +1491,7 @@ def amplitudes_to_vector_triplet(r1, r2, kconserv, out=None):
                 offset += size
 
     vector = np.hstack((vector, vector1[:offset]))
-    
+
     # pack r2ab
     ovtril = np.tril_indices(nocc*nvir)
     nov_tril = nov*(nov+1)//2
@@ -1526,7 +1526,7 @@ def vector_to_amplitudes_triplet(vector, nkpts, nmo, nocc, kconserv=None):
 
     # unpack r2aa
     r2aa = np.zeros((nkpts, nkpts, nkpts, nocc**2, nvir**2), dtype=vector.dtype)
-    
+
     otril = np.tril_indices(nocc, k=-1)
     vtril = np.tril_indices(nvir, k=-1)
     nocc_tril = nocc*(nocc-1)//2
@@ -1580,7 +1580,7 @@ def vector_to_amplitudes_triplet(vector, nkpts, nmo, nocc, kconserv=None):
                 lib.takebak_2d(r2aa[kj,ki,ka], tmp, range(nocc**2), range(nvir**2))
                 tmp = -oovv.transpose(0,1,3,2).reshape(nocc**2, nvir**2)  #ij_ba
                 lib.takebak_2d(r2aa[ki,kj,kb], tmp, range(nocc**2), range(nvir**2))
-                offset += size        
+                offset += size
     r2aa = r2aa.reshape(nkpts, nkpts, nkpts, nocc, nocc, nvir, nvir)
 
     # unpack r2ab
@@ -1608,7 +1608,7 @@ def vector_to_amplitudes_triplet(vector, nkpts, nmo, nocc, kconserv=None):
             offset += size
     r2ab = r2ab.reshape(nkpts, nkpts, nkpts, nocc, nvir, nocc, nvir).transpose(0,1,2,3,5,4,6)
 
-    return r1, (r2aa, r2ab)    
+    return r1, (r2aa, r2ab)
 
 def amplitudes_to_vector_s4(t1, t2, out=None):
     nocc, nvir = t1.shape
@@ -1644,12 +1644,12 @@ def _unpack_4fold(c2vec, nocc, nvir):
         lib.takebak_2d(t2, t2tril, otril[0]*nocc+otril[1], vtril[1]*nvir+vtril[0])
         lib.takebak_2d(t2, t2tril, otril[1]*nocc+otril[0], vtril[0]*nvir+vtril[1])
     return t2.reshape(nocc,nocc,nvir,nvir)
-    
+
 
 def eeccsd_diag_triplet(eom, kshift=0, imds=None):
     '''Diagonal elements of similarity-transformed Hamiltonian for triplets'''
     if imds is None: imds = eom.make_imds()
-    t1, t2 = imds.t1, imds.t2
+    t1 = imds.t1
     nkpts, nocc, nvir = t1.shape
     kconserv = eom.kconserv
     kconserv_r1 = eom.get_kconserv_ee_r1(kshift)
@@ -1709,7 +1709,7 @@ def eeccsd_diag_triplet(eom, kshift=0, imds=None):
 
 
 def eeccsd_matvec_triplet(eom, vector, kshift, imds=None, diag=None):
-    cput0 = (time.clock(), time.time())
+    cput0 = (logger.process_clock(), logger.perf_counter())
     log = logger.Logger(eom.stdout, eom.verbose)
 
     if imds is None: imds = eom.make_imds()
@@ -1853,7 +1853,7 @@ def eeccsd_matvec_triplet(eom, vector, kshift, imds=None, diag=None):
     #
 
     # tmp_jk = - (0.25 * W_kl[cd] r_jlcd + 0.5 * W_kLcD r_jLcD)
-    tmp = np.zeros((nkpts, nocc, nocc), dtype=r1.dtype)    
+    tmp = np.zeros((nkpts, nocc, nocc), dtype=r1.dtype)
     for kj in range(nkpts):
         # => kk + kl - kc - kd = G
         #    kj + kl - kc - kd = kshift
@@ -1875,7 +1875,7 @@ def eeccsd_matvec_triplet(eom, vector, kshift, imds=None, diag=None):
     #
 
     # tmp_jk = (- W_kl[jc] r_lc + W_kLjC r_LC)
-    tmp = np.zeros((nkpts, nocc, nocc), dtype=r1.dtype)    
+    tmp = np.zeros((nkpts, nocc, nocc), dtype=r1.dtype)
     for kj in range(nkpts):
         # => kk + kl - kj - kc = G
         #    kl - kc = kshift
@@ -1891,7 +1891,7 @@ def eeccsd_matvec_triplet(eom, vector, kshift, imds=None, diag=None):
         kk = kconserv_r1[kj]
         Hr2aa[ki,kj,ka] += 0.5 * einsum('ikab,jk->ijab', t2_bar[ki,kk,ka], tmp[kj])  #20
 
-    #        
+    #
     # r_ijab <= - t_ij[ac] (0.25 * W_kl[cd] r_klbd + 0.5 * W_kLcD r_kLbD)
     #
 
@@ -1920,7 +1920,7 @@ def eeccsd_matvec_triplet(eom, vector, kshift, imds=None, diag=None):
     # tmp_cb = W_bk[cd] r_kd - W_bKcD r_KD
     tmp = np.zeros((nkpts, nvir, nvir), dtype=r1.dtype)
     for kc in range(nkpts):
-        # => kb + kk - kc - kd = G 
+        # => kb + kk - kc - kd = G
         #    kk - kd = kshift
         # => kc - kb = kshift
         kb = kconserv_r1[kc]
@@ -1957,7 +1957,7 @@ def eeccsd_matvec_triplet(eom, vector, kshift, imds=None, diag=None):
         # => ki - kb + kj - kk = G
         kk = kconserv[ki, kb, kj]
         Hr2ab[ki,kj,ka] -= einsum('kbij,ka->ijab', imds.woVoO[kk,kb,ki], r1[kk])  #26
-        
+
         for kk in range(nkpts):
             # r_iJaB <= W_kBcJ r_ikac
             # => ki + kk - ka - kc = kshift
@@ -1975,7 +1975,7 @@ def eeccsd_matvec_triplet(eom, vector, kshift, imds=None, diag=None):
         for kc in range(nkpts):
             # r_ijab <= 0.5 W_aBcD r_iJcD
             Hr2ab[ki,kj,ka] += 0.5 * einsum('abcd,ijcd->ijab', imds.wvVvV[ka,kb,kc], r2ab[ki,kj,kc])  #31
-        
+
         for kk in range(nkpts):
             # r_ijab <= 0.5 W_kLiJ r_kLaB
             # => kk + kl - ki - kj = G
