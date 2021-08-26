@@ -2101,11 +2101,49 @@ def eeccsd_matvec_triplet(eom, vector, kshift, imds=None, diag=None):
     return vector
 
 
+def print_transitions(eom, r, nmax=5, kshift=0):
+    print('{:40s}: {:60s}: {}'.format('indices', 'transition (orb index, kpt index)', 'coefficent'))
+    idx = np.argsort(abs(r).ravel())[::-1][:nmax]
+    for i in idx:
+        indices = np.unravel_index(i, r.shape)
+        indices_str = f"{indices}"
+        source, dest = eom.indices_to_transition(indices, kshift)
+        transit_str = f"{source} -> {dest}"
+        print('{:40s}: {:60s}: {:.8f}'.format(indices_str, transit_str, r[indices]))
+
+
+def indices_to_transition_ee(eom, indices, kshift=0):
+    nkpts = eom.nkpts
+    nocc = eom.nocc
+    nvir = eom.nmo - nocc
+
+    if len(indices) == 3:
+        r1shape = (nkpts, nocc, nvir)
+        assert(np.all(np.array(indices) < np.array(r1shape)))
+        ki, i, a = indices
+        a += nocc
+        kconserv_r1 = eom.get_kconserv_ee_r1(kshift)
+        ka = kconserv_r1[ki]
+        return (i, ki), (a, ka)
+    elif len(indices) == 7:
+        r2shape = (nkpts, nkpts, nkpts, nocc, nocc, nvir, nvir)
+        assert(np.all(np.array(indices) < np.array(r2shape)))
+        ki, kj, ka, i, j, a, b = indices
+        a += nocc
+        b += nocc
+        kconserv_r2 = eom.get_kconserv_ee_r2(kshift)
+        kb = kconserv_r2[ki, ka, kj]
+        return ((i, ki), (j, ka)), ((a, ka), (b, kb))
+    else:
+        raise ValueError
+
+
 class EOMEE(eom_kgccsd.EOMEE):
     kernel = eeccsd
     eeccsd = eeccsd
     matvec = eeccsd_matvec
     get_diag = eeccsd_diag
+    indices_to_transition = indices_to_transition_ee
 
     @property
     def nkpts(self):
@@ -2119,6 +2157,8 @@ class EOMEE(eom_kgccsd.EOMEE):
         imds.make_ee()
         return imds
 
+    def excitation_analysis(self, r1, r2, kshift=0):
+        raise NotImplementedError
 
 class EOMEESinglet(EOMEE):
     kernel = eomee_ccsd_singlet
@@ -2168,6 +2208,12 @@ class EOMEESinglet(EOMEE):
         if kconserv is None: kconserv = self.get_kconserv_ee_r2(kshift)
         return amplitudes_to_vector_singlet(r1, r2, kconserv)
 
+    def excitation_analysis(self, r1, r2, nmax=5, kshift=0):
+        print("\nMaximum coefficients of excitation:")
+        print("\nR1 coefficients:")
+        print_transitions(self, r1, nmax, kshift)
+        print("\nR2 coefficients:")
+        print_transitions(self, r2, nmax, kshift)
 
 class EOMEETriplet(EOMEE):
     kernel = eomee_ccsd_singlet
@@ -2196,6 +2242,15 @@ class EOMEETriplet(EOMEE):
     def amplitudes_to_vector(self, r1, r2, kshift=None, kconserv=None):
         if kconserv is None: kconserv = self.get_kconserv_ee_r2(kshift)
         return amplitudes_to_vector_triplet(r1, r2, kconserv)
+
+    def excitation_analysis(self, r1, r2, nmax=5, kshift=0):
+        print("\nMaximum coefficients of excitation:")
+        print("\nR1 coefficients:")
+        print_transitions(self, r1, nmax, kshift)
+        print("\nR2aa coefficients:")
+        print_transitions(self, r2[0], nmax, kshift)
+        print("\nR2ab coefficients:")
+        print_transitions(self, r2[1], nmax, kshift)
 
 
 class EOMEESpinFlip(EOMEE):
