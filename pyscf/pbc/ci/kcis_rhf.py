@@ -176,6 +176,7 @@ def optical_absorption_singlet(cis, scan, eta, kshift=0, tol=1e-5, maxiter=500, 
     # Meanwhile, let's use 'cint1e_ipovlp_sph' or 'int1e_ipovlp' because they seems to be fine.
     ip_ao = cis._scf.cell.pbc_intor('cint1e_ipovlp_sph', kpts=kpts, comp=3)
     ip_ao = np.asarray(ip_ao).transpose(1,0,2,3)  # with shape (naxis, nkpts, nmo, nmo)
+    ip_ao *= -1j
 
     # I.p matrix in MO basis (only the occ-vir block) 
     mo_coeff = eris.mo_coeff
@@ -200,7 +201,10 @@ def optical_absorption_singlet(cis, scan, eta, kshift=0, tol=1e-5, maxiter=500, 
     # dipole in MO basis = -I p(i,a) / (\epsilon_a - \epsison_i)
     dipole = np.empty((3, nkpts, nocc, nvir), dtype=ip_mo.dtype)
     for x in range(3):
-        dipole[x] = -1. * ip_mo[x] / eia
+        # dipole[x] = -1. * ip_mo[x] / eia
+
+        # switch to pure momentum operator
+        dipole[x] = ip_mo[x]
 
     # solve linear equations A.x = b
     ieta = 1j*eta
