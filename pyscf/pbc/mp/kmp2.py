@@ -88,7 +88,7 @@ def kernel(mp, mo_energy, mo_coeff, verbose=logger.NOTE, with_t2=WITH_T2):
 
     # Build 3-index DF tensor Lov
     if with_df_ints:
-        Lov = _init_mp_df_eris(mp)
+        mp.Lov = Lov = _init_mp_df_eris(mp, mo_coeff)
 
     for ki in range(nkpts):
         for kj in range(nkpts):
@@ -131,7 +131,7 @@ def kernel(mp, mo_energy, mo_coeff, verbose=logger.NOTE, with_t2=WITH_T2):
     return emp2, t2
 
 
-def _init_mp_df_eris(mp):
+def _init_mp_df_eris(mp, mo_coeff=None):
     """Compute 3-center electron repulsion integrals, i.e. (L|ov),
     where `L` denotes DF auxiliary basis functions and `o` and `v` occupied and virtual
     canonical crystalline orbitals. Note that `o` and `v` contain kpt indices `ko` and `kv`,
@@ -165,7 +165,11 @@ def _init_mp_df_eris(mp):
     nvir = nmo - nocc
     nao = cell.nao_nr()
 
-    mo_coeff = _add_padding(mp, mp.mo_coeff, mp.mo_energy)[0]
+    if mo_coeff is None: mo_coeff = mp.mo_coeff
+    # Check if these are padded mo coefficients
+    if not np.all([x.shape[1] == nmo for x in mo_coeff]):
+        mo_coeff = padded_mo_coeff(mp, mo_coeff)
+
     kpts = mp.kpts
     nkpts = len(kpts)
     if gamma_point(kpts):
