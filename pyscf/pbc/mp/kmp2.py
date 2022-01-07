@@ -27,6 +27,7 @@ eri of size (nkpts,nocc,nocc,nvir,nvir)
 '''
 
 import numpy as np
+from functools import reduce
 from scipy.linalg import block_diag
 import h5py
 
@@ -690,11 +691,14 @@ class KMP2(mp2.MP2):
 ##################################################
 # don't modify the following attributes, they are not input options
         self.kpts = mf.kpts
-        self.mo_energy = mf.mo_energy
         self.nkpts = len(self.kpts)
         self.khelper = kpts_helper.KptsHelper(mf.cell, mf.kpts)
         self.mo_coeff = mo_coeff
         self.mo_occ = mo_occ
+        if mo_coeff is mf.mo_coeff and mf.converged:
+            self.mo_energy = mf.mo_energy
+        else:
+            self.mo_energy = self.get_mo_energy(mo_coeff)        
         self._nocc = None
         self._nmo = None
         self.e_corr = None
@@ -725,6 +729,20 @@ class KMP2(mp2.MP2):
             lib.current_memory()[0],
         )
         return self
+
+    def get_mo_energy(self, mo_coeff):
+        mf = self._scf
+
+        if mo_coeff is mf.mo_coeff and mf.converged:
+            mo_energy = mf.mo_energy
+        else:
+            dm = mf.make_rdm1(mo_coeff, self.mo_occ)
+            vhf = mf.get_veff(mf.cell, dm)
+            fockao = mf.get_hcore() + vhf
+            fock = np.asarray([reduce(np.dot, (mo.T.conj(), fockao[k], mo))
+                                for k, mo in enumerate(mo_coeff)])
+            mo_energy = [fock[k].diagonal().real for k in range(self.nkpts)]
+        return mo_energy
 
     def kernel(self, mo_energy=None, mo_coeff=None, with_t2=WITH_T2):
         if mo_energy is None:
