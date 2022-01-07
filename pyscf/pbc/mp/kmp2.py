@@ -652,25 +652,58 @@ def _gamma1_intermediates(mp, t2=None):
     if t2 is None:
         t2 = mp.t2
     if t2 is None:
-        raise NotImplementedError("Run kmp2.kernel with `with_t2=True`")
+        if mp.Lov is None:
+            Lov = _init_mp_df_eris(mp)
+        else:
+            Lov = mp.Lov
+        logger.info(mp, "Computing 1-rdm with DF ints ...")
+    else:
+        logger.info(mp, "Computing 1-rdm with saved T2 ...")
+
     nmo = mp.nmo
     nocc = mp.nocc
     nvir = nmo - nocc
     nkpts = mp.nkpts
-    dtype = t2.dtype
+
+    mo_coeff = mp.mo_coeff
+    mo_energy = mp.mo_energy
+    mo_e_o = [mo_energy[k][:nocc] for k in range(nkpts)]
+    mo_e_v = [mo_energy[k][nocc:] for k in range(nkpts)]
+    # Get location of non-zero/padded elements in occupied and virtual space
+    nonzero_opadding, nonzero_vpadding = padding_k_idx(mp, kind="split")
+
+    dtype = mo_coeff[0].dtype
+    t2_ij = np.zeros((nkpts,nocc,nocc,nvir,nvir), dtype=dtype)
 
     dm1occ = np.zeros((nkpts, nocc, nocc), dtype=dtype)
     dm1vir = np.zeros((nkpts, nvir, nvir), dtype=dtype)
 
     for ki in range(nkpts):
         for kj in range(nkpts):
+            if t2 is None:
+                for ka in range(nkpts):
+                    kb = mp.khelper.kconserv[ki, ka, kj]
+                    ijab = (1./nkpts) * einsum("Lia,Ljb->iajb", Lov[ki,ka], Lov[kj,kb]).transpose(0,2,1,3)
+                    # Remove zero/padded elements from denominator
+                    eia = LARGE_DENOM * np.ones((nocc, nvir), dtype=mo_energy[0].dtype)
+                    n0_ovp_ia = np.ix_(nonzero_opadding[ki], nonzero_vpadding[ka])
+                    eia[n0_ovp_ia] = (mo_e_o[ki][:,None] - mo_e_v[ka])[n0_ovp_ia]
+
+                    ejb = LARGE_DENOM * np.ones((nocc, nvir), dtype=mo_energy[0].dtype)
+                    n0_ovp_jb = np.ix_(nonzero_opadding[kj], nonzero_vpadding[kb])
+                    ejb[n0_ovp_jb] = (mo_e_o[kj][:,None] - mo_e_v[kb])[n0_ovp_jb]
+
+                    eijab = lib.direct_sum('ia,jb->ijab', eia, ejb)
+                    t2_ij[ka] = np.conj(ijab/eijab)
+            else:
+                t2_ij = t2[ki][kj]
+
             for ka in range(nkpts):
                 kb = mp.khelper.kconserv[ki, ka, kj]
-
-                dm1vir[kb] += einsum('ijax,ijay->yx', t2[ki][kj][ka].conj(), t2[ki][kj][ka]) * 2 -\
-                              einsum('ijax,ijya->yx', t2[ki][kj][ka].conj(), t2[ki][kj][kb])
-                dm1occ[kj] += einsum('ixab,iyab->xy', t2[ki][kj][ka].conj(), t2[ki][kj][ka]) * 2 -\
-                              einsum('ixab,iyba->xy', t2[ki][kj][ka].conj(), t2[ki][kj][kb])
+                dm1vir[kb] += einsum('ijax,ijay->yx', t2_ij[ka].conj(), t2_ij[ka]) * 2 -\
+                              einsum('ijax,ijya->yx', t2_ij[ka].conj(), t2_ij[kb])
+                dm1occ[kj] += einsum('ixab,iyab->xy', t2_ij[ka].conj(), t2_ij[ka]) * 2 -\
+                              einsum('ixab,iyba->xy', t2_ij[ka].conj(), t2_ij[kb])
     return -dm1occ, dm1vir
 
 
