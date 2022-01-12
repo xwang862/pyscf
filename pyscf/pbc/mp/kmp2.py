@@ -705,37 +705,82 @@ def _gamma1_intermediates(mp, t2=None):
     nonzero_opadding, nonzero_vpadding = padding_k_idx(mp, kind="split")
 
     dtype = mo_coeff[0].dtype
-    t2_ij = np.zeros((nkpts,nocc,nocc,nvir,nvir), dtype=dtype)
 
     dm1occ = np.zeros((nkpts, nocc, nocc), dtype=dtype)
     dm1vir = np.zeros((nkpts, nvir, nvir), dtype=dtype)
 
-    for ki in range(nkpts):
-        for kj in range(nkpts):
-            if t2 is None:
+    mem_avail = mp.max_memory - lib.current_memory()[0]
+    mem_usage = (nkpts * (nocc * nvir)**2 + 2 * (nocc * nvir)**2) * 16 / 1e6
+
+    if mem_usage < mem_avail:
+        logger.info(mp, "Using large-mem method ...")
+
+        t2_ij = np.zeros((nkpts,nocc,nocc,nvir,nvir), dtype=dtype)
+        for ki in range(nkpts):
+            for kj in range(nkpts):
+                if t2 is None:
+                    for ka in range(nkpts):
+                        kb = mp.khelper.kconserv[ki, ka, kj]
+                        ijab = (1./nkpts) * einsum("Lia,Ljb->iajb", Lov[ki,ka], Lov[kj,kb]).transpose(0,2,1,3)
+                        # Remove zero/padded elements from denominator
+                        eia = LARGE_DENOM * np.ones((nocc, nvir), dtype=mo_energy[0].dtype)
+                        n0_ovp_ia = np.ix_(nonzero_opadding[ki], nonzero_vpadding[ka])
+                        eia[n0_ovp_ia] = (mo_e_o[ki][:,None] - mo_e_v[ka])[n0_ovp_ia]
+
+                        ejb = LARGE_DENOM * np.ones((nocc, nvir), dtype=mo_energy[0].dtype)
+                        n0_ovp_jb = np.ix_(nonzero_opadding[kj], nonzero_vpadding[kb])
+                        ejb[n0_ovp_jb] = (mo_e_o[kj][:,None] - mo_e_v[kb])[n0_ovp_jb]
+
+                        eijab = lib.direct_sum('ia,jb->ijab', eia, ejb)
+                        t2_ij[ka] = np.conj(ijab/eijab)
+                else:
+                    t2_ij = t2[ki][kj]
+
                 for ka in range(nkpts):
                     kb = mp.khelper.kconserv[ki, ka, kj]
-                    ijab = (1./nkpts) * einsum("Lia,Ljb->iajb", Lov[ki,ka], Lov[kj,kb]).transpose(0,2,1,3)
-                    # Remove zero/padded elements from denominator
-                    eia = LARGE_DENOM * np.ones((nocc, nvir), dtype=mo_energy[0].dtype)
-                    n0_ovp_ia = np.ix_(nonzero_opadding[ki], nonzero_vpadding[ka])
-                    eia[n0_ovp_ia] = (mo_e_o[ki][:,None] - mo_e_v[ka])[n0_ovp_ia]
+                    dm1vir[kb] += einsum('ijax,ijay->yx', t2_ij[ka].conj(), t2_ij[ka]) * 2 -\
+                                einsum('ijax,ijya->yx', t2_ij[ka].conj(), t2_ij[kb])
+                    dm1occ[kj] += einsum('ixab,iyab->xy', t2_ij[ka].conj(), t2_ij[ka]) * 2 -\
+                                einsum('ixab,iyba->xy', t2_ij[ka].conj(), t2_ij[kb])
+    elif t2 is None:
+        # required memory: nocc * nvir^2
+        logger.info(mp, "Using small-mem method ...")
 
-                    ejb = LARGE_DENOM * np.ones((nocc, nvir), dtype=mo_energy[0].dtype)
-                    n0_ovp_jb = np.ix_(nonzero_opadding[kj], nonzero_vpadding[kb])
-                    ejb[n0_ovp_jb] = (mo_e_o[kj][:,None] - mo_e_v[kb])[n0_ovp_jb]
+        for ki, kj, ka in kpts_helper.loop_kkk(nkpts):
+            kb = mp.khelper.kconserv[ki, ka, kj]
+            # Remove zero/padded elements from denominator
+            eia = LARGE_DENOM * np.ones((nocc, nvir), dtype=mo_energy[0].dtype)
+            n0_ovp_ia = np.ix_(nonzero_opadding[ki], nonzero_vpadding[ka])
+            eia[n0_ovp_ia] = (mo_e_o[ki][:,None] - mo_e_v[ka])[n0_ovp_ia]
 
-                    eijab = lib.direct_sum('ia,jb->ijab', eia, ejb)
-                    t2_ij[ka] = np.conj(ijab/eijab)
-            else:
-                t2_ij = t2[ki][kj]
+            ejb = LARGE_DENOM * np.ones((nocc, nvir), dtype=mo_energy[0].dtype)
+            n0_ovp_jb = np.ix_(nonzero_opadding[kj], nonzero_vpadding[kb])
+            ejb[n0_ovp_jb] = (mo_e_o[kj][:,None] - mo_e_v[kb])[n0_ovp_jb]  
 
-            for ka in range(nkpts):
-                kb = mp.khelper.kconserv[ki, ka, kj]
-                dm1vir[kb] += einsum('ijax,ijay->yx', t2_ij[ka].conj(), t2_ij[ka]) * 2 -\
-                              einsum('ijax,ijya->yx', t2_ij[ka].conj(), t2_ij[kb])
-                dm1occ[kj] += einsum('ixab,iyab->xy', t2_ij[ka].conj(), t2_ij[ka]) * 2 -\
-                              einsum('ixab,iyba->xy', t2_ij[ka].conj(), t2_ij[kb])
+            eib = LARGE_DENOM * np.ones((nocc, nvir), dtype=mo_energy[0].dtype)
+            n0_ovp_ib = np.ix_(nonzero_opadding[ki], nonzero_vpadding[kb])
+            eib[n0_ovp_ib] = (mo_e_o[ki][:,None] - mo_e_v[kb])[n0_ovp_ib]
+
+            eja = LARGE_DENOM * np.ones((nocc, nvir), dtype=mo_energy[0].dtype)
+            n0_ovp_ja = np.ix_(nonzero_opadding[kj], nonzero_vpadding[ka])
+            eja[n0_ovp_ja] = (mo_e_o[kj][:,None] - mo_e_v[ka])[n0_ovp_ja] 
+
+            for i in range(nocc):
+                gi_ka = (1./nkpts) * einsum("La,Ljb->ajb", Lov[ki,ka][:,i,:], Lov[kj,kb]).transpose(1,0,2)
+                denom_i = lib.direct_sum('a,jb->jab', eia[i], ejb)
+                t2i_ka = np.conj(gi_ka/denom_i)
+
+                gi_kb = (1./nkpts) * einsum("Lb,Lja->bja", Lov[ki,kb][:,i,:], Lov[kj,ka]).transpose(1,0,2)   
+                denom_i = lib.direct_sum('b,ja->jba', eib[i], eja)
+                t2i_kb = np.conj(gi_kb/denom_i)
+
+                dm1vir[kb] += einsum('jax,jay->yx', t2i_ka.conj(), t2i_ka) * 2 -\
+                              einsum('jax,jya->yx', t2i_ka.conj(), t2i_kb)
+                dm1occ[kj] += einsum('xab,yab->xy', t2i_ka.conj(), t2i_ka) * 2 -\
+                              einsum('xab,yba->xy', t2i_ka.conj(), t2i_kb)
+    else:
+        raise NotImplementedError('Insufficient memory! Please either increase max_memory or avoid using t2.')        
+
     return -dm1occ, dm1vir
 
 
