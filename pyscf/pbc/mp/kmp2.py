@@ -71,7 +71,6 @@ def kernel(mp, mo_energy, mo_coeff, verbose=logger.NOTE, with_t2=WITH_T2):
     fao2mo = mp._scf.with_df.ao2mo
     kconserv = mp.khelper.kconserv
     emp2 = 0.
-    oovv_ij = np.zeros((nkpts,nocc,nocc,nvir,nvir), dtype=mo_coeff[0].dtype)
 
     mo_e_o = [mo_energy[k][:nocc] for k in range(nkpts)]
     mo_e_v = [mo_energy[k][nocc:] for k in range(nkpts)]
@@ -90,39 +89,72 @@ def kernel(mp, mo_energy, mo_coeff, verbose=logger.NOTE, with_t2=WITH_T2):
     if with_df_ints:
         mp.Lov = Lov = _init_mp_df_eris(mp, mo_coeff)
 
-    for ki in range(nkpts):
-        for kj in range(nkpts):
-            for ka in range(nkpts):
-                kb = kconserv[ki,ka,kj]
-                # (ia|jb)
-                if with_df_ints:
-                    oovv_ij[ka] = (1./nkpts) * einsum("Lia,Ljb->iajb", Lov[ki, ka], Lov[kj, kb]).transpose(0,2,1,3)
-                else:
-                    orbo_i = mo_coeff[ki][:,:nocc]
-                    orbo_j = mo_coeff[kj][:,:nocc]
-                    orbv_a = mo_coeff[ka][:,nocc:]
-                    orbv_b = mo_coeff[kb][:,nocc:]
-                    oovv_ij[ka] = fao2mo((orbo_i,orbv_a,orbo_j,orbv_b),
-                                         (mp.kpts[ki],mp.kpts[ka],mp.kpts[kj],mp.kpts[kb]),
-                                         compact=False).reshape(nocc,nvir,nocc,nvir).transpose(0,2,1,3) / nkpts
-            for ka in range(nkpts):
-                kb = kconserv[ki,ka,kj]
+    mem_avail = mp.max_memory - lib.current_memory()[0]
+    mem_usage = (nkpts * (nocc * nvir)**2 + 3 * (nocc * nvir)**2) * 16 / 1e6
 
-                # Remove zero/padded elements from denominator
-                eia = LARGE_DENOM * np.ones((nocc, nvir), dtype=mo_energy[0].dtype)
-                n0_ovp_ia = np.ix_(nonzero_opadding[ki], nonzero_vpadding[ka])
-                eia[n0_ovp_ia] = (mo_e_o[ki][:,None] - mo_e_v[ka])[n0_ovp_ia]
+    if mem_usage < mem_avail:
+        logger.info(mp, "Computing MP2 energy with large-mem method ...")
 
-                ejb = LARGE_DENOM * np.ones((nocc, nvir), dtype=mo_energy[0].dtype)
-                n0_ovp_jb = np.ix_(nonzero_opadding[kj], nonzero_vpadding[kb])
-                ejb[n0_ovp_jb] = (mo_e_o[kj][:,None] - mo_e_v[kb])[n0_ovp_jb]
+        oovv_ij = np.zeros((nkpts,nocc,nocc,nvir,nvir), dtype=mo_coeff[0].dtype)
+        for ki in range(nkpts):
+            for kj in range(nkpts):
+                for ka in range(nkpts):
+                    kb = kconserv[ki,ka,kj]
+                    # (ia|jb)
+                    if with_df_ints:
+                        oovv_ij[ka] = (1./nkpts) * einsum("Lia,Ljb->iajb", Lov[ki, ka], Lov[kj, kb]).transpose(0,2,1,3)
+                    else:
+                        orbo_i = mo_coeff[ki][:,:nocc]
+                        orbo_j = mo_coeff[kj][:,:nocc]
+                        orbv_a = mo_coeff[ka][:,nocc:]
+                        orbv_b = mo_coeff[kb][:,nocc:]
+                        oovv_ij[ka] = fao2mo((orbo_i,orbv_a,orbo_j,orbv_b),
+                                            (mp.kpts[ki],mp.kpts[ka],mp.kpts[kj],mp.kpts[kb]),
+                                            compact=False).reshape(nocc,nvir,nocc,nvir).transpose(0,2,1,3) / nkpts
+                for ka in range(nkpts):
+                    kb = kconserv[ki,ka,kj]
 
-                eijab = lib.direct_sum('ia,jb->ijab',eia,ejb)
-                t2_ijab = np.conj(oovv_ij[ka]/eijab)
-                if with_t2:
-                    t2[ki, kj, ka] = t2_ijab
-                woovv = 2*oovv_ij[ka] - oovv_ij[kb].transpose(0,1,3,2)
-                emp2 += einsum('ijab,ijab', t2_ijab, woovv).real
+                    # Remove zero/padded elements from denominator
+                    eia = LARGE_DENOM * np.ones((nocc, nvir), dtype=mo_energy[0].dtype)
+                    n0_ovp_ia = np.ix_(nonzero_opadding[ki], nonzero_vpadding[ka])
+                    eia[n0_ovp_ia] = (mo_e_o[ki][:,None] - mo_e_v[ka])[n0_ovp_ia]
+
+                    ejb = LARGE_DENOM * np.ones((nocc, nvir), dtype=mo_energy[0].dtype)
+                    n0_ovp_jb = np.ix_(nonzero_opadding[kj], nonzero_vpadding[kb])
+                    ejb[n0_ovp_jb] = (mo_e_o[kj][:,None] - mo_e_v[kb])[n0_ovp_jb]
+
+                    eijab = lib.direct_sum('ia,jb->ijab',eia,ejb)
+                    t2_ijab = np.conj(oovv_ij[ka]/eijab)
+                    if with_t2:
+                        t2[ki, kj, ka] = t2_ijab
+                    woovv = 2*oovv_ij[ka] - oovv_ij[kb].transpose(0,1,3,2)
+                    emp2 += einsum('ijab,ijab', t2_ijab, woovv).real
+    elif with_df_ints:
+        # required memory: nocc * nvir^2
+        logger.info(mp, "Computing MP2 energy with small-mem method ...")
+
+        for ki in range(nkpts):
+            for kj in range(nkpts):
+                for ka in range(nkpts):
+                    kb = kconserv[ki,ka,kj]
+                    # Remove zero/padded elements from denominator
+                    eia = LARGE_DENOM * np.ones((nocc, nvir), dtype=mo_energy[0].dtype)
+                    n0_ovp_ia = np.ix_(nonzero_opadding[ki], nonzero_vpadding[ka])
+                    eia[n0_ovp_ia] = (mo_e_o[ki][:,None] - mo_e_v[ka])[n0_ovp_ia]
+
+                    ejb = LARGE_DENOM * np.ones((nocc, nvir), dtype=mo_energy[0].dtype)
+                    n0_ovp_jb = np.ix_(nonzero_opadding[kj], nonzero_vpadding[kb])
+                    ejb[n0_ovp_jb] = (mo_e_o[kj][:,None] - mo_e_v[kb])[n0_ovp_jb]
+
+                    for i in range(nocc):
+                        gi_ka = (1./nkpts) * einsum("La,Ljb->ajb", Lov[ki,ka][:,i,:], Lov[kj,kb]).transpose(1,0,2)
+                        gi_kb = (1./nkpts) * einsum("Lb,Lja->bja", Lov[ki,kb][:,i,:], Lov[kj,ka]).transpose(1,0,2)
+                        denom_i = lib.direct_sum('a,jb->jab', eia[i], ejb)
+                        t2i = np.conj(gi_ka/denom_i)
+                        emp2 += einsum('jab,jab', t2i, gi_ka).real * 2
+                        emp2 -= einsum('jab,jba', t2i, gi_kb).real
+    else:
+        raise NotImplementedError('Insufficient memory! Please either increase max_memory or use density fitting.')
 
     log.timer("KMP2", *cput0)
 
