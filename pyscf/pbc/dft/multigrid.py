@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-# Copyright 2014-2020 The PySCF Developers. All Rights Reserved.
+# Copyright 2014-2021 The PySCF Developers. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -26,7 +26,7 @@ import scipy.linalg
 from pyscf import lib
 from pyscf.lib import logger
 from pyscf.gto import ATOM_OF, ANG_OF, NPRIM_OF, PTR_EXP, PTR_COEFF
-from pyscf.dft.numint import libdft
+from pyscf.dft.numint import libdft, BLKSIZE
 from pyscf.pbc import tools
 from pyscf.pbc import gto
 from pyscf.pbc.gto import pseudo
@@ -40,7 +40,6 @@ from pyscf import __config__
 #sys.stderr.write('WARN: multigrid is an experimental feature. It is still in '
 #                 'testing\nFeatures and APIs may be changed in the future.\n')
 
-BLKSIZE = numint.BLKSIZE
 EXTRA_PREC = getattr(__config__, 'pbc_gto_eval_gto_extra_precision', 1e-2)
 TO_EVEN_GRIDS = getattr(__config__, 'pbc_dft_multigrid_to_even', False)
 RMAX_FACTOR_ORTH = getattr(__config__, 'pbc_dft_multigrid_rmax_factor_orth', 1.1)
@@ -123,10 +122,7 @@ def eval_mat(cell, weights, shls_slice=None, comp=1, hermi=0,
     drv = libdft.NUMINT_fill2c
 
     def make_mat(weights):
-        if comp == 1:
-            mat = numpy.zeros((nimgs,naoj,naoi))
-        else:
-            mat = numpy.zeros((nimgs,comp,naoj,naoi))
+        mat = numpy.zeros((nimgs,comp,naoj,naoi))
         drv(getattr(libdft, eval_fn),
             weights.ctypes.data_as(ctypes.c_void_p),
             mat.ctypes.data_as(ctypes.c_void_p),
@@ -149,17 +145,32 @@ def eval_mat(cell, weights, shls_slice=None, comp=1, hermi=0,
     out = []
     for wv in weights:
         if cell.dimension == 0:
-            mat = numpy.rollaxis(make_mat(wv)[0], -1, -2)
+            mat = make_mat(wv)[0].transpose(0,2,1)
+            if hermi:
+                for i in range(comp):
+                    lib.hermi_triu(mat[i], inplace=True)
+            if comp == 1:
+                mat = mat[0]
         elif kpts is None or gamma_point(kpts):
-            mat = numpy.rollaxis(make_mat(wv).sum(axis=0), -1, -2)
+            mat = make_mat(wv).sum(axis=0).transpose(0,2,1)
+            if hermi:
+                for i in range(comp):
+                    lib.hermi_triu(mat[i], inplace=True)
+            if comp == 1:
+                mat = mat[0]
             if getattr(kpts, 'ndim', None) == 2:
-                mat = mat.reshape((1,)+mat.shape)
+                mat = mat[None,:]
         else:
             mat = make_mat(wv)
-            mat_shape = mat.shape
             expkL = numpy.exp(1j*kpts.reshape(-1,3).dot(Ls.T))
-            mat = numpy.dot(expkL, mat.reshape(nimgs,-1))
-            mat = numpy.rollaxis(mat.reshape((-1,)+mat_shape[1:]), -1, -2)
+            mat = lib.einsum('kr,rcij->kcij', expkL, mat)
+            if hermi:
+                for i in range(comp):
+                    for k in range(len(kpts)):
+                        lib.hermi_triu(mat[k,i], inplace=True)
+            mat = mat.transpose(0,1,3,2)
+            if comp == 1:
+                mat = mat[:,0]
         out.append(mat)
 
     if n_mat is None:
@@ -232,7 +243,7 @@ def eval_rho(cell, dm, shls_slice=None, hermi=0, xctype='LDA', kpts=None,
     eval_fn = 'NUMINTrho_' + xctype.lower() + lattice_type
     drv = libdft.NUMINT_rho_drv
 
-    def make_rho_(rho, dm):
+    def make_rho_(rho, dm, hermi):
         drv(getattr(libdft, eval_fn),
             rho.ctypes.data_as(ctypes.c_void_p),
             dm.ctypes.data_as(ctypes.c_void_p),
@@ -263,37 +274,37 @@ def eval_rho(cell, dm, shls_slice=None, hermi=0, xctype='LDA', kpts=None,
         if cell.dimension == 0:
             # make a copy because the dm may be overwritten in the
             # NUMINT_rho_drv inplace
-            make_rho_(rho_i, numpy.array(dm_i, order='C', copy=True))
+            make_rho_(rho_i, numpy.array(dm_i, order='C', copy=True), hermi)
         elif kpts is None or gamma_point(kpts):
-            make_rho_(rho_i, numpy.repeat(dm_i, nimgs, axis=0))
+            make_rho_(rho_i, numpy.repeat(dm_i, nimgs, axis=0), hermi)
         else:
-            dm_i = lib.dot(expkL.T, dm_i.reshape(nkpts,-1)).reshape(nimgs,naoj,naoi)
-            dmR = numpy.asarray(dm_i.real, order='C')
+            dm_L = lib.dot(expkL.T, dm_i.reshape(nkpts,-1)).reshape(nimgs,naoj,naoi)
+            dmR = numpy.asarray(dm_L.real, order='C')
 
             if ignore_imag:
                 has_imag = False
             else:
-                dmI = numpy.asarray(dm_i.imag, order='C')
+                dmI = numpy.asarray(dm_L.imag, order='C')
                 has_imag = (hermi == 0 and abs(dmI).max() > 1e-8)
                 if (has_imag and xctype == 'LDA' and
                     naoi == naoj and
                     # For hermitian density matrices, the anti-symmetry
                     # character of the imaginary part of the density matrices
                     # can be found by rearranging the repeated images.
-                    abs(dmI + dmI[::-1].transpose(0,2,1)).max() < 1e-8):
+                    abs(dm_i - dm_i.conj().transpose(0,2,1)).max() < 1e-8):
                     has_imag = False
-            dm_i = None
+            dm_L = None
 
             if has_imag:
                 if out is None:
-                    rho_i  = make_rho_(rho_i, dmI)*1j
-                    rho_i += make_rho_(numpy.zeros(shape), dmR)
+                    rho_i  = make_rho_(rho_i, dmI, 0)*1j
+                    rho_i += make_rho_(numpy.zeros(shape), dmR, 0)
                 else:
-                    out[i]  = make_rho_(numpy.zeros(shape), dmI)*1j
-                    out[i] += make_rho_(numpy.zeros(shape), dmR)
+                    out[i]  = make_rho_(numpy.zeros(shape), dmI, 0)*1j
+                    out[i] += make_rho_(numpy.zeros(shape), dmR, 0)
             else:
                 assert(rho_i.dtype == numpy.double)
-                make_rho_(rho_i, dmR)
+                make_rho_(rho_i, dmR, hermi)
             dmR = dmI = None
 
         rho.append(rho_i)
@@ -811,7 +822,7 @@ def _get_j_pass2(mydf, vG, kpts=numpy.zeros((1,3)), verbose=None):
             nshells_t = _pgto_shells(t_cell)
 
             h_coeff = scipy.linalg.block_diag(*t_coeff[:h_cell.nbas])
-            l_coeff = scipy.linalg.block_diag(*t_coeff[h_cell.nbas:])
+            #l_coeff = scipy.linalg.block_diag(*t_coeff[h_cell.nbas:])
             t_coeff = scipy.linalg.block_diag(*t_coeff)
             shls_slice = (0, nshells_h, 0, nshells_t)
             vp = eval_mat(t_cell, vR, shls_slice, 1, 0, 'LDA', kpts)
@@ -1544,6 +1555,7 @@ def multi_grids_tasks_for_ke_cut(cell, fft_mesh=None, verbose=None):
     rcuts_pgto, kecuts_pgto = _primitive_gto_cutoff(cell)
     ao_loc = cell.ao_loc_nr()
 
+    # cell that needs dense integration grids
     def make_cell_dense_exp(shls_dense, ke0, ke1):
         cell_dense = copy.copy(cell)
         cell_dense._bas = cell._bas.copy()
@@ -1575,6 +1587,7 @@ def multi_grids_tasks_for_ke_cut(cell, fft_mesh=None, verbose=None):
         cell_dense.rcut = max(rcut_atom)
         return cell_dense, ao_idx, ke_cutoff, rcut_atom
 
+    # cell that needs sparse integration grids
     def make_cell_sparse_exp(shls_sparse, ke0, ke1):
         cell_sparse = copy.copy(cell)
         cell_sparse._bas = cell._bas.copy()
@@ -1620,7 +1633,7 @@ def multi_grids_tasks_for_ke_cut(cell, fft_mesh=None, verbose=None):
 
         mesh = tools.cutoff_to_mesh(a, ke1)
         if TO_EVEN_GRIDS:
-            mesh = (mesh+1)//2 * 2  # to the nearest even number
+            mesh = int((mesh+1)//2) * 2  # to the nearest even number
 
         if numpy.all(mesh >= fft_mesh):
             # Including all rest shells
@@ -1662,11 +1675,12 @@ def multi_grids_tasks_for_ke_cut(cell, fft_mesh=None, verbose=None):
             break
     return tasks
 
-def _primitive_gto_cutoff(cell):
+def _primitive_gto_cutoff(cell, precision=None):
     '''Cutoff raidus, above which each shell decays to a value less than the
     required precsion'''
-    precision = cell.precision * EXTRA_PREC
-    log_prec = numpy.log(precision)
+    if precision is None:
+        precision = cell.precision * EXTRA_PREC
+    log_prec = min(numpy.log(precision), 0)
 
     rcut = []
     ke_cutoff = []
@@ -1675,8 +1689,8 @@ def _primitive_gto_cutoff(cell):
         es = cell.bas_exp(ib)
         cs = abs(cell.bas_ctr_coeff(ib)).max(axis=1)
         r = 5.
-        r = (((l+2)*numpy.log(r)+numpy.log(cs) - log_prec) / es)**.5
-        r = (((l+2)*numpy.log(r)+numpy.log(cs) - log_prec) / es)**.5
+        r = (((l+2)*numpy.log(r)+numpy.log(4*numpy.pi*cs) - log_prec) / es)**.5
+        r = (((l+2)*numpy.log(r)+numpy.log(4*numpy.pi*cs) - log_prec) / es)**.5
 
 # Errors in total number of electrons were observed with the default
 # precision. The energy cutoff (or the integration mesh) is not enough to
@@ -1804,13 +1818,13 @@ def _takebak_5d(out, a, indices):
 
 
 if __name__ == '__main__':
-    from pyscf.pbc import gto, dft
+    from pyscf.pbc import dft
     numpy.random.seed(22)
     cell = gto.M(
         a = numpy.eye(3)*3.5668,
-        atom = '''C     0.      0.      0.    
+        atom = '''C     0.      0.      0.
                   C     0.8917  0.8917  0.8917
-                  C     1.7834  1.7834  0.    
+                  C     1.7834  1.7834  0.
                   C     2.6751  2.6751  0.8917
                   C     1.7834  0.      1.7834
                   C     2.6751  0.8917  2.6751

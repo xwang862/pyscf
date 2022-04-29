@@ -23,7 +23,7 @@ Generate SCF response functions
 import numpy
 from pyscf import lib
 from pyscf.lib import logger
-from pyscf.scf import hf, rohf, uhf, ghf
+from pyscf.scf import hf, rohf, uhf, ghf, dhf
 
 def _gen_rhf_response(mf, mo_coeff=None, mo_occ=None,
                       singlet=None, hermi=0, max_memory=None):
@@ -40,7 +40,7 @@ def _gen_rhf_response(mf, mo_coeff=None, mo_occ=None,
     if mo_coeff is None: mo_coeff = mf.mo_coeff
     if mo_occ is None: mo_occ = mf.mo_occ
     mol = mf.mol
-    if _is_dft_object(mf):
+    if isinstance(mf, hf.KohnShamDFT):
         from pyscf.dft import numint
         ni = mf._numint
         ni.libxc.test_deriv_order(mf.xc, 2, raise_error=True)
@@ -153,7 +153,7 @@ def _gen_uhf_response(mf, mo_coeff=None, mo_occ=None,
     if mo_coeff is None: mo_coeff = mf.mo_coeff
     if mo_occ is None: mo_occ = mf.mo_occ
     mol = mf.mol
-    if _is_dft_object(mf):
+    if isinstance(mf, hf.KohnShamDFT):
         ni = mf._numint
         ni.libxc.test_deriv_order(mf.xc, 2, raise_error=True)
         if getattr(mf, 'nlc', '') != '':
@@ -226,7 +226,7 @@ def _gen_ghf_response(mf, mo_coeff=None, mo_occ=None,
     if mo_coeff is None: mo_coeff = mf.mo_coeff
     if mo_occ is None: mo_occ = mf.mo_occ
     mol = mf.mol
-    if _is_dft_object(mf):
+    if isinstance(mf, hf.KohnShamDFT):
         raise NotImplementedError
 
     elif with_j:
@@ -241,8 +241,27 @@ def _gen_ghf_response(mf, mo_coeff=None, mo_occ=None,
     return vind
 
 
-def _is_dft_object(mf):
-    return getattr(mf, 'xc', None) is not None and hasattr(mf, '_numint')
+def _gen_dhf_response(mf, mo_coeff=None, mo_occ=None,
+                      with_j=True, hermi=0, max_memory=None):
+    '''Generate a function to compute the product of DHF response function and
+    DHF density matrices.
+    '''
+    if mo_coeff is None: mo_coeff = mf.mo_coeff
+    if mo_occ is None: mo_occ = mf.mo_occ
+    mol = mf.mol
+    if isinstance(mf, hf.KohnShamDFT):
+        raise NotImplementedError
+
+    elif with_j:
+        def vind(dm1):
+            vj, vk = mf.get_jk(mol, dm1, hermi=hermi)
+            return vj - vk
+
+    else:
+        def vind(dm1):
+            return -mf.get_k(mol, dm1, hermi=hermi)
+
+    return vind
 
 
 hf.RHF.gen_response = _gen_rhf_response
@@ -251,3 +270,4 @@ ghf.GHF.gen_response = _gen_ghf_response
 # Use UHF response function for ROHF because in second order solver uhf
 # response function is called to compute ROHF orbital hessian
 rohf.ROHF.gen_response = _gen_uhf_response
+dhf.DHF.gen_response = _gen_dhf_response

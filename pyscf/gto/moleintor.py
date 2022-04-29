@@ -35,6 +35,8 @@ KAPPA_OF   = 4
 PTR_EXP    = 5
 PTR_COEFF  = 6
 BAS_SLOTS  = 8
+NGRIDS     = 11
+PTR_GRIDS  = 12
 
 def getints(intor_name, atm, bas, env, shls_slice=None, comp=None, hermi=0,
             aosym='s1', ao_loc=None, cintopt=None, out=None):
@@ -115,6 +117,11 @@ def getints(intor_name, atm, bas, env, shls_slice=None, comp=None, hermi=0,
             "int1e_iprinv_spinor"             (nabla \| rinv \|\)
             "int1e_ipspnucsp_spinor"          (nabla sigma dot p \| nuc \| sigma dot p\)
             "int1e_ipsprinvsp_spinor"         (nabla sigma dot p \| rinv \| sigma dot p\)
+            "int1e_grids"                     ( \| 1/r_grids \| \)
+            "int1e_grids_spinor"              ( \| 1/r_grids \| \)
+            "int1e_grids_ip"                  (nabla \| 1/r_grids \| \)
+            "int1e_grids_ip_spinor"           (nabla \| 1/r_grids \| \)
+            "int1e_grids_spvsp_spinor"        (sigma dot p \| 1/r_grids \| sigma dot p\)
             "int2e"                           ( \, \| \, \)
             "int2e_ig1"                       (#C(0 1) g \, \| \, \)
             "int2e_gg1"                       (g g \, \| \, \)
@@ -221,6 +228,8 @@ def getints(intor_name, atm, bas, env, shls_slice=None, comp=None, hermi=0,
       [-0.48176097 -0.10289944]]]
     '''
     intor_name, comp = _get_intor_and_comp(intor_name, comp)
+    if any(bas[:,ANG_OF] > 12):
+        raise NotImplementedError('cint library does not support high angular (l>12) GTOs')
 
     if (intor_name.startswith('int1e') or
         intor_name.startswith('ECP') or
@@ -252,7 +261,7 @@ def _get_intor_and_comp(intor_name, comp=None):
     return intor_name, comp
 
 _INTOR_FUNCTIONS = {
-#   Functiona name              : (comp-for-scalar, comp-for-spinor)
+    # Functiona name            : (comp-for-scalar, comp-for-spinor)
     'int1e_ovlp'                : (1, 1),
     'int1e_nuc'                 : (1, 1),
     'int1e_kin'                 : (1, 1),
@@ -425,6 +434,9 @@ _INTOR_FUNCTIONS = {
     'int2e_yp'                  : (1, 1),
     'int2e_stg'                 : (1, 1),
     'int2e_coulerf'             : (1, 1),
+    "int1e_grids"               : (1, 1),
+    "int1e_grids_ip"            : (3, 3),
+    "int1e_grids_spvsp"         : (4, 1),
     'ECPscalar'                 : (1, None),
     'ECPscalar_ipnuc'           : (3, None),
     'ECPscalar_iprinv'          : (3, None),
@@ -450,15 +462,25 @@ def getints2c(intor_name, atm, bas, env, shls_slice=None, comp=1, hermi=0,
     i0, i1, j0, j1 = shls_slice[:4]
     naoi = ao_loc[i1] - ao_loc[i0]
     naoj = ao_loc[j1] - ao_loc[j0]
-    if intor_name.endswith('_cart') or intor_name.endswith('_sph'):
-        mat = numpy.ndarray((naoi,naoj,comp), numpy.double, out, order='F')
-        drv_name = 'GTOint2c'
+
+    if 'int1e_grids' in intor_name:
+        shape = (int(env[NGRIDS]), naoi, naoj, comp)
+        prefix = 'GTOgrids_'
     else:
-        mat = numpy.ndarray((naoi,naoj,comp), numpy.complex, out, order='F')
+        shape = (naoi, naoj, comp)
+        prefix = 'GTO'
+
+    if intor_name.endswith('_cart') or intor_name.endswith('_sph'):
+        dtype = numpy.double
+        drv_name = prefix + 'int2c'
+    else:
+        dtype = numpy.complex128
         if '2c2e' in intor_name:
             assert(hermi != lib.HERMITIAN and
                    hermi != lib.ANTIHERMI)
-        drv_name = 'GTOint2c_spinor'
+        drv_name = prefix + 'int2c_spinor'
+
+    mat = numpy.ndarray(shape, dtype, out, order='F')
 
     if mat.size > 0:
         if cintopt is None:
@@ -473,7 +495,7 @@ def getints2c(intor_name, atm, bas, env, shls_slice=None, comp=1, hermi=0,
            bas.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(nbas),
            env.ctypes.data_as(ctypes.c_void_p))
 
-    mat = mat.transpose(2,0,1)
+    mat = numpy.rollaxis(mat, -1, 0)
     if comp == 1:
         mat = mat[0]
     return mat
@@ -517,7 +539,7 @@ def getints3c(intor_name, atm, bas, env, shls_slice=None, comp=1,
         shape = (nij, naok, comp)
 
     if 'spinor' in intor_name:
-        mat = numpy.ndarray(shape, numpy.complex, out, order='F')
+        mat = numpy.ndarray(shape, numpy.complex128, out, order='F')
         drv = libcgto.GTOr3c_drv
         fill = getattr(libcgto, 'GTOr3c_fill_'+aosym)
     else:
@@ -533,10 +555,8 @@ def getints3c(intor_name, atm, bas, env, shls_slice=None, comp=1,
         # not necessary.
         if cintopt is None:
             if '3c2e' in intor_name:
-                # TODO: Libcint-3.14 and newer version support to compute
-                # int3c2e without the opt for the 3rd index.
-                #cintopt = make_cintopt(atm, bas[:max(i1, j1)], env, intor_name)
-                cintopt = lib.c_null_ptr()
+                # int3c2e opt without the 3rd index.
+                cintopt = make_cintopt(atm, bas[:max(i1, j1)], env, intor_name)
             else:
                 cintopt = make_cintopt(atm, bas, env, intor_name)
 
@@ -615,7 +635,7 @@ def getints4c(intor_name, atm, bas, env, shls_slice=None, comp=1,
         if '_spinor' in intor_name:
             drv = libcgto.GTOr4c_drv
             fill = libcgto.GTOr4c_fill_s1
-            out = numpy.ndarray(shape[::-1], dtype=numpy.complex, buffer=out, order='F')
+            out = numpy.ndarray(shape[::-1], dtype=numpy.complex128, buffer=out, order='F')
             out = numpy.rollaxis(out, -1, 0)
         else:
             drv = libcgto.GTOnr2e_fill_drv
@@ -688,7 +708,7 @@ def getints_by_shell(intor_name, shls, atm, bas, env, comp=1):
             return (l*2+1) * bas[basid,NCTR_OF]
     else:
         from pyscf.gto.mole import len_spinor
-        dtype = numpy.complex
+        dtype = numpy.complex128
         def num_cgto_of(basid):
             l = bas[basid,ANG_OF]
             k = bas[basid,KAPPA_OF]

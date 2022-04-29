@@ -26,16 +26,24 @@ def _fpointer(name):
     return ctypes.c_void_p(_ctypes.dlsym(libcvhf._handle, name))
 
 class VHFOpt(object):
-    def __init__(self, mol, intor,
+    def __init__(self, mol, intor=None,
                  prescreen='CVHFnoscreen', qcondname=None, dmcondname=None):
         '''If function "qcondname" is presented, the qcond (sqrt(integrals))
         and will be initialized in __init__.
+
+        prescreen, qcondname, dmcondname can be either function pointers or
+        names of C functions defined in libcvhf module
         '''
-        intor = mol._add_suffix(intor)
         self._this = ctypes.POINTER(_CVHFOpt)()
         #print self._this.contents, expect ValueError: NULL pointer access
-        self._intor = intor
-        self._cintopt = make_cintopt(mol._atm, mol._bas, mol._env, intor)
+
+        if intor is None:
+            self._intor = intor
+            self._cintopt = lib.c_null_ptr()
+        else:
+            self._intor = mol._add_suffix(intor)
+            self._cintopt = make_cintopt(mol._atm, mol._bas, mol._env, intor)
+
         self._dmcondname = dmcondname
         natm = ctypes.c_int(mol.natm)
         nbas = ctypes.c_int(mol.nbas)
@@ -44,17 +52,23 @@ class VHFOpt(object):
                                    mol._bas.ctypes.data_as(ctypes.c_void_p), nbas,
                                    mol._env.ctypes.data_as(ctypes.c_void_p))
         self.prescreen = prescreen
-        if qcondname is not None:
+        if qcondname is not None and intor is not None:
             self.init_cvhf_direct(mol, intor, qcondname)
 
     def init_cvhf_direct(self, mol, intor, qcondname):
+        '''qcondname can be the function pointer or the name of a C function
+        defined in libcvhf module
+        '''
         intor = mol._add_suffix(intor)
         if intor == self._intor:
             cintopt = self._cintopt
         else:
             cintopt = lib.c_null_ptr()
         ao_loc = make_loc(mol._bas, intor)
-        fsetqcond = getattr(libcvhf, qcondname)
+        if isinstance(qcondname, ctypes._CFuncPtr):
+            fsetqcond = qcondname
+        else:
+            fsetqcond = getattr(libcvhf, qcondname)
         natm = ctypes.c_int(mol.natm)
         nbas = ctypes.c_int(mol.nbas)
         fsetqcond(self._this, getattr(libcvhf, intor), cintopt,
@@ -75,10 +89,9 @@ class VHFOpt(object):
         return self._this.contents.fprescreen
     @prescreen.setter
     def prescreen(self, v):
-        if isinstance(v, int):
-            self._this.contents.fprescreen = v
-        else:
-            self._this.contents.fprescreen = _fpointer(v)
+        if isinstance(v, str):
+            v = _fpointer(v)
+        self._this.contents.fprescreen = v
 
     def set_dm(self, dm, atm, bas, env):
         if self._dmcondname is not None:
@@ -93,7 +106,10 @@ class VHFOpt(object):
                 n_dm = len(dm)
             dm = numpy.asarray(dm, order='C')
             ao_loc = make_loc(c_bas, self._intor)
-            fsetdm = getattr(libcvhf, self._dmcondname)
+            if isinstance(self._dmcondname, ctypes._CFuncPtr):
+                fsetdm = self._dmcondname
+            else:
+                fsetdm = getattr(libcvhf, self._dmcondname)
             fsetdm(self._this,
                    dm.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(n_dm),
                    ao_loc.ctypes.data_as(ctypes.c_void_p),
@@ -107,9 +123,83 @@ class VHFOpt(object):
         except AttributeError:
             pass
 
+    def get_q_cond(self, shape=None):
+        '''Return an array associated to q_cond. Contents of q_cond can be
+        modified through this array
+        '''
+        if shape is None:
+            nbas = self._this.contents.nbas
+            shape = (nbas, nbas)
+        data = ctypes.cast(self._this.contents.q_cond,
+                           ctypes.POINTER(ctypes.c_double))
+        return numpy.ctypeslib.as_array(data, shape=shape)
+    q_cond = property(get_q_cond)
+
+    def get_dm_cond(self, shape=None):
+        '''Return an array associated to dm_cond. Contents of dm_cond can be
+        modified through this array
+        '''
+        if shape is None:
+            nbas = self._this.contents.nbas
+            shape = (nbas, nbas)
+        data = ctypes.cast(self._this.contents.dm_cond,
+                           ctypes.POINTER(ctypes.c_double))
+        return numpy.ctypeslib.as_array(data, shape=shape)
+    dm_cond = property(get_dm_cond)
+
+
+class SGXOpt(VHFOpt):
+    def __init__(self, mol, intor=None,
+                 prescreen='CVHFnoscreen', qcondname=None, dmcondname=None):
+        super(SGXOpt, self).__init__(mol, intor, prescreen, qcondname, dmcondname)
+        self.ngrids = None
+
+    def set_dm(self, dm, atm, bas, env):
+        if self._dmcondname is not None:
+            c_atm = numpy.asarray(atm, dtype=numpy.int32, order='C')
+            c_bas = numpy.asarray(bas, dtype=numpy.int32, order='C')
+            c_env = numpy.asarray(env, dtype=numpy.double, order='C')
+            natm = ctypes.c_int(c_atm.shape[0])
+            nbas = ctypes.c_int(c_bas.shape[0])
+            if isinstance(dm, numpy.ndarray) and dm.ndim == 2:
+                n_dm = 1
+                ngrids = dm.shape[0]
+            else:
+                n_dm = len(dm)
+                ngrids = dm.shape[1]
+            dm = numpy.asarray(dm, order='C')
+            ao_loc = make_loc(c_bas, self._intor)
+            if isinstance(self._dmcondname, ctypes._CFuncPtr):
+                fsetdm = self._dmcondname
+            else:
+                fsetdm = getattr(libcvhf, self._dmcondname)
+            if self._dmcondname == 'SGXsetnr_direct_scf_dm':
+                fsetdm(self._this,
+                       dm.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(n_dm),
+                       ao_loc.ctypes.data_as(ctypes.c_void_p),
+                       c_atm.ctypes.data_as(ctypes.c_void_p), natm,
+                       c_bas.ctypes.data_as(ctypes.c_void_p), nbas,
+                       c_env.ctypes.data_as(ctypes.c_void_p),
+                       ctypes.c_int(ngrids))
+                self.ngrids = ngrids
+            else:
+                raise ValueError('Can only use SGX dm screening for SGXOpt')
+
+    def get_dm_cond(self):
+        '''Return an array associated to dm_cond. Contents of dm_cond can be
+        modified through this array
+        '''
+        nbas = self._this.contents.nbas
+        shape = (nbas, self.ngrids)
+        data = ctypes.cast(self._this.contents.dm_cond,
+                           ctypes.POINTER(ctypes.c_double))
+        return numpy.ctypeslib.as_array(data, shape=shape)
+    dm_cond = property(get_dm_cond)
+
+
 class _CVHFOpt(ctypes.Structure):
     _fields_ = [('nbas', ctypes.c_int),
-                ('_padding', ctypes.c_int),
+                ('ngrids', ctypes.c_int),
                 ('direct_scf_cutoff', ctypes.c_double),
                 ('q_cond', ctypes.c_void_p),
                 ('dm_cond', ctypes.c_void_p),
@@ -511,7 +601,7 @@ def rdirect_mapdm(intor, aosym, jkdescript,
         for j in range(n_dm):
             dm1[i*n_dm+j] = dms[j].ctypes.data_as(ctypes.c_void_p)
             fjk[i*n_dm+j] = f1
-    vjk = numpy.empty((njk,n_dm*ncomp,nao,nao), dtype=numpy.complex)
+    vjk = numpy.empty((njk,n_dm*ncomp,nao,nao), dtype=numpy.complex128)
 
     fdrv(cintor, fdot, fjk, dm1,
          vjk.ctypes.data_as(ctypes.c_void_p),
@@ -580,7 +670,7 @@ def rdirect_bindm(intor, aosym, jkdescript,
         f1 = _fpointer('CVHFr%s_%s_%s'%(unpackas, dmsym, vsym))
         dm1[i] = dms[i].ctypes.data_as(ctypes.c_void_p)
         fjk[i] = f1
-    vjk = numpy.empty((njk,ncomp,nao,nao), dtype=numpy.complex)
+    vjk = numpy.empty((njk,ncomp,nao,nao), dtype=numpy.complex128)
 
     fdrv(cintor, fdot, fjk, dm1,
          vjk.ctypes.data_as(ctypes.c_void_p),

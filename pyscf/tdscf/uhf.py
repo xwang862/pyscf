@@ -16,9 +16,10 @@
 # Author: Qiming Sun <osirpt.sun@gmail.com>
 #
 
-import time
+
 import numpy
 from pyscf import lib
+from pyscf import scf
 from pyscf import symm
 from pyscf import ao2mo
 from pyscf.lib import logger
@@ -67,15 +68,16 @@ def gen_tda_operation(mf, fock_ao=None, wfnsym=None):
             wfnsym = symm.irrep_name2id(mol.groupname, wfnsym)
         orbsyma, orbsymb = uhf_symm.get_orbsym(mol, mo_coeff)
         wfnsym = wfnsym % 10  # convert to D2h subgroup
-        orbsyma = orbsyma % 10
-        orbsymb = orbsymb % 10
-        sym_forbida = (orbsyma[occidxa,None] ^ orbsyma[viridxa]) != wfnsym
-        sym_forbidb = (orbsymb[occidxb,None] ^ orbsymb[viridxb]) != wfnsym
+        orbsyma_in_d2h = numpy.asarray(orbsyma) % 10
+        orbsymb_in_d2h = numpy.asarray(orbsymb) % 10
+        sym_forbida = (orbsyma_in_d2h[occidxa,None] ^ orbsyma_in_d2h[viridxa]) != wfnsym
+        sym_forbidb = (orbsymb_in_d2h[occidxb,None] ^ orbsymb_in_d2h[viridxb]) != wfnsym
         sym_forbid = numpy.hstack((sym_forbida.ravel(), sym_forbidb.ravel()))
 
-    e_ia_a = (mo_energy[0][viridxa,None] - mo_energy[0][occidxa]).T
-    e_ia_b = (mo_energy[1][viridxb,None] - mo_energy[1][occidxb]).T
-    e_ia = hdiag = numpy.hstack((e_ia_a.reshape(-1), e_ia_b.reshape(-1)))
+    e_ia_a = mo_energy[0][viridxa] - mo_energy[0][occidxa,None]
+    e_ia_b = mo_energy[1][viridxb] - mo_energy[1][occidxb,None]
+    e_ia = numpy.hstack((e_ia_a.reshape(-1), e_ia_b.reshape(-1)))
+    hdiag = e_ia
     if wfnsym is not None and mol.symmetry:
         hdiag[sym_forbid] = 0
 
@@ -178,7 +180,7 @@ def get_ab(mf, mo_energy=None, mo_coeff=None, mo_occ=None):
         a_ab += numpy.einsum('iabj->iajb', eri_ab[:nocc_a,nocc_a:,nocc_b:,:nocc_b])
         b_ab += numpy.einsum('iajb->iajb', eri_ab[:nocc_a,nocc_a:,:nocc_b,nocc_b:])
 
-    if getattr(mf, 'xc', None) and getattr(mf, '_numint', None):
+    if isinstance(mf, scf.hf.KohnShamDFT):
         ni = mf._numint
         ni.libxc.test_deriv_order(mf.xc, 2, raise_error=True)
         if getattr(mf, 'nlc', '') != '':
@@ -504,8 +506,8 @@ def analyze(tdobj, verbose=None):
 
     if mol.symmetry:
         orbsyma, orbsymb = uhf_symm.get_orbsym(mol, mo_coeff)
-        orbsyma = orbsyma % 10
-        x_syma = (orbsyma[mo_occ[0]==1,None] ^ orbsyma[mo_occ[0]==0]).ravel()
+        x_syma = symm.direct_prod(orbsyma[mo_occ[0]==1], orbsyma[mo_occ[0]==0], mol.groupname)
+        x_symb = symm.direct_prod(orbsymb[mo_occ[1]==1], orbsymb[mo_occ[1]==0], mol.groupname)
     else:
         x_syma = None
 
@@ -516,8 +518,12 @@ def analyze(tdobj, verbose=None):
             log.note('Excited State %3d: %12.5f eV %9.2f nm  f=%.4f',
                      i+1, e_ev[i], wave_length[i], f_oscillator[i])
         else:
-            wfnsym_id = x_syma[abs(x[0]).argmax()]
-            wfnsym = symm.irrep_id2name(mol.groupname, wfnsym_id)
+            wfnsyma = rhf.analyze_wfnsym(tdobj, x_syma, x[0])
+            wfnsymb = rhf.analyze_wfnsym(tdobj, x_symb, x[1])
+            if wfnsyma == wfnsymb:
+                wfnsym = wfnsyma
+            else:
+                wfnsym = '???'
             log.note('Excited State %3d: %4s %12.5f eV %9.2f nm  f=%.4f',
                      i+1, wfnsym, e_ev[i], wave_length[i], f_oscillator[i])
 
@@ -583,7 +589,7 @@ def _contract_multipole(tdobj, ints, hermi=True, xy=None):
     return pol
 
 
-class TDA(rhf.TDA):
+class TDMixin(rhf.TDMixin):
 
     def dump_flags(self, verbose=None):
         log = logger.new_logger(self, verbose)
@@ -603,15 +609,27 @@ class TDA(rhf.TDA):
         if not self._scf.converged:
             log.warn('Ground state SCF is not converged')
         log.info('\n')
-
-    def gen_vind(self, mf):
-        '''Compute Ax'''
-        return gen_tda_hop(mf, wfnsym=self.wfnsym)
+        return self
 
     @lib.with_doc(get_ab.__doc__)
     def get_ab(self, mf=None):
         if mf is None: mf = self._scf
         return get_ab(mf)
+
+    analyze = analyze
+    get_nto = get_nto
+    _contract_multipole = _contract_multipole  # needed by transition dipoles
+
+    def nuc_grad_method(self):
+        from pyscf.grad import tduhf
+        return tduhf.Gradients(self)
+
+
+@lib.with_doc(rhf.TDA.__doc__)
+class TDA(TDMixin):
+    def gen_vind(self, mf):
+        '''Compute Ax'''
+        return gen_tda_hop(mf, wfnsym=self.wfnsym)
 
     def init_guess(self, mf, nstates=None, wfnsym=None):
         if nstates is None: nstates = self.nstates
@@ -632,24 +650,29 @@ class TDA(rhf.TDA):
                 wfnsym = symm.irrep_name2id(mol.groupname, wfnsym)
             orbsyma, orbsymb = uhf_symm.get_orbsym(mol, mf.mo_coeff)
             wfnsym = wfnsym % 10  # convert to D2h subgroup
-            orbsyma = orbsyma % 10
-            orbsymb = orbsymb % 10
-            e_ia_a[(orbsyma[occidxa,None] ^ orbsyma[viridxa]) != wfnsym] = 1e99
-            e_ia_b[(orbsymb[occidxb,None] ^ orbsymb[viridxb]) != wfnsym] = 1e99
+            orbsyma_in_d2h = numpy.asarray(orbsyma) % 10
+            orbsymb_in_d2h = numpy.asarray(orbsymb) % 10
+            e_ia_a[(orbsyma_in_d2h[occidxa,None] ^ orbsyma_in_d2h[viridxa]) != wfnsym] = 1e99
+            e_ia_b[(orbsymb_in_d2h[occidxb,None] ^ orbsymb_in_d2h[viridxb]) != wfnsym] = 1e99
 
         e_ia = numpy.hstack((e_ia_a.ravel(), e_ia_b.ravel()))
+        e_ia_max = e_ia.max()
         nov = e_ia.size
-        nroot = min(nstates, nov)
-        x0 = numpy.zeros((nroot, nov))
-        idx = numpy.argsort(e_ia)
-        for i in range(nroot):
-            x0[i,idx[i]] = 1  # lowest excitations
+        nstates = min(nstates, nov)
+        e_threshold = min(e_ia_max, e_ia[numpy.argsort(e_ia)[nstates-1]])
+        # Handle degeneracy
+        e_threshold += 1e-6
+
+        idx = numpy.where(e_ia <= e_threshold)[0]
+        x0 = numpy.zeros((idx.size, nov))
+        for i, j in enumerate(idx):
+            x0[i, j] = 1  # Koopmans' excitations
         return x0
 
     def kernel(self, x0=None, nstates=None):
         '''TDA diagonalization solver
         '''
-        cpu0 = (time.clock(), time.time())
+        cpu0 = (logger.process_clock(), logger.perf_counter())
         self.check_sanity()
         self.dump_flags()
         if nstates is None:
@@ -671,6 +694,7 @@ class TDA(rhf.TDA):
                 lib.davidson1(vind, x0, precond,
                               tol=self.conv_tol,
                               nroots=nstates, lindep=self.lindep,
+                              max_cycle=self.max_cycle,
                               max_space=self.max_space, pick=pickeig,
                               verbose=log)
 
@@ -689,16 +713,8 @@ class TDA(rhf.TDA):
             lib.chkfile.save(self.chkfile, 'tddft/xy', self.xy)
 
         log.timer('TDA', *cpu0)
-        log.note('Excited State energies (eV)\n%s', self.e * nist.HARTREE2EV)
+        self._finalize()
         return self.e, self.xy
-
-    analyze = analyze
-    get_nto = get_nto
-    _contract_multipole = _contract_multipole  # needed by transition dipoles
-
-    def nuc_grad_method(self):
-        from pyscf.grad import tduhf
-        return tduhf.Gradients(self)
 
 CIS = TDA
 
@@ -733,18 +749,18 @@ def gen_tdhf_operation(mf, fock_ao=None, singlet=True, wfnsym=None):
             wfnsym = symm.irrep_name2id(mol.groupname, wfnsym)
         orbsyma, orbsymb = uhf_symm.get_orbsym(mol, mo_coeff)
         wfnsym = wfnsym % 10  # convert to D2h subgroup
-        orbsyma = orbsyma % 10
-        orbsymb = orbsymb % 10
-        sym_forbida = (orbsyma[occidxa,None] ^ orbsyma[viridxa]) != wfnsym
-        sym_forbidb = (orbsymb[occidxb,None] ^ orbsymb[viridxb]) != wfnsym
+        orbsyma_in_d2h = numpy.asarray(orbsyma) % 10
+        orbsymb_in_d2h = numpy.asarray(orbsymb) % 10
+        sym_forbida = (orbsyma_in_d2h[occidxa,None] ^ orbsyma_in_d2h[viridxa]) != wfnsym
+        sym_forbidb = (orbsymb_in_d2h[occidxb,None] ^ orbsymb_in_d2h[viridxb]) != wfnsym
         sym_forbid = numpy.hstack((sym_forbida.ravel(), sym_forbidb.ravel()))
 
-    e_ia_a = (mo_energy[0][viridxa,None] - mo_energy[0][occidxa]).T
-    e_ia_b = (mo_energy[1][viridxb,None] - mo_energy[1][occidxb]).T
-    e_ia = hdiag = numpy.hstack((e_ia_a.reshape(-1), e_ia_b.reshape(-1)))
+    e_ia_a = mo_energy[0][viridxa] - mo_energy[0][occidxa,None]
+    e_ia_b = mo_energy[1][viridxb] - mo_energy[1][occidxb,None]
+    e_ia = hdiag = numpy.hstack((e_ia_a.ravel(), e_ia_b.ravel()))
     if wfnsym is not None and mol.symmetry:
         hdiag[sym_forbid] = 0
-    hdiag = numpy.hstack((hdiag.ravel(), hdiag.ravel()))
+    hdiag = numpy.hstack((hdiag, -hdiag))
 
     mem_now = lib.current_memory()[0]
     max_memory = max(2000, mf.max_memory*.8-mem_now)
@@ -791,7 +807,7 @@ def gen_tdhf_operation(mf, fock_ao=None, singlet=True, wfnsym=None):
     return vind, hdiag
 
 
-class TDHF(TDA):
+class TDHF(TDMixin):
     @lib.with_doc(gen_tdhf_operation.__doc__)
     def gen_vind(self, mf):
         return gen_tdhf_operation(mf, singlet=self.singlet, wfnsym=self.wfnsym)
@@ -804,7 +820,7 @@ class TDHF(TDA):
     def kernel(self, x0=None, nstates=None):
         '''TDHF diagonalization with non-Hermitian eigenvalue solver
         '''
-        cpu0 = (time.clock(), time.time())
+        cpu0 = (logger.process_clock(), logger.perf_counter())
         self.check_sanity()
         self.dump_flags()
         if nstates is None:
@@ -830,6 +846,7 @@ class TDHF(TDA):
                 lib.davidson_nosym1(vind, x0, precond,
                                     tol=self.conv_tol,
                                     nroots=nstates, lindep=self.lindep,
+                                    max_cycle=self.max_cycle,
                                     max_space=self.max_space, pick=pickeig,
                                     verbose=log)
 
@@ -858,60 +875,12 @@ class TDHF(TDA):
             lib.chkfile.save(self.chkfile, 'tddft/xy', self.xy)
 
         log.timer('TDDFT', *cpu0)
-        log.note('Excited State energies (eV)\n%s', self.e * nist.HARTREE2EV)
+        self._finalize()
         return self.e, self.xy
-
-    def nuc_grad_method(self):
-        from pyscf.grad import tduhf
-        return tduhf.Gradients(self)
 
 RPA = TDUHF = TDHF
 
-from pyscf import scf
 scf.uhf.UHF.TDA = lib.class_as_method(TDA)
 scf.uhf.UHF.TDHF = lib.class_as_method(TDHF)
 
 del(OUTPUT_THRESHOLD)
-
-
-if __name__ == '__main__':
-    from pyscf import gto
-    from pyscf import scf
-    mol = gto.Mole()
-    mol.verbose = 0
-    mol.output = None
-
-    mol.atom = [
-        ['H' , (0. , 0. , .917)],
-        ['F' , (0. , 0. , 0.)], ]
-    mol.basis = '631g'
-    mol.build()
-
-    mf = scf.UHF(mol).run()
-    td = mf.TDA()
-    td.nstates = 5
-    td.verbose = 3
-    print(td.kernel()[0] * 27.2114)
-# [ 11.01748568  11.01748568  11.90277134  11.90277134  13.16955369]
-
-    td = mf.TDHF()
-    td.nstates = 5
-    td.verbose = 3
-    print(td.kernel()[0] * 27.2114)
-# [ 10.89192986  10.89192986  11.83487865  11.83487865  12.6344099 ]
-
-    mol.spin = 2
-    mf = scf.UHF(mol).run()
-    td = TDA(mf)
-    td.nstates = 6
-    td.verbose = 3
-    print(td.kernel()[0] * 27.2114)
-# FIXME:  first state
-# [ 0.02231607274  3.32113736  18.55977052  21.01474222  21.61501962  25.0938973 ]
-
-    td = TDHF(mf)
-    td.nstates = 4
-    td.verbose = 3
-    print(td.kernel()[0] * 27.2114)
-# [ 3.31267103  18.4954748   20.84935404  21.54808392]
-

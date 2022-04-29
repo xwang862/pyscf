@@ -38,10 +38,12 @@ ALIAS = {
     'ccpvtz'     : 'cc-pvtz.dat'    ,
     'ccpvqz'     : 'cc-pvqz.dat'    ,
     'ccpv5z'     : 'cc-pv5z.dat'    ,
+    'ccpvdpdz'   : 'cc-pvdpdz.dat'  ,
     'augccpvdz'  : 'aug-cc-pvdz.dat',
     'augccpvtz'  : 'aug-cc-pvtz.dat',
     'augccpvqz'  : 'aug-cc-pvqz.dat',
     'augccpv5z'  : 'aug-cc-pv5z.dat',
+    'augccpvdpdz': 'aug-cc-pvdpdz.dat',
     'ccpvdzdk'   : 'cc-pvdz-dk.dat' ,
     'ccpvtzdk'   : 'cc-pvtz-dk.dat' ,
     'ccpvqzdk'   : 'cc-pvqz-dk.dat' ,
@@ -73,10 +75,13 @@ ALIAS = {
     'augccpv5zjkfit' : 'aug-cc-pv5z-jkfit.dat' ,
     'heavyaugccpvdzjkfit' : 'heavy-aug-cc-pvdz-jkfit.dat',
     'heavyaugccpvtzjkfit' : 'heavy-aug-cc-pvtz-jkfit.dat',
+    'heavyaugccpvdzri' : 'heavy-aug-cc-pvdz-ri.dat',
+    'heavyaugccpvtzri' : 'heavy-aug-cc-pvtz-ri.dat',
     'augccpvdzri'    : 'aug-cc-pvdz-ri.dat'    ,
     'augccpvdzpri'   : 'aug-cc-pvdzp-ri.dat'   ,
     'augccpvqzri'    : 'aug-cc-pvqz-ri.dat'    ,
     'augccpvtzri'    : 'aug-cc-pvtz-ri.dat'    ,
+    'augccpv5zri'    : 'aug-cc-pv5z-ri.dat'    ,
     'ccpvtzdk3'   : 'cc-pVTZ-DK3.dat'   ,
     'ccpvqzdk3'   : 'cc-pVQZ-DK3.dat'   ,
     'augccpvtzdk3': 'aug-cc-pVTZ-DK3.dat',
@@ -425,9 +430,11 @@ def _truncate(basis, contr_scheme, symb, split_name):
                                      segm[:][1:]]
                         contr_b.append([l] + save_segm)
                         n_saved += n_save
-            assert n_saved == n_keep, 'Only ' + str(n_saved) +\
-                ' l=' + str(l) + ' functions available for ' +\
-                symb + ' ' + split_name[0] + ', cannot truncate to ' + split_name[1]
+            assert n_saved == n_keep, ("@{} implies {} l={} function(s), but" +
+                                       "only {} in {}:{}").format(split_name[1],
+                                                                  contr_scheme[l],
+                                                                  l, n_saved, symb,
+                                                                  split_name[0])
     return contr_b
 
 optimize_contraction = parse_nwchem.optimize_contraction
@@ -451,22 +458,25 @@ def load(filename_or_basisname, symb, optimize=OPTIMIZE_CONTRACTION):
     >>> mol.basis = {'O': load('sto-3g', 'C')}
     '''
     symb = ''.join([i for i in symb if i.isalpha()])
+    if '@' in filename_or_basisname:
+        split_name = filename_or_basisname.split('@')
+        assert len(split_name) == 2
+        filename_or_basisname = split_name[0]
+        contr_scheme = _convert_contraction(split_name[1].lower())
+    else:
+        contr_scheme = 'Full'
     if os.path.isfile(filename_or_basisname):
         # read basis from given file
         try:
-            return parse_nwchem.load(filename_or_basisname, symb, optimize)
+            b = parse_nwchem.load(filename_or_basisname, symb, optimize)
         except BasisNotFoundError:
             with open(filename_or_basisname, 'r') as fin:
-                return parse_nwchem.parse(fin.read(), symb)
+                b =  parse_nwchem.parse(fin.read(), symb)
+        if contr_scheme != 'Full':
+            b = _truncate(b, contr_scheme, symb, split_name)
+        return b
 
     name = _format_basis_name(filename_or_basisname)
-    if '@' in name:
-        split_name = name.split('@')
-        assert len(split_name) == 2
-        name = split_name[0]
-        contr_scheme = _convert_contraction(split_name[1])
-    else:
-        contr_scheme = 'Full'
 
     if not (name in ALIAS or _is_pople_basis(name)):
         try:

@@ -25,7 +25,7 @@ See Also:
                             systems with k-point sampling
 '''
 
-import time
+
 import numpy
 import pyscf.dft
 from pyscf import lib
@@ -60,7 +60,7 @@ def get_veff(ks, cell=None, dm=None, dm_last=0, vhf_last=0, hermi=1,
     if cell is None: cell = ks.cell
     if dm is None: dm = ks.make_rdm1()
     if kpt is None: kpt = ks.kpt
-    t0 = (time.clock(), time.time())
+    t0 = (logger.process_clock(), logger.perf_counter())
 
     omega, alpha, hyb = ks._numint.rsh_and_hybrid_coeff(ks.xc, spin=cell.spin)
     hybrid = abs(hyb) > 1e-10 or abs(alpha) > 1e-10
@@ -171,6 +171,8 @@ def _dft_common_init_(mf, xc='LDA,VWN'):
     mf._keys = mf._keys.union(['xc', 'grids', 'small_rho_cutoff'])
 
 class KohnShamDFT(mol_ks.KohnShamDFT):
+    '''PBC-KS'''
+
     __init__ = _dft_common_init_
 
     def dump_flags(self, verbose=None):
@@ -183,6 +185,9 @@ class KohnShamDFT(mol_ks.KohnShamDFT):
         pbchf.SCF.reset(self, mol)
         self.grids.reset(mol)
         return self
+
+# Update the KohnShamDFT label in pbc.scf.hf module
+pbchf.KohnShamDFT = KohnShamDFT
 
 
 class RKS(KohnShamDFT, pbchf.RHF):
@@ -206,6 +211,7 @@ class RKS(KohnShamDFT, pbchf.RHF):
     get_rho = get_rho
 
     density_fit = _patch_df_beckegrids(pbchf.RHF.density_fit)
+    rs_density_fit = _patch_df_beckegrids(pbchf.RHF.rs_density_fit)
     mix_density_fit = _patch_df_beckegrids(pbchf.RHF.mix_density_fit)
 
 

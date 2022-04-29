@@ -20,11 +20,10 @@ import ctypes
 import numpy
 from pyscf import lib
 from pyscf.gto import moleintor
-from pyscf.gto.eval_gto import _get_intor_and_comp
+from pyscf.gto.eval_gto import _get_intor_and_comp, BLKSIZE
 from pyscf.pbc.gto import _pbcintor
 from pyscf import __config__
 
-BLKSIZE = 128 # needs to be the same to lib/gto/grid_ao_drv.c
 EXTRA_PREC = getattr(__config__, 'pbc_gto_eval_gto_extra_precision', 1e-2)
 
 libpbc = _pbcintor.libpbc
@@ -176,6 +175,7 @@ def _estimate_rcut(cell):
         cs = abs(cell.bas_ctr_coeff(ib)).max(axis=1)
         r = 5.
         r = (((l+2)*numpy.log(r)+numpy.log(cs) - log_prec) / es)**.5
+        r[r < 1.] = 1.
         r = (((l+2)*numpy.log(r)+numpy.log(cs) - log_prec) / es)**.5
         rcut.append(r.max())
     return numpy.array(rcut)

@@ -1,10 +1,122 @@
-PySCF 1.7.? (2020-?-?)
+PySCF 2.0.0 (2021-11-01)
+------------------------
+* Added
+  - Basis selector '@' to load basis from a file
+  - Native version of DF-MP2 for RHF and UHF references
+  - Cholesky orbitals as the initial guess for iterative orbital localization.
+  - FNOCCSD
+  - SCS-DF-MP2
+  - Relaxed RHF-DF-MP2 density
+  - int1e_grids function to compute Coulomb integrals for a list of grids
+  - GDF-KMP2
+  - Custom Hamiltonian for UHF
+  - Natural Orbitals for DFCASCI and DFCASSCF with approximate CI solvers
+  - slow and fast QCISD and QCISD(T) for restricted refs
+* Improved
+  - Pacakge layout, static checks, and code releasement pipeline.
+    Certain features were removed from core modules, including: cornell_shci,
+    dftd3, dmrgscf, doci, fciqmcscf, icmpspt, mbd, Molpro2Pyscf, mpicc, nao,
+    semiempirical, shciscf, tblis, prop/efg, prop/esr, prop/freq, prop/gtensor,
+    prop/hfc, prop/magnetizability, prop/nmr, prop/nsr, prop/polarizability,
+    prop/rotational_gtensor, prop/ssc, prop/zfs
+  - Compatibility improvements for Python 3.6 and newer
+  - Compatibility improvements for h5py 3.0 and newer
+  - Online documentation (https://pyscf.org/user.html)
+  - Upgrade Libxc to 5.1.7
+  - FCIDUMP interface to include ECP scalar contribution
+  - DMRG interface
+  - Ghost atoms in IAO/IBO
+  - PBC-GDF auxiliary basis treatment with nonzero drop_eta
+  - pivoted Cholesky factorization
+  - Support high angular momentum in GTO basis (up to l=15)
+  - Make Exact FF GW root finding more robust, reduce eta
+  - cubegen for arbitrary unit cells
+  - Range of lattice sum for non-orthogonal lattice
+  - krkspu
+  - Number of calls to gc.collect()
+* Fixed
+  - PBC-GDF and PBC-MDF when computing RSH functionals
+  - The edge case for zero beta electrons in SCF
+  - Atomic initial guess if multiple elements have ecp
+  - The ordering of unique points in kpts.unique function
+  - J matrix of AFTDF
+  - kuccsd rdm1
+  - GDF int2c2e integrals for non-symmetric range of lattice sum
+  - Complex-valued symm. adapted basis
+  - NEVPT2 for multistate CI wave function
+
+
+PySCF 1.7.6 (2021-03-28)
+------------------------
+* Added
+  - KMP2 2-particle density matrix
+  - PBC J, K matrices module rsjk (RangeSeparationJKBuilder)
+  - ADC (RADC, UADC, DFADC)
+  - Eigenvector analyzer for IP and EA, RADC and UADC
+  - Analytical nuclear gradients for state-average CASSCF
+  - Support SO3 symmetry
+  - ECP-SOC for GHF/GKS
+  - density fitting GMP2
+  - G0W0 approximations (analytic continuation, contour deformation)
+  - Auxiliary second-order Green's function perturbation theory (AGF2)
+  - Smearing for molecules
+  - Visscher small component correction approximation for DHF
+* Improved
+  - Threading safety in Mole temporary context
+  - Basis parser to support arithmetic expressions in basis data
+  - dmrgci interface refactored
+  - MP2 gradients performance
+  - Interface of polariazable embedding with integral batching
+  - Electron-phonon Hamiltonian module refactored
+  - Remove memorization of Ewald parameters.
+  - molden dumper refactored
+* Fixed
+  - stack overflow in ecp integral code
+  - SCAN functional crashing problem
+  - Ghost atoms for IAOs/IBOs
+  - Fix fractional occupations for case of zero beta electrons
+  - mcscf project_init_guess
+  - Symmetry verification bug when deducting subgroup
+  - Mole.set_geom_ bug
+  - GDF with non-zero drop_eta (for diffused auxiliary basis)
+  - Paddings in KMP2 when remove_linear_dep_ is applied
+  - SC-NEVPT2 Sijr Srsi
+
+
+
+PySCF 1.7.5 (2020-9-27)
+-----------------------
+* Added
+  - Upgrade cint library to v4
+  - Upgrade xcfun library to v2.1.0
+  - Kramers' restricted Dirac-Hartree-Fock, X2C, DHF-SOSCF
+  - Heavy elements basis in MINAO
+  - Coulomb integrals of short range part for attenuated Coulomb
+  - Polarizability and hyperpolarizability under PBC
+* Improved
+  - Support pseudo potential Atomic HF
+  - Atomic HF for 1-electron system
+  - Check basis angular momentum in mol.intor (l < 7)
+  - FCIDUMP wrapper fcidump.py
+* Fixed
+  - Bugs in Mole.fromstring
+  - Buffer size bug in DHF JK builder for very small systems
+  - Fix pbc-eom-eaccsd_star bug
+  - Bugs in integral screening for very tight direct_scf_tol
+
+
+PySCF 1.7.4 (2020-8-2)
 ----------------------
 * Added
-  - ADC (RADC and UADC)
-  - Analytical nuclear gradients for state-average CASSCF
+  - FCIDUMP reader to load FCIDUMP and generate custom system.
+  - Natural orbitals occupations to mc.mo_occ
+  - Supporting UHF orbitals in FCI factory function
+* Improved
+  - Linear dependency treatment for basis uncontraction
 * Fixed
-  - Bug in Mole.fromstring
+  - ECP gradients bug when the system contains two or more ecp atoms
+  - CHGCAR writer
+  - Basis parser for basis in Gaussian 94 format
 
 
 PySCF 1.7.3 (2020-6-10)
@@ -27,7 +139,7 @@ PySCF 1.7.3 (2020-6-10)
 PySCF 1.7.2 (2020-5-13)
 -----------------------
 * Added
-  - pbc.eph
+  - Electron-phonon Hamiltonian under PBC (pbc.eph)
   - State-average CASSCF example
   - Spin density analysis to uhf.analyze()
   - Passing point group and wfnsym to Dice
@@ -81,7 +193,7 @@ PySCF 1.7.1 (2020-2-29)
   - APIs for HF/KS response functions (used by TDDFT and other methods)
   - transform_ci function to allow projection between FCI wavefunction in
     different sizes
-  - The fractional-occupancy atomic HF method in SCF initial guess
+  - The fractional occupancy atomic HF method in SCF initial guess
   - Performance of non-local XC functional
   - FCI Performance
   - stability of linear equation solver in dynamic polarizability

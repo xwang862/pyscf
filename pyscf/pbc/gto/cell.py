@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-# Copyright 2014-2020 The PySCF Developers. All Rights Reserved.
+# Copyright 2014-2021 The PySCF Developers. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -24,9 +24,9 @@ import warnings
 import numpy as np
 import scipy.linalg
 try:
-  from scipy.special import factorial2
-except:
-  from scipy.misc import factorial2
+    from scipy.special import factorial2
+except ImportError:
+    from scipy.misc import factorial2
 from scipy.special import erf, erfc
 import scipy.optimize
 import pyscf.lib.parameters as param
@@ -51,6 +51,8 @@ WRAP_AROUND = getattr(__config__, 'pbc_gto_cell_make_kpts_wrap_around', False)
 WITH_GAMMA = getattr(__config__, 'pbc_gto_cell_make_kpts_with_gamma', True)
 EXP_DELIMITER = getattr(__config__, 'pbc_gto_cell_split_basis_exp_delimiter',
                         [1.0, 0.5, 0.25, 0.1, 0])
+# cutoff penalty due to lattice summation
+LATTICE_SUM_PENALTY = 1e-1
 
 
 # For code compatiblity in python-2 and python-3
@@ -190,8 +192,6 @@ def pack(cell):
     cldic['exp_to_discard'] = cell.exp_to_discard
     cldic['_mesh'] = cell._mesh
     cldic['_rcut'] = cell._rcut
-    cldic['_ew_eta'] = cell._ew_eta
-    cldic['_ew_cut'] = cell._ew_cut
     cldic['dimension'] = cell.dimension
     cldic['low_dim_ft_type'] = cell.low_dim_ft_type
     return cldic
@@ -212,7 +212,8 @@ def dumps(cell):
 
     celldic = dict(cell.__dict__)
     for k in exclude_keys:
-        del(celldic[k])
+        if k in celldic:
+            del(celldic[k])
     for k in celldic:
         if isinstance(celldic[k], np.ndarray):
             celldic[k] = celldic[k].tolist()
@@ -249,7 +250,7 @@ def loads(cellstr):
     from numpy import array  # noqa
     celldic = json.loads(cellstr)
     if sys.version_info < (3,):
-# Convert to utf8 because JSON loads fucntion returns unicode.
+        # Convert to utf8 because JSON loads fucntion returns unicode.
         def byteify(inp):
             if isinstance(inp, dict):
                 return dict([(byteify(k), byteify(v)) for k, v in inp.iteritems()])
@@ -292,7 +293,7 @@ def conc_cell(cell1, cell2):
         if len(cell1._ecpbas) == 0:
             cell3._ecpbas = ecpbas2
         else:
-            cell3._ecpbas = np.hstack((cell1._ecpbas, ecpbas2))
+            cell3._ecpbas = np.vstack((cell1._ecpbas, ecpbas2))
 
     cell3.verbose = cell1.verbose
     cell3.output = cell1.output
@@ -322,8 +323,6 @@ def conc_cell(cell1, cell2):
     cell3.precision = min(cell1.precision, cell2.precision)
     cell3.dimension = max(cell1.dimension, cell2.dimension)
     cell3.low_dim_ft_type = cell1.low_dim_ft_type or cell2.low_dim_ft_type
-    cell3.ew_eta = min(cell1.ew_eta, cell2.ew_eta)
-    cell3.ew_cut = max(cell1.ew_cut, cell2.ew_cut)
     cell3.rcut = max(cell1.rcut, cell2.rcut)
 
     cell3._pseudo.update(cell1._pseudo)
@@ -364,8 +363,8 @@ def intor_cross(intor, cell1, cell2, comp=None, hermi=0, kpts=None, kpt=None,
     pcell = copy.copy(cell1)
     pcell.precision = min(cell1.precision, cell2.precision)
     pcell._atm, pcell._bas, pcell._env = \
-    atm, bas, env = conc_env(cell1._atm, cell1._bas, cell1._env,
-                             cell2._atm, cell2._bas, cell2._env)
+            atm, bas, env = conc_env(cell1._atm, cell1._bas, cell1._env,
+                                     cell2._atm, cell2._bas, cell2._env)
     if shls_slice is None:
         shls_slice = (0, cell1.nbas, 0, cell2.nbas)
     i0, i1, j0, j1 = shls_slice[:4]
@@ -394,6 +393,39 @@ def intor_cross(intor, cell1, cell2, comp=None, hermi=0, kpts=None, kpt=None,
     Ls = cell1.get_lattice_Ls(rcut=max(cell1.rcut, cell2.rcut))
     expkL = np.asarray(np.exp(1j*np.dot(kpts_lst, Ls.T)), order='C')
     drv = libpbc.PBCnr2c_drv
+
+    kderiv = kwargs.get('kderiv', 0)
+    if kderiv > 0:
+        hermi = 0
+        aosym = 's1'
+        mat = np.empty((nkpts,(3**kderiv)*comp,ni,nj), dtype=np.complex128)
+        if kderiv == 1:
+            fac = 1j * lib.einsum('kl,lx->xkl', expkL, Ls)
+        elif kderiv == 2:
+            fac = -lib.einsum('kl,lx,ly->xykl', expkL, Ls, Ls).reshape(-1,nkpts,len(Ls))
+        else:
+            raise NotImplementedError
+
+        for x in range(fac.shape[0]):
+            facx = np.asarray(fac[x], order='C')
+            drv(fintor, fill, out.ctypes.data_as(ctypes.c_void_p),
+                ctypes.c_int(nkpts), ctypes.c_int(comp), ctypes.c_int(len(Ls)),
+                Ls.ctypes.data_as(ctypes.c_void_p),
+                facx.ctypes.data_as(ctypes.c_void_p),
+                (ctypes.c_int*4)(i0, i1, j0, j1),
+                ao_loc.ctypes.data_as(ctypes.c_void_p), cintopt, cpbcopt,
+                atm.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(pcell.natm),
+                bas.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(pcell.nbas),
+                env.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(env.size))
+
+            for k, kpt in enumerate(kpts_lst):
+                v = out[k]
+                if hermi != 0:
+                    for ic in range(comp):
+                        lib.hermi_triu(v[ic], hermi=hermi, inplace=True)
+                mat[k, x*comp:(x+1)*comp] = v.copy()
+        return mat
+
     drv(fintor, fill, out.ctypes.data_as(ctypes.c_void_p),
         ctypes.c_int(nkpts), ctypes.c_int(comp), ctypes.c_int(len(Ls)),
         Ls.ctypes.data_as(ctypes.c_void_p),
@@ -442,11 +474,14 @@ def get_nimgs(cell, precision=None):
     return nimgs
 
 def _estimate_rcut(alpha, l, c, precision=INTEGRAL_PRECISION):
-    C = (c**2+1e-200)*(2*l+1)*alpha / precision
+    '''rcut based on the overlap integrals. This estimation is too conservative
+    in many cases. A possible replacement can be the value of the basis
+    function at rcut ~ c*r^(l+2)*exp(-alpha*r^2) < precision'''
+    C = (c**2)*(2*l+1) / (precision * LATTICE_SUM_PENALTY)
     r0 = 20
     # +1. to ensure np.log returning positive value
     r0 = np.sqrt(2.*np.log(C*(r0**2*alpha)**(l+1)+1.) / alpha)
-    rcut = np.sqrt( 2.*np.log(C*(r0**2*alpha)**(l+1)+1.) / alpha)
+    rcut = np.sqrt(2.*np.log(C*(r0**2*alpha)**(l+1)+1.) / alpha)
     return rcut
 
 def bas_rcut(cell, bas_id, precision=INTEGRAL_PRECISION):
@@ -521,7 +556,7 @@ def error_for_ke_cutoff(cell, ke_cutoff):
     return errmax
 
 def get_bounding_sphere(cell, rcut):
-    '''Finds all the lattice points within a sphere of radius rcut.  
+    '''Finds all the lattice points within a sphere of radius rcut.
 
     Defines a parallelipiped given by -N_x <= n_x <= N_x, with x in [1,3]
     See Martin p. 85
@@ -558,21 +593,7 @@ def get_Gv(cell, mesh=None, **kwargs):
         Gv : (ngrids, 3) ndarray of floats
             The array of G-vectors.
     '''
-    if mesh is None:
-        mesh = cell.mesh
-    if 'gs' in kwargs:
-        warnings.warn('cell.gs is deprecated.  It is replaced by cell.mesh,'
-                      'the number of PWs (=2*gs+1) along each direction.')
-        mesh = [2*n+1 for n in kwargs['gs']]
-
-    gx = np.fft.fftfreq(mesh[0], 1./mesh[0])
-    gy = np.fft.fftfreq(mesh[1], 1./mesh[1])
-    gz = np.fft.fftfreq(mesh[2], 1./mesh[2])
-    gxyz = lib.cartesian_prod((gx, gy, gz))
-
-    b = cell.reciprocal_vectors()
-    Gv = lib.ddot(gxyz, b)
-    return Gv
+    return get_Gv_weights(cell, mesh, **kwargs)[0]
 
 def get_Gv_weights(cell, mesh=None, **kwargs):
     '''Calculate G-vectors and weights.
@@ -661,7 +682,7 @@ def get_SI(cell, Gv=None):
         SI = np.exp(-1j*np.dot(coords, Gv.T))
     return SI
 
-def get_ewald_params(cell, precision=INTEGRAL_PRECISION, mesh=None):
+def get_ewald_params(cell, precision=None, mesh=None):
     r'''Choose a reasonable value of Ewald 'eta' and 'cut' parameters.
     eta^2 is the exponent coefficient of the model Gaussian charge for nucleus
     at R:  \frac{eta^3}{pi^1.5} e^{-eta^2 (r-R)^2}
@@ -681,13 +702,15 @@ def get_ewald_params(cell, precision=INTEGRAL_PRECISION, mesh=None):
         ew_eta, ew_cut : float
             The Ewald 'eta' and 'cut' parameters.
     '''
+    if precision is None:
+        precision = cell.precision
     if cell.natm == 0:
         return 0, 0
     elif (cell.dimension < 2 or
           (cell.dimension == 2 and cell.low_dim_ft_type == 'inf_vacuum')):
-# Non-uniform PW grids are used for low-dimensional ewald summation.  The cutoff
-# estimation for long range part based on exp(G^2/(4*eta^2)) does not work for
-# non-uniform grids.  Smooth model density is preferred.
+        # Non-uniform PW grids are used for low-dimensional ewald summation.  The cutoff
+        # estimation for long range part based on exp(G^2/(4*eta^2)) does not work for
+        # non-uniform grids.  Smooth model density is preferred.
         ew_cut = cell.rcut
         ew_eta = np.sqrt(max(np.log(4*np.pi*ew_cut**2/precision)/ew_cut**2, .1))
     else:
@@ -732,8 +755,8 @@ def ewald(cell, ew_eta=None, ew_cut=None):
     if cell.natm == 0:
         return 0
 
-    if ew_eta is None: ew_eta = cell.ew_eta
-    if ew_cut is None: ew_cut = cell.ew_cut
+    if ew_eta is None: ew_eta = cell.get_ewald_params()[0]
+    if ew_cut is None: ew_cut = cell.get_ewald_params()[1]
     chargs = cell.atom_charges()
     coords = cell.atom_coords()
     Lall = cell.get_lattice_Ls(rcut=ew_cut)
@@ -830,7 +853,7 @@ def make_kpts(cell, nks, wrap_around=WRAP_AROUND, with_gamma_point=WITH_GAMMA,
         scaled_center : (3,) array
             Shift all points in the Monkhorst-pack grid to be centered on
             scaled_center, given as the zeroth index of the returned kpts.
-            Scaled meaning that the k-points are scaled to a grid from 
+            Scaled meaning that the k-points are scaled to a grid from
             [-1,1] x [-1,1] x [-1,1]
 
     Returns:
@@ -1018,11 +1041,6 @@ class Cell(mole.Mole):
             (analytic_2d_1). Unless explicitly specified, analytic_2d_1 is
             used for 2D system and inf_vacuum is assumed for 1D and 0D.
 
-        ** Following attributes (for experts) are automatically generated. **
-
-        ew_eta, ew_cut : float
-            The Ewald 'eta' and 'cut' parameters.  See :func:`get_ewald_params`
-
     (See other attributes in :class:`Mole`)
 
     Examples:
@@ -1040,8 +1058,10 @@ class Cell(mole.Mole):
     def __init__(self, **kwargs):
         mole.Mole.__init__(self, **kwargs)
         self.a = None # lattice vectors, (a1,a2,a3)
-        self.ke_cutoff = None # if set, defines a spherical cutoff
-                              # of fourier components, with .5 * G**2 < ke_cutoff
+        # if set, defines a spherical cutoff
+        # of fourier components, with .5 * G**2 < ke_cutoff
+        self.ke_cutoff = None
+
         self.pseudo = None
         self.dimension = 3
         # TODO: Simple hack for now; the implementation of ewald depends on the
@@ -1052,8 +1072,6 @@ class Cell(mole.Mole):
 ##################################################
 # These attributes are initialized by build function if not given
         self.mesh = None
-        self.ew_eta = None
-        self.ew_cut = None
         self.rcut = None
 
 ##################################################
@@ -1080,25 +1098,27 @@ class Cell(mole.Mole):
 
     @property
     def ew_eta(self):
-        return self._ew_eta
-    @ew_eta.setter
-    def ew_eta(self, val):
-        self._ew_eta = val
-        self._ew_from_build = False
+        warnings.warn("cell.ew_eta is deprecated. Use function get_ewald_params instead.")
+        return self.get_ewald_params()[0]
 
     @property
     def ew_cut(self):
-        return self._ew_cut
+        warnings.warn("cell.ew_cut is deprecated. Use function get_ewald_params instead.")
+        return self.get_ewald_params()[1]
+
+    @ew_eta.setter
+    def ew_eta(self, val):
+        warnings.warn("ew_eta is no longer stored in the cell object. Setting it has no effect")
+
     @ew_cut.setter
     def ew_cut(self, val):
-        self._ew_cut = val
-        self._ew_from_build = False
+        warnings.warn("ew_cut is no longer stored in the cell object. Setting it has no effect")
 
     if not getattr(__config__, 'pbc_gto_cell_Cell_verify_nelec', False):
-# nelec method defined in Mole class raises error when the attributes .spin
-# and .nelectron are inconsistent.  In PBC, when the system has even number of
-# k-points, it is valid that .spin is odd while .nelectron is even.
-# Overwriting nelec method to avoid this check.
+        # nelec method defined in Mole class raises error when the attributes .spin
+        # and .nelectron are inconsistent.  In PBC, when the system has even number of
+        # k-points, it is valid that .spin is odd while .nelectron is even.
+        # Overwriting nelec method to avoid this check.
         @property
         def nelec(self):
             ne = self.nelectron
@@ -1116,7 +1136,7 @@ class Cell(mole.Mole):
         if key[:2] == '__':  # Skip Python builtins
             raise AttributeError('Cell object has no attribute %s' % key)
         elif key in ('_ipython_canary_method_should_not_exist_',
-                   '_repr_mimebundle_'):
+                     '_repr_mimebundle_'):
             # https://github.com/mewwts/addict/issues/26
             # https://github.com/jupyter/notebook/issues/2014
             raise AttributeError
@@ -1170,9 +1190,8 @@ class Cell(mole.Mole):
 #Note: Exculde dump_input, parse_arg, basis from kwargs to avoid parsing twice
     def build(self, dump_input=True, parse_arg=True,
               a=None, mesh=None, ke_cutoff=None, precision=None, nimgs=None,
-              ew_eta=None, ew_cut=None, pseudo=None, basis=None, h=None,
-              dimension=None, rcut= None, ecp=None, low_dim_ft_type=None,
-              *args, **kwargs):
+              pseudo=None, basis=None, h=None, dimension=None, rcut= None,
+              ecp=None, low_dim_ft_type=None, *args, **kwargs):
         '''Setup Mole molecule and Cell and initialize some control parameters.
         Whenever you change the value of the attributes of :class:`Cell`,
         you need call this function to refresh the internal data of Cell.
@@ -1196,9 +1215,6 @@ class Cell(mole.Mole):
                 Cutoff radius (unit Bohr) in lattice summation to produce
                 periodicity. The value can be estimated based on the required
                 precision.  It's recommended NOT making changes to this value.
-            ew_eta, ew_cut : float
-                Parameters eta and cut to converge Ewald summation.
-                See :func:`get_ewald_params`
             pseudo : dict or str
                 To define pseudopotential.
             ecp : dict or str
@@ -1218,8 +1234,6 @@ class Cell(mole.Mole):
         if a is not None: self.a = a
         if mesh is not None: self.mesh = mesh
         if nimgs is not None: self.nimgs = nimgs
-        if ew_eta is not None: self.ew_eta = ew_eta
-        if ew_cut is not None: self.ew_cut = ew_cut
         if pseudo is not None: self.pseudo = pseudo
         if basis is not None: self.basis = basis
         if dimension is not None: self.dimension = dimension
@@ -1302,6 +1316,7 @@ class Cell(mole.Mole):
             steep_shls = []
             nprim_drop = 0
             nctr_drop = 0
+            _env = self._env.copy()
             for ib in range(len(self._bas)):
                 l = self.bas_angular(ib)
                 nprim = self.bas_nprim(ib)
@@ -1326,11 +1341,12 @@ class Cell(mole.Mole):
                     nctr_drop = nc_old - nc + nctr_drop
                     if cs.size > 0:
                         pe = self._bas[ib,mole.PTR_EXP]
-                        self._env[pe:pe+nprim] = es
+                        _env[pe:pe+nprim] = es
                         cs = mole._nomalize_contracted_ao(l, es, cs)
-                        self._env[ptr:ptr+nprim*nc] = cs.T.reshape(-1)
+                        _env[ptr:ptr+nprim*nc] = cs.T.reshape(-1)
                 if nprim > 0:
                     steep_shls.append(ib)
+            self._env = _env
             self._bas = np.asarray(self._bas[steep_shls], order='C')
             logger.info(self, 'Discarded %d diffused primitive functions, '
                         '%d contracted functions', nprim_drop, nctr_drop)
@@ -1380,10 +1396,6 @@ class Cell(mole.Mole):
             # system, cell.mesh was initialized to 0.
             self._mesh[self._mesh == 0] = 30
 
-        if self.ew_eta is None or self.ew_cut is None or self._ew_from_build:
-            self._ew_eta, self._ew_cut = self.get_ewald_params(self.precision, self.mesh)
-            self._ew_from_build = True
-
         if dump_input and not _built and self.verbose > logger.NOTE:
             self.dump_input()
             logger.info(self, 'lattice vectors  a1 [%.9f, %.9f, %.9f]', *_a[0])
@@ -1407,9 +1419,6 @@ class Cell(mole.Mole):
                             self.mesh, np.prod(self.mesh))
                 Ecut = pbctools.mesh_to_cutoff(self.lattice_vectors(), self.mesh)
                 logger.info(self, '    = ke_cutoff %s', Ecut)
-            logger.info(self, 'ew_eta = %g', self.ew_eta)
-            logger.info(self, 'ew_cut = %s (nimgs = %s)', self.ew_cut,
-                        self.get_bounding_sphere(self.ew_cut))
         return self
     kernel = build
 
@@ -1526,7 +1535,7 @@ class Cell(mole.Mole):
             \mathbf{b_3} &= 2\pi \frac{\mathbf{a_1} \times \mathbf{a_2}}{\mathbf{a_3} \cdot (\mathbf{a_1} \times \mathbf{a_2})}
             \end{align}
 
-        '''
+        '''  # noqa: E501
         a = self.lattice_vectors()
         if self.dimension == 1:
             assert(abs(np.dot(a[0], a[1])) < 1e-9 and
@@ -1546,7 +1555,7 @@ class Cell(mole.Mole):
             scaled_kpts : (nkpts, 3) ndarray of floats
 
         Returns:
-            abs_kpts : (nkpts, 3) ndarray of floats 
+            abs_kpts : (nkpts, 3) ndarray of floats
         '''
         return np.dot(scaled_kpts, self.reciprocal_vectors())
 
@@ -1554,7 +1563,7 @@ class Cell(mole.Mole):
         '''Get scaled k-points, given absolute k-points in 1/Bohr.
 
         Args:
-            abs_kpts : (nkpts, 3) ndarray of floats 
+            abs_kpts : (nkpts, 3) ndarray of floats
 
         Returns:
             scaled_kpts : (nkpts, 3) ndarray of floats
@@ -1567,17 +1576,25 @@ class Cell(mole.Mole):
         return copy(self)
 
     pack = pack
+
+    @classmethod
     @lib.with_doc(unpack.__doc__)
-    def unpack(self, moldic):
+    def unpack(cls, moldic):
         return unpack(moldic)
+
+    @lib.with_doc(unpack.__doc__)
     def unpack_(self, moldic):
         self.__dict__.update(moldic)
         return self
 
     dumps = dumps
+
+    @classmethod
     @lib.with_doc(loads.__doc__)
-    def loads(self, molstr):
+    def loads(cls, molstr):
         return loads(molstr)
+
+    @lib.with_doc(unpack.__doc__)
     def loads_(self, molstr):
         self.__dict__.update(loads(molstr).__dict__)
         return self
@@ -1663,6 +1680,8 @@ class Cell(mole.Mole):
         mol = self.view(mole.Mole)
         delattr(mol, 'a')
         delattr(mol, '_mesh')
+        if mol.symmetry:
+            mol._build_symmetry()
         return mol
 
     def has_ecp(self):

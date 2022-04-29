@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-# Copyright 2014-2019 The PySCF Developers. All Rights Reserved.
+# Copyright 2014-2021 The PySCF Developers. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -143,7 +143,7 @@ def contract_2e(eri, fcivec, norb, nelec, link_index=None):
 def make_hdiag(h1e, eri, norb, nelec):
     '''Diagonal Hamiltonian for Davidson preconditioner
     '''
-    if h1e.dtype == numpy.complex or eri.dtype == numpy.complex:
+    if h1e.dtype == numpy.complex128 or eri.dtype == numpy.complex128:
         raise NotImplementedError('Complex Hamiltonian')
 
     neleca, nelecb = _unpack_nelec(nelec)
@@ -173,7 +173,7 @@ def make_hdiag(h1e, eri, norb, nelec):
 def absorb_h1e(h1e, eri, norb, nelec, fac=1):
     '''Modify 2e Hamiltonian to include 1e Hamiltonian contribution.
     '''
-    if h1e.dtype == numpy.complex or eri.dtype == numpy.complex:
+    if h1e.dtype == numpy.complex128 or eri.dtype == numpy.complex128:
         raise NotImplementedError('Complex Hamiltonian')
 
     if not isinstance(nelec, (int, numpy.number)):
@@ -192,7 +192,7 @@ def pspace(h1e, eri, norb, nelec, hdiag=None, np=400):
     if norb > 63:
         raise NotImplementedError('norb > 63')
 
-    if h1e.dtype == numpy.complex or eri.dtype == numpy.complex:
+    if h1e.dtype == numpy.complex128 or eri.dtype == numpy.complex128:
         raise NotImplementedError('Complex Hamiltonian')
 
     neleca, nelecb = _unpack_nelec(nelec)
@@ -464,6 +464,43 @@ def kernel_ms1(fci, h1e, eri, norb, nelec, ci0=None, link_index=None,
                tol=None, lindep=None, max_cycle=None, max_space=None,
                nroots=None, davidson_only=None, pspace_size=None,
                max_memory=None, verbose=None, ecore=0, **kwargs):
+    '''
+    Args:
+        h1e: ndarray
+            1-electron Hamiltonian
+        eri: ndarray
+            2-electron integrals in chemist's notation
+        norb: int
+            Number of orbitals
+        nelec: int or (int, int)
+            Number of electrons of the system
+
+    Kwargs:
+        ci0: ndarray
+            Initial guess
+        link_index: ndarray
+            A lookup table to cache the addresses of CI determinants in
+            wave-function vector
+        tol: float
+            Convergence tolerance
+        lindep: float
+            Linear dependence threshold
+        max_cycle: int
+            Max. iterations for diagonalization
+        max_space: int
+            Max. trial vectors to store for sub-space diagonalization method
+        nroots: int
+            Number of states to solve
+        davidson_only: bool
+            Whether to call subspace diagonlization (davidson solver) or do a
+            full diagonlization (lapack eigh) for small systems
+        pspace_size: int
+            Number of determinants as the threshold of "small systems",
+
+    Note: davidson solver requires more arguments. For the parameters not
+    dispatched, they can be passed to davidson solver via the extra keyword
+    arguments **kwargs
+    '''
     if nroots is None: nroots = fci.nroots
     if davidson_only is None: davidson_only = fci.davidson_only
     if pspace_size is None: pspace_size = fci.pspace_size
@@ -492,8 +529,8 @@ def kernel_ms1(fci, h1e, eri, norb, nelec, ci0=None, link_index=None,
             pw = pv = None
 
         if pspace_size >= na*nb and ci0 is None and not davidson_only:
-# The degenerated wfn can break symmetry.  The davidson iteration with proper
-# initial guess doesn't have this issue
+            # The degenerated wfn can break symmetry.  The davidson iteration with proper
+            # initial guess doesn't have this issue
             if na*nb == 1:
                 return pw[0]+ecore, pv[:,0].reshape(1,1)
             elif nroots > 1:
@@ -584,7 +621,7 @@ def make_diag_precond(hdiag, pspaceig, pspaceci, addr, level_shift=0):
     return lib.make_diag_precond(hdiag, level_shift)
 
 
-class FCISolver(lib.StreamObject):
+class FCIBase(lib.StreamObject):
     '''Full CI solver
 
     Attributes:
@@ -674,8 +711,8 @@ class FCISolver(lib.StreamObject):
         self.mol = mol
         self.nroots = 1
         self.spin = None
-# Initialize symmetry attributes for the compatibility with direct_spin1_symm
-# solver.  They are not used by direct_spin1 solver.
+        # Initialize symmetry attributes for the compatibility with direct_spin1_symm
+        # solver.  They are not used by direct_spin1 solver.
         self.orbsym = None
         self.wfnsym = None
 
@@ -767,6 +804,7 @@ class FCISolver(lib.StreamObject):
     def get_init_guess(self, norb, nelec, nroots, hdiag):
         return get_init_guess(norb, nelec, nroots, hdiag)
 
+    @lib.with_doc(kernel_ms1.__doc__)
     def kernel(self, h1e, eri, norb, nelec, ci0=None,
                tol=None, lindep=None, max_cycle=None, max_space=None,
                nroots=None, davidson_only=None, pspace_size=None,
@@ -850,11 +888,7 @@ class FCISolver(lib.StreamObject):
         nelec = _unpack_nelec(nelec, self.spin)
         return addons.large_ci(fcivec, norb, nelec, tol, return_strs)
 
-    def transform_ci_for_orbital_rotation(self, fcivec, norb, nelec, u):
-        nelec = _unpack_nelec(nelec, self.spin)
-        return addons.transform_ci_for_orbital_rotation(fcivec, norb, nelec, u)
-
-    def contract_ss(self, fcivec, norb, nelec):
+    def contract_ss(self, fcivec, norb, nelec):  # noqa: F811
         from pyscf.fci import spin_op
         nelec = _unpack_nelec(nelec, self.spin)
         return spin_op.contract_ss(fcivec, norb, nelec)
@@ -870,6 +904,14 @@ class FCISolver(lib.StreamObject):
             link_indexa = cistring.gen_linkstr_index(range(norb), neleca)
             link_indexb = cistring.gen_linkstr_index(range(norb), nelecb)
         return link_indexa, link_indexb
+
+
+class FCISolver(FCIBase):
+    # transform_ci_for_orbital_rotation only available for FCI wavefunctions.
+    # Some approx FCI solver does not have this functionality.
+    def transform_ci_for_orbital_rotation(self, fcivec, norb, nelec, u):
+        nelec = _unpack_nelec(nelec, self.spin)
+        return addons.transform_ci_for_orbital_rotation(fcivec, norb, nelec, u)
 
 FCI = FCISolver
 

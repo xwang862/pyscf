@@ -94,7 +94,10 @@ def smearing_(mf, sigma=None, method=SMEARING_METHOD, mu0=None):
             nkpts = len(mf.kpts)
         else:
             nkpts = 1
-        nelectron = mf.cell.tot_electrons(nkpts)
+        if isinstance(mf.mol, pbcgto.Cell):
+            nelectron = mf.mol.tot_electrons(nkpts)
+        else:
+            nelectron = mf.mol.tot_electrons()
         if is_uhf:
             nocc = nelectron
             mo_es = numpy.append(numpy.hstack(mo_energy_kpts[0]),
@@ -128,7 +131,6 @@ def smearing_(mf, sigma=None, method=SMEARING_METHOD, mu0=None):
         else:
             mu = mu0
             mo_occs = f = f_occ(mu, mo_es, sigma)
-            
 
         # See https://www.vasp.at/vasp-workshop/slides/k-points.pdf
         if mf.smearing_method.lower() == 'fermi':
@@ -181,7 +183,7 @@ def smearing_(mf, sigma=None, method=SMEARING_METHOD, mu0=None):
             return mf_class.get_grad(mf, mo_coeff_kpts, mo_occ_kpts, fock)
         if fock is None:
             dm1 = mf.make_rdm1(mo_coeff_kpts, mo_occ_kpts)
-            fock = mf.get_hcore() + mf.get_veff(mf.cell, dm1)
+            fock = mf.get_hcore() + mf.get_veff(mf.mol, dm1)
         if is_uhf:
             ga = get_grad_tril(mo_coeff_kpts[0], mo_occ_kpts[0], fock[0])
             gb = get_grad_tril(mo_coeff_kpts[1], mo_occ_kpts[1], fock[1])
@@ -189,8 +191,8 @@ def smearing_(mf, sigma=None, method=SMEARING_METHOD, mu0=None):
         else: # rhf and ghf
             return get_grad_tril(mo_coeff_kpts, mo_occ_kpts, fock)
 
-    def energy_tot(dm_kpts=None, h1e_kpts=None, vhf_kpts=None):
-        e_tot = mf.energy_elec(dm_kpts, h1e_kpts, vhf_kpts)[0] + mf.energy_nuc()
+    def energy_tot(dm=None, h1e=None, vhf=None):
+        e_tot = mf.energy_elec(dm, h1e, vhf)[0] + mf.energy_nuc()
         if (mf.sigma and mf.smearing_method and
             mf.entropy is not None):
             mf.e_free = e_tot - mf.sigma * mf.entropy
@@ -211,7 +213,6 @@ def smearing_(mf, sigma=None, method=SMEARING_METHOD, mu0=None):
     mf.energy_tot = energy_tot
     mf.get_grad = get_grad
     return mf
-
 
 def canonical_occ_(mf, nelec=None):
     '''Label the occupancies for each orbital for sampled k-points.
@@ -398,7 +399,8 @@ def convert_to_ghf(mf, out=None):
                 for k in range(nkpts):
                     if is_rhf:
                         mo_a = mo_b = mf.mo_coeff[k]
-                        ea = eb = mf.mo_energy[k]
+                        ea = getattr(mf.mo_energy[k], 'mo_ea', mf.mo_energy[k])
+                        eb = getattr(mf.mo_energy[k], 'mo_eb', mf.mo_energy[k])
                         occa = mf.mo_occ[k] > 0
                         occb = mf.mo_occ[k] == 2
                         orbspin = mol_addons.get_ghf_orbspin(ea, mf.mo_occ[k], True)

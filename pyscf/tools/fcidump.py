@@ -20,7 +20,10 @@ FCIDUMP functions (write, read) for real Hamiltonian
 import re
 from functools import reduce
 import numpy
+from pyscf import gto
+from pyscf import scf
 from pyscf import ao2mo
+from pyscf import symm
 from pyscf import __config__
 
 DEFAULT_FLOAT_FORMAT = getattr(__config__, 'fcidump_float_format', ' %.16g')
@@ -118,7 +121,7 @@ def write_hcore(fout, h, nmo, tol=TOL, float_format=DEFAULT_FLOAT_FORMAT):
 
 
 def from_chkfile(filename, chkfile, tol=TOL, float_format=DEFAULT_FLOAT_FORMAT,
-                 molpro_orbsym=MOLPRO_ORBSYM):
+                 molpro_orbsym=MOLPRO_ORBSYM, orbsym=None):
     '''Read SCF results from PySCF chkfile and transform 1-electron,
     2-electron integrals using the SCF orbitals.  The transformed integrals is
     written to FCIDUMP
@@ -128,7 +131,6 @@ def from_chkfile(filename, chkfile, tol=TOL, float_format=DEFAULT_FLOAT_FORMAT,
             convention as documented in
             https://www.molpro.net/info/current/doc/manual/node36.html
     '''
-    from pyscf import scf, symm
     mol, scf_rec = scf.chkfile.load_scf(chkfile)
     mo_coeff = numpy.array(scf_rec['mo_coeff'])
     nmo = mo_coeff.shape[1]
@@ -138,25 +140,12 @@ def from_chkfile(filename, chkfile, tol=TOL, float_format=DEFAULT_FLOAT_FORMAT,
         # Not support the chkfile from pbc calculation
         raise RuntimeError('Non-orthogonal orbitals found in chkfile')
 
-    with open(filename, 'w') as fout:
-        if mol.symmetry:
-            orbsym = symm.label_orb_symm(mol, mol.irrep_id,
-                                         mol.symm_orb, mo_coeff, check=False)
-            if molpro_orbsym:
-                orbsym = [ORBSYM_MAP[mol.groupname][i] for i in orbsym]
-            write_head(fout, nmo, mol.nelectron, mol.spin, orbsym)
-        else:
-            write_head(fout, nmo, mol.nelectron, mol.spin)
-
-        eri = ao2mo.full(mol, mo_coeff, verbose=0)
-        write_eri(fout, ao2mo.restore(8, eri, nmo), nmo, tol, float_format)
-
-        t = mol.intor_symmetric('int1e_kin')
-        v = mol.intor_symmetric('int1e_nuc')
-        h = reduce(numpy.dot, (mo_coeff.T, t+v, mo_coeff))
-        write_hcore(fout, h, nmo, tol, float_format)
-        output_format = ' ' + float_format + '  0  0  0  0\n'
-        fout.write(output_format % mol.energy_nuc())
+    if mol.symmetry:
+        orbsym = symm.label_orb_symm(mol, mol.irrep_id,
+                                     mol.symm_orb, mo_coeff, check=False)
+    from_mo(mol, filename, mo_coeff, orbsym=orbsym, tol=tol,
+            float_format=float_format, molpro_orbsym=molpro_orbsym,
+            ms=mol.spin)
 
 def from_integrals(filename, h1e, h2e, nmo, nelec, nuc=0, ms=0, orbsym=None,
                    tol=TOL, float_format=DEFAULT_FLOAT_FORMAT):
@@ -170,7 +159,7 @@ def from_integrals(filename, h1e, h2e, nmo, nelec, nuc=0, ms=0, orbsym=None,
 
 def from_mo(mol, filename, mo_coeff, orbsym=None,
             tol=TOL, float_format=DEFAULT_FLOAT_FORMAT,
-            molpro_orbsym=MOLPRO_ORBSYM):
+            molpro_orbsym=MOLPRO_ORBSYM, ms=0):
     '''Use the given MOs to transfrom the 1-electron and 2-electron integrals
     then dump them to FCIDUMP.
 
@@ -184,32 +173,40 @@ def from_mo(mol, filename, mo_coeff, orbsym=None,
 
     if orbsym is None:
         orbsym = getattr(mo_coeff, 'orbsym', None)
-        if molpro_orbsym:
+        if molpro_orbsym and orbsym is not None:
             orbsym = [ORBSYM_MAP[mol.groupname][i] for i in orbsym]
-    t = mol.intor_symmetric('int1e_kin')
-    v = mol.intor_symmetric('int1e_nuc')
-    h1e = reduce(numpy.dot, (mo_coeff.T, t+v, mo_coeff))
+    h1ao = scf.hf.get_hcore(mol)
+    h1e = reduce(numpy.dot, (mo_coeff.T, h1ao, mo_coeff))
     eri = ao2mo.full(mol, mo_coeff, verbose=0)
     nuc = mol.energy_nuc()
-    from_integrals(filename, h1e, eri, h1e.shape[0], mol.nelec, nuc, 0, orbsym,
+    from_integrals(filename, h1e, eri, h1e.shape[0], mol.nelec, nuc, ms, orbsym,
                    tol, float_format)
 
-def from_scf(mf, filename, tol=TOL, float_format=DEFAULT_FLOAT_FORMAT):
+def from_scf(mf, filename, tol=TOL, float_format=DEFAULT_FLOAT_FORMAT,
+             molpro_orbsym=MOLPRO_ORBSYM):
     '''Use the given SCF object to transfrom the 1-electron and 2-electron
     integrals then dump them to FCIDUMP.
+
+    Kwargs:
+        molpro_orbsym (bool): Whether to dump the orbsym in Molpro orbsym
+            convention as documented in
+            https://www.molpro.net/info/current/doc/manual/node36.html
     '''
+    mol = mf.mol
     mo_coeff = mf.mo_coeff
     assert mo_coeff.dtype == numpy.double
 
     h1e = reduce(numpy.dot, (mo_coeff.T, mf.get_hcore(), mo_coeff))
     if mf._eri is None:
-        if getattr(mf, 'exxdiv'):  # PBC system
+        if getattr(mf, 'exxdiv', None):  # PBC system
             eri = mf.with_df.ao2mo(mo_coeff)
         else:
             eri = ao2mo.full(mf.mol, mo_coeff)
     else:  # Handle cached integrals or customized systems
         eri = ao2mo.full(mf._eri, mo_coeff)
     orbsym = getattr(mo_coeff, 'orbsym', None)
+    if molpro_orbsym and orbsym is not None:
+        orbsym = [ORBSYM_MAP[mol.groupname][i] for i in orbsym]
     nuc = mf.energy_nuc()
     from_integrals(filename, h1e, eri, h1e.shape[0], mf.mol.nelec, nuc, 0, orbsym,
                    tol, float_format)
@@ -256,9 +253,9 @@ def read(filename, molpro_orbsym=MOLPRO_ORBSYM):
             # save the point group information, the guess might be wrong if
             # the high symmetry numbering of orbitals are not presented.
             orbsym = result['ORBSYM']
-            if max(orbsym) == 8:
+            if max(orbsym) > 4:
                 result['ORBSYM'] = [ORBSYM_MAP['D2h'].index(i) for i in orbsym]
-            elif max(orbsym) == 4:
+            elif max(orbsym) > 2:
                 # Fortunately, without molecular orientation, B2 and B3 in D2
                 # are not distinguishable
                 result['ORBSYM'] = [ORBSYM_MAP['C2v'].index(i) for i in orbsym]
@@ -308,7 +305,56 @@ def read(filename, molpro_orbsym=MOLPRO_ORBSYM):
     finp.close()
     return result
 
+def to_scf(filename, molpro_orbsym=MOLPRO_ORBSYM, mf=None, **kwargs):
+    '''Use the Hamiltonians defined by FCIDUMP to build an SCF object'''
+    ctx = read(filename, molpro_orbsym)
+    mol = gto.M()
+    mol.nelectron = ctx['NELEC']
+    mol.spin = ctx['MS2']
+    norb = mol.nao = ctx['NORB']
+    if 'ECORE' in ctx:
+        mol.energy_nuc = lambda *args: ctx['ECORE']
+    mol.incore_anyway = True
+
+    if 'ORBSYM' in ctx:
+        mol.symmetry = True
+        mol.groupname = 'N/A'
+        orbsym = numpy.asarray(ctx['ORBSYM'])
+        mol.irrep_id = list(set(orbsym))
+        mol.irrep_name = [('IR%d' % ir) for ir in mol.irrep_id]
+        so = numpy.eye(norb)
+        mol.symm_orb = []
+        for ir in mol.irrep_id:
+            mol.symm_orb.append(so[:,orbsym==ir])
+
+    if mf is None:
+        mf = mol.RHF(**kwargs)
+    else:
+        mf.mol = mol
+    h1 = ctx['H1']
+    idx, idy = numpy.tril_indices(norb, -1)
+    if h1[idx,idy].max() == 0:
+        h1[idx,idy] = h1[idy,idx]
+    else:
+        h1[idy,idx] = h1[idx,idy]
+    mf.get_hcore = lambda *args: h1
+    mf.get_ovlp = lambda *args: numpy.eye(norb)
+    mf._eri = ctx['H2']
+
+    return mf
+
+def scf_from_fcidump(mf, filename, molpro_orbsym=MOLPRO_ORBSYM):
+    '''Update the SCF object with the quantities defined in FCIDUMP file'''
+    return to_scf(filename, molpro_orbsym, mf)
+
+scf.hf.SCF.from_fcidump = scf_from_fcidump
+
 if __name__ == '__main__':
-    import sys
+    import argparse
+    parser = argparse.ArgumentParser(description='Convert chkfile to FCIDUMP')
+    parser.add_argument('chkfile', help='pyscf chkfile')
+    parser.add_argument('fcidump', help='FCIDUMP file')
+    args = parser.parse_args()
+
     # fcidump.py chkfile output
-    from_chkfile(sys.argv[2], sys.argv[1])
+    from_chkfile(args.fcidump, args.chkfile)

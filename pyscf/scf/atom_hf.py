@@ -16,47 +16,65 @@
 # Author: Qiming Sun <osirpt.sun@gmail.com>
 #
 
+import copy
 import numpy
 from pyscf import gto
 from pyscf.lib import logger
 from pyscf.lib import param
 from pyscf.data import elements
-from pyscf.scf import hf
+from pyscf.scf import hf, rohf, addons
 
 
 def get_atm_nrhf(mol, atomic_configuration=elements.NRSRHF_CONFIGURATION):
+    elements = set([a[0] for a in mol._atom])
+    logger.info(mol, 'Spherically averaged atomic HF for %s', elements)
+
+    atm_template = copy.copy(mol)
+    atm_template.charge = 0
+    atm_template.symmetry = False  # TODO: enable SO3 symmetry here
+    atm_template.atom = atm_template._atom = []
+    atm_template.cart = False  # AtomSphAverageRHF does not support cartesian basis
+
     atm_scf_result = {}
-    for a, b in mol._basis.items():
-        atm = gto.Mole()
-        atm.stdout = mol.stdout
-        atm.atom = atm._atom = [[a, (0, 0, 0)]]
-        atm._basis = {a: b}
-        atm.nelectron = gto.charge(a)
+    for ia, a in enumerate(mol._atom):
+        element = a[0]
+        if element in atm_scf_result:
+            continue
+
+        atm = atm_template
+        atm._atom = [a]
+        atm._atm = mol._atm[ia:ia+1]
+        atm._bas = mol._bas[mol._bas[:,0] == ia].copy()
+        atm._ecpbas = mol._ecpbas[mol._ecpbas[:,0] == ia].copy()
+        # Point to the only atom
+        atm._bas[:,0] = 0
+        atm._ecpbas[:,0] = 0
+        if element in mol._pseudo:
+            atm._pseudo = {element: mol._pseudo.get(element)}
+            raise NotImplementedError
         atm.spin = atm.nelectron % 2
-        atm._atm, atm._bas, atm._env = \
-                atm.make_env(atm._atom, atm._basis, atm._env)
-        if a in mol._ecp:
-            atm._ecp[a] = mol._ecp[a]
-            atm._atm, atm._ecpbas, atm._env = \
-                    atm.make_ecp_env(atm._atm, atm._ecp, atm._env)
-        atm._built = True
-        if atm.nelectron == 0:  # GHOST
-            nao = atm.nao_nr()
+
+        nao = atm.nao
+        # nao == 0 for the case that no basis was assigned to an atom
+        if nao == 0 or atm.nelectron == 0:  # GHOST
             mo_occ = mo_energy = numpy.zeros(nao)
             mo_coeff = numpy.zeros((nao,nao))
-            atm_scf_result[a] = (0, mo_energy, mo_coeff, mo_occ)
+            atm_scf_result[element] = (0, mo_energy, mo_coeff, mo_occ)
         else:
-            atm_hf = AtomSphericAverageRHF(atm)
-            atm_hf.atomic_configuration = atomic_configuration
-            atm_hf.verbose = 0
+            if atm.nelectron == 1:
+                atm_hf = AtomHF1e(atm)
+            else:
+                atm_hf = AtomSphAverageRHF(atm)
+                atm_hf.atomic_configuration = atomic_configuration
+
+            atm_hf.verbose = mol.verbose
             atm_hf.run()
-            atm_scf_result[a] = (atm_hf.e_tot, atm_hf.mo_energy,
-                                 atm_hf.mo_coeff, atm_hf.mo_occ)
-            atm_hf._eri = None
-    mol.stdout.flush()
+            atm_scf_result[element] = (atm_hf.e_tot, atm_hf.mo_energy,
+                                       atm_hf.mo_coeff, atm_hf.mo_occ)
     return atm_scf_result
 
-class AtomSphericAverageRHF(hf.RHF):
+
+class AtomSphAverageRHF(hf.RHF):
     def __init__(self, mol):
         self._eri = None
         self.atomic_configuration = elements.NRSRHF_CONFIGURATION
@@ -66,10 +84,15 @@ class AtomSphericAverageRHF(hf.RHF):
         if mol.atom_charge(0) > 96:
             self.init_guess = '1e'
 
+        self = self.apply(addons.remove_linear_dep_)
+
+    def check_sanity(self):
+        pass
+
     def dump_flags(self, verbose=None):
-        hf.RHF.dump_flags(self, verbose)
-        logger.debug(self.mol, 'occupation averaged SCF for atom  %s',
-                     self.mol.atom_symbol(0))
+        log = logger.new_logger(self, verbose)
+        hf.RHF.dump_flags(self, log)
+        log.info('atom = %s', self.mol.atom_symbol(0))
 
     def eig(self, f, s):
         mol = self.mol
@@ -141,6 +164,22 @@ class AtomSphericAverageRHF(hf.RHF):
         kwargs['dump_chk'] = False
         return hf.RHF.scf(self, *args, **kwargs)
 
+    def _finalize(self):
+        if self.converged:
+            logger.info(self, 'Atomic HF for atom  %s  converged. SCF energy = %.15g',
+                        self.mol.atom_symbol(0), self.e_tot)
+        else:
+            logger.info(self, 'Atomic HF for atom  %s  not converged. SCF energy = %.15g',
+                        self.mol.atom_symbol(0), self.e_tot)
+        return self
+
+AtomSphericAverageRHF = AtomSphAverageRHF
+
+
+class AtomHF1e(rohf.HF1e, AtomSphAverageRHF):
+    eig = AtomSphAverageRHF.eig
+
+
 def frac_occ(symb, l, atomic_configuration=elements.NRSRHF_CONFIGURATION):
     nuc = gto.charge(symb)
     if l < 4 and atomic_configuration[nuc][l] > 0:
@@ -151,6 +190,7 @@ def frac_occ(symb, l, atomic_configuration=elements.NRSRHF_CONFIGURATION):
     else:
         ndocc = frac = 0
     return ndocc, frac
+
 
 def _angular_momentum_for_each_ao(mol):
     ao_ang = numpy.zeros(mol.nao, dtype=numpy.int)

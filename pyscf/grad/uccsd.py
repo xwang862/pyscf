@@ -20,7 +20,7 @@
 UCCSD analytical nuclear gradients
 '''
 
-import time
+
 import ctypes
 import numpy
 from pyscf import lib
@@ -29,6 +29,7 @@ from pyscf.lib import logger
 from pyscf.cc import ccsd
 from pyscf.cc import _ccsd
 from pyscf.cc import uccsd_rdm
+from pyscf.ao2mo import _ao2mo
 from pyscf.scf import ucphf
 from pyscf.grad import rhf as rhf_grad
 from pyscf.grad import ccsd as ccsd_grad
@@ -52,7 +53,7 @@ def grad_elec(cc_grad, t1=None, t2=None, l1=None, l2=None, eris=None, atmlst=Non
     if l2 is None: l2 = mycc.l2
 
     log = logger.new_logger(mycc, verbose)
-    time0 = time.clock(), time.time()
+    time0 = logger.process_clock(), logger.perf_counter()
 
     log.debug('Build uccsd rdm1 intermediates')
     if d1 is None:
@@ -299,7 +300,7 @@ def _response_dm1(mycc, Xvo, eris=None):
 
 def _rdm2_mo2ao(mycc, d2, mo_coeff, fsave=None):
     log = logger.Logger(mycc.stdout, mycc.verbose)
-    time1 = time.clock(), time.time()
+    time1 = logger.process_clock(), logger.perf_counter()
     if fsave is None:
         incore = True
         fsave = lib.H5TmpFile()
@@ -323,8 +324,8 @@ def _rdm2_mo2ao(mycc, d2, mo_coeff, fsave=None):
     nvira_pair = nvira * (nvira+1) //2
     nvirb_pair = nvirb * (nvirb+1) //2
 
-    fdrv = getattr(_ccsd.libcc, 'AO2MOnr_e2_drv')
-    ftrans = _ccsd.libcc.AO2MOtranse2_nr_s1
+    fdrv = _ao2mo.libao2mo.AO2MOnr_e2_drv
+    ftrans = _ao2mo.libao2mo.AO2MOtranse2_nr_s1
     fmm = _ccsd.libcc.CCmmm_transpose_sum
     pao_loc = ctypes.POINTER(ctypes.c_void_p)()
     def _trans(vin, mo_coeff, orbs_slice, out=None):
@@ -479,7 +480,7 @@ def _rdm2_mo2ao(mycc, d2, mo_coeff, fsave=None):
 
     time1 = log.timer_debug1('_rdm2_mo2ao pass 3', *time1)
     if incore:
-        return (fsave['dm2aa+ab'].value, fsave['dm2bb+ab'].value)
+        return (fsave['dm2aa+ab'][:], fsave['dm2bb+ab'][:])
     else:
         return fsave
 

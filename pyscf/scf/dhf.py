@@ -20,7 +20,7 @@
 Dirac Hartree-Fock
 '''
 
-import time
+
 from functools import reduce
 import numpy
 from pyscf import lib
@@ -31,6 +31,15 @@ from pyscf.scf import _vhf
 from pyscf.scf import chkfile
 from pyscf.data import nist
 from pyscf import __config__
+
+zquatev = None
+if getattr(__config__, 'scf_dhf_SCF_zquatev', True):
+    try:
+        # Install zquatev with
+        # pip install git+https://github.com/sunqm/zquatev
+        import zquatev
+    except ImportError:
+        pass
 
 
 def kernel(mf, conv_tol=1e-9, conv_tol_grad=None,
@@ -49,31 +58,75 @@ def kernel(mf, conv_tol=1e-9, conv_tol_grad=None,
     else:
         dm = dm0
 
-    mf._coulomb_now = 'LLLL'
-    if dm0 is None and mf._coulomb_now.upper() == 'LLLL':
+    mf._coulomb_level = 'LLLL'
+    if dm0 is None and mf._coulomb_level.upper() == 'LLLL':
         scf_conv, e_tot, mo_energy, mo_coeff, mo_occ \
                 = hf.kernel(mf, 1e-2, 1e-1,
                             dump_chk, dm0=dm, callback=callback,
                             conv_check=False)
         dm = mf.make_rdm1(mo_coeff, mo_occ)
-        mf._coulomb_now = 'SSLL'
-
-    if dm0 is None and (mf._coulomb_now.upper() == 'SSLL' or
-                        mf._coulomb_now.upper() == 'LLSS'):
-        scf_conv, e_tot, mo_energy, mo_coeff, mo_occ \
-                = hf.kernel(mf, 1e-3, 1e-1,
-                            dump_chk, dm0=dm, callback=callback,
-                            conv_check=False)
-        dm = mf.make_rdm1(mo_coeff, mo_occ)
-        mf._coulomb_now = 'SSSS'
+        mf._coulomb_level = 'SSLL'
 
     if mf.with_ssss:
-        mf._coulomb_now = 'SSSS'
+        if dm0 is None and (mf._coulomb_level.upper() == 'SSLL' or
+                            mf._coulomb_level.upper() == 'LLSS'):
+            scf_conv, e_tot, mo_energy, mo_coeff, mo_occ \
+                    = hf.kernel(mf, 1e-3, 1e-1,
+                                dump_chk, dm0=dm, callback=callback,
+                                conv_check=False)
+            dm = mf.make_rdm1(mo_coeff, mo_occ)
+        mf._coulomb_level = 'SSSS'
     else:
-        mf._coulomb_now = 'SSLL'
+        mf._coulomb_level = 'SSLL'
 
     return hf.kernel(mf, conv_tol, conv_tol_grad, dump_chk, dm0=dm,
                      callback=callback, conv_check=conv_check)
+
+def energy_elec(mf, dm=None, h1e=None, vhf=None):
+    r'''Electronic part of Dirac-Hartree-Fock energy
+
+    Args:
+        mf : an instance of SCF class
+
+    Kwargs:
+        dm : 2D ndarray
+            one-partical density matrix
+        h1e : 2D ndarray
+            Core hamiltonian
+        vhf : 2D ndarray
+            HF potential
+
+    Returns:
+        Hartree-Fock electronic energy and the Coulomb energy
+    '''
+    if dm is None: dm = mf.make_rdm1()
+    if h1e is None: h1e = mf.get_hcore()
+    if vhf is None: vhf = mf.get_veff(mf.mol, dm)
+    e1 = numpy.einsum('ij,ji->', h1e, dm).real
+    e_coul = numpy.einsum('ij,ji->', vhf, dm).real * .5
+    logger.debug(mf, 'E1 = %.14g  E_coul = %.14g', e1, e_coul)
+
+    if not mf.with_ssss and mf.ssss_approx == 'Visscher':
+        # Visscher point charge corrections for small component, TCA, 98, 68
+        # Note there is a small difference to Visscher's work. The model
+        # charges in Visscher's work are obtained from atomic calculations.
+        # Charges here are Mulliken charges on small components.
+        aoslice = mf.mol.aoslice_2c_by_atom()
+        n2c = dm[0].shape[0] // 2
+        s = mf.get_ovlp()
+        ss_mul_charges = []
+        for p0, p1 in aoslice[:,2:] + n2c:
+            mul_charge = numpy.einsum('ij,ji->', s[n2c:,p0:p1], dm[p0:p1,n2c:])
+            ss_mul_charges.append(mul_charge.real)
+        ss_mul_charges = numpy.array(ss_mul_charges)
+        e_coul_ss = gto.energy_nuc(mf.mol, ss_mul_charges)
+        e_coul += e_coul_ss
+        mf.scf_summary['e_coul_ss'] = e_coul_ss
+        logger.debug(mf, 'Visscher corrections for small component = %.14g', e_coul_ss)
+
+    mf.scf_summary['e1'] = e1.real
+    mf.scf_summary['e2'] = e_coul.real
+    return (e1+e_coul).real, e_coul
 
 def get_jk_coulomb(mol, dm, hermi=1, coulomb_allow='SSSS',
                    opt_llll=None, opt_ssll=None, opt_ssss=None, omega=None, verbose=None):
@@ -118,7 +171,7 @@ def get_hcore(mol):
     t  = mol.intor_symmetric('int1e_spsp_spinor') * .5
     vn = mol.intor_symmetric('int1e_nuc_spinor')
     wn = mol.intor_symmetric('int1e_spnucsp_spinor')
-    h1e = numpy.empty((n4c, n4c), numpy.complex)
+    h1e = numpy.empty((n4c, n4c), numpy.complex128)
     h1e[:n2c,:n2c] = vn
     h1e[n2c:,:n2c] = t
     h1e[:n2c,n2c:] = t
@@ -132,7 +185,7 @@ def get_ovlp(mol):
 
     s = mol.intor_symmetric('int1e_ovlp_spinor')
     t = mol.intor_symmetric('int1e_spsp_spinor')
-    s1e = numpy.zeros((n4c, n4c), numpy.complex)
+    s1e = numpy.zeros((n4c, n4c), numpy.complex128)
     s1e[:n2c,:n2c] = s
     s1e[n2c:,n2c:] = t * (.5/c)**2
     return s1e
@@ -190,7 +243,7 @@ def init_guess_by_chkfile(mol, chkfile_name, project=None):
         s = get_ovlp(mol)
 
     def fproj(mo):
-#TODO: check if mo is GHF orbital
+        #TODO: check if mo is GHF orbital
         if project:
             mo = addons.project_mo_r2r(chk_mol, mo, mol)
             norm = numpy.einsum('pi,pi->i', mo.conj(), s.dot(mo))
@@ -205,8 +258,8 @@ def init_guess_by_chkfile(mol, chkfile_name, project=None):
         if mo[0].ndim == 1: # nr-RHF
             dm = reduce(numpy.dot, (mo*mo_occ, mo.T))
         else: # nr-UHF
-            dm = reduce(numpy.dot, (mo[0]*mo_occ[0], mo[0].T)) \
-               + reduce(numpy.dot, (mo[1]*mo_occ[1], mo[1].T))
+            dm = (reduce(numpy.dot, (mo[0]*mo_occ[0], mo[0].T)) +
+                  reduce(numpy.dot, (mo[1]*mo_occ[1], mo[1].T)))
         dm = _proj_dmll(chk_mol, dm, mol)
     return dm
 
@@ -227,7 +280,7 @@ def time_reversal_matrix(mol, mat):
     tao = numpy.asarray(mol.time_reversal_map())
     # tao(i) = -j  means  T(f_i) = -f_j
     # tao(i) =  j  means  T(f_i) =  f_j
-    idx = abs(tao)-1 # -1 for C indexing convention
+    idx = abs(tao) - 1  # -1 for C indexing convention
     #:signL = [(1 if x>0 else -1) for x in tao]
     #:sign = numpy.hstack((signL, signL))
 
@@ -236,12 +289,12 @@ def time_reversal_matrix(mol, mat):
     #:    for i in range(mat.__len__()):
     #:        tmat[idx[i],idx[j]] = mat[i,j] * sign[i]*sign[j]
     #:return tmat.conjugate()
-    sign_mask = tao<0
-    if mat.shape[0] == n2c*2:
+    sign_mask = tao < 0
+    if mat.shape[0] == n2c * 2:
         idx = numpy.hstack((idx, idx+n2c))
         sign_mask = numpy.hstack((sign_mask, sign_mask))
 
-    tmat = mat.take(idx,axis=0).take(idx,axis=1)
+    tmat = mat[idx[:,None], idx]
     tmat[sign_mask,:] *= -1
     tmat[:,sign_mask] *= -1
     return tmat.T
@@ -257,10 +310,10 @@ def analyze(mf, verbose=logger.DEBUG, **kwargs):
     log.info('**** MO energy ****')
     for i in range(len(mo_energy)):
         if mo_occ[i] > 0:
-            log.info('occupied MO #%d energy= %.15g occ= %g', \
+            log.info('occupied MO #%d energy= %.15g occ= %g',
                      i+1, mo_energy[i], mo_occ[i])
         else:
-            log.info('virtual MO #%d energy= %.15g occ= %g', \
+            log.info('virtual MO #%d energy= %.15g occ= %g',
                      i+1, mo_energy[i], mo_occ[i])
     mol = mf.mol
     if mf.verbose >= logger.DEBUG1:
@@ -350,10 +403,10 @@ def get_grad(mo_coeff, mo_occ, fock_ao):
     return g.ravel()
 
 
-class UHF(hf.SCF):
+class DHF(hf.SCF):
     __doc__ = hf.SCF.__doc__ + '''
     Attributes for Dirac-Hartree-Fock
-        with_ssss : bool, for Dirac-Hartree-Fock only
+        with_ssss : bool or string, for Dirac-Hartree-Fock only
             If False, ignore small component integrals (SS|SS).  Default is True.
         with_gaunt : bool, for Dirac-Hartree-Fock only
             Default is False.
@@ -375,19 +428,23 @@ class UHF(hf.SCF):
     with_ssss = getattr(__config__, 'scf_dhf_SCF_with_ssss', True)
     with_gaunt = getattr(__config__, 'scf_dhf_SCF_with_gaunt', False)
     with_breit = getattr(__config__, 'scf_dhf_SCF_with_breit', False)
+    # corrections for small component when with_ssss is set to False
+    ssss_approx = getattr(__config__, 'scf_dhf_SCF_ssss_approx', 'Visscher')
 
     def __init__(self, mol):
         hf.SCF.__init__(self, mol)
-        self._coulomb_now = 'SSSS' # 'SSSS' ~ LLLL+LLSS+SSSS
+        self._coulomb_level = 'SSSS' # 'SSSS' ~ LLLL+LLSS+SSSS
         self.opt = None # (opt_llll, opt_ssll, opt_ssss, opt_gaunt)
         self._keys.update(('conv_tol', 'with_ssss', 'with_gaunt',
-                           'with_breit', 'opt'))
+                           'with_breit', 'ssss_approx', 'opt'))
 
     def dump_flags(self, verbose=None):
         hf.SCF.dump_flags(self, verbose)
         log = logger.new_logger(self, verbose)
         log.info('with_ssss %s, with_gaunt %s, with_breit %s',
                  self.with_ssss, self.with_gaunt, self.with_breit)
+        if not self.with_ssss:
+            log.info('ssss_approx: %s', self.ssss_approx)
         log.info('light speed = %s', lib.param.LIGHT_SPEED)
         return self
 
@@ -431,7 +488,9 @@ class UHF(hf.SCF):
     def build(self, mol=None):
         if self.verbose >= logger.WARN:
             self.check_sanity()
-        self.opt = None
+        if self.direct_scf:
+            self.opt = self.init_direct_scf(mol)
+        return self
 
     def get_occ(self, mo_energy=None, mo_coeff=None):
         if mo_energy is None: mo_energy = self.mo_energy
@@ -460,51 +519,66 @@ class UHF(hf.SCF):
         if mo_occ is None: mo_occ = self.mo_occ
         return make_rdm1(mo_coeff, mo_occ, **kwargs)
 
+    energy_elec = energy_elec
+
     def init_direct_scf(self, mol=None):
         if mol is None: mol = self.mol
         def set_vkscreen(opt, name):
             opt._this.contents.r_vkscreen = _vhf._fpointer(name)
-        opt_llll = _vhf.VHFOpt(mol, 'int2e_spinor', 'CVHFrkbllll_prescreen',
-                               'CVHFrkbllll_direct_scf',
-                               'CVHFrkbllll_direct_scf_dm')
-        opt_llll.direct_scf_tol = self.direct_scf_tol
-        set_vkscreen(opt_llll, 'CVHFrkbllll_vkscreen')
-        opt_ssss = _vhf.VHFOpt(mol, 'int2e_spsp1spsp2_spinor',
-                               'CVHFrkbllll_prescreen',
-                               'CVHFrkbssss_direct_scf',
-                               'CVHFrkbssss_direct_scf_dm')
-        opt_ssss.direct_scf_tol = self.direct_scf_tol
-        set_vkscreen(opt_ssss, 'CVHFrkbllll_vkscreen')
-        opt_ssll = _vhf.VHFOpt(mol, 'int2e_spsp1_spinor',
-                               'CVHFrkbssll_prescreen',
-                               'CVHFrkbssll_direct_scf',
-                               'CVHFrkbssll_direct_scf_dm')
-        opt_ssll.direct_scf_tol = self.direct_scf_tol
-        set_vkscreen(opt_ssll, 'CVHFrkbssll_vkscreen')
+
+        with mol.with_integral_screen(self.direct_scf_tol**2):
+            opt_llll = _vhf.VHFOpt(mol, 'int2e_spinor', 'CVHFrkbllll_prescreen',
+                                   'CVHFrkbllll_direct_scf',
+                                   'CVHFrkbllll_direct_scf_dm')
+            opt_llll.direct_scf_tol = self.direct_scf_tol
+            set_vkscreen(opt_llll, 'CVHFrkbllll_vkscreen')
+            opt_ssss = _vhf.VHFOpt(mol, 'int2e_spsp1spsp2_spinor',
+                                   'CVHFrkbllll_prescreen',
+                                   'CVHFrkbssss_direct_scf',
+                                   'CVHFrkbssss_direct_scf_dm')
+            c1 = .5 / lib.param.LIGHT_SPEED
+            q_cond = opt_ssss.get_q_cond()
+            q_cond *= c1**2
+            opt_ssss.direct_scf_tol = self.direct_scf_tol
+            set_vkscreen(opt_ssss, 'CVHFrkbllll_vkscreen')
+            opt_ssll = _vhf.VHFOpt(mol, 'int2e_spsp1_spinor',
+                                   'CVHFrkbssll_prescreen',
+                                   'CVHFrkbssll_direct_scf',
+                                   'CVHFrkbssll_direct_scf_dm')
+            opt_ssll.direct_scf_tol = self.direct_scf_tol
+            set_vkscreen(opt_ssll, 'CVHFrkbssll_vkscreen')
+            nbas = mol.nbas
+            # The second parts of q_cond corresponds to ssss integrals. They
+            # need to be scaled by the factor (1/2c)^2
+            q_cond = opt_ssll.get_q_cond(shape=(2, nbas, nbas))
+            q_cond[1] *= c1**2
+
 #TODO: prescreen for gaunt
-        opt_gaunt = None
+            opt_gaunt = None
         return opt_llll, opt_ssll, opt_ssss, opt_gaunt
 
     def get_jk(self, mol=None, dm=None, hermi=1, with_j=True, with_k=True,
                omega=None):
         if mol is None: mol = self.mol
         if dm is None: dm = self.make_rdm1()
-        t0 = (time.clock(), time.time())
+        t0 = (logger.process_clock(), logger.perf_counter())
         log = logger.new_logger(self)
         if self.direct_scf and self.opt is None:
             self.opt = self.init_direct_scf(mol)
         opt_llll, opt_ssll, opt_ssss, opt_gaunt = self.opt
 
-        vj, vk = get_jk_coulomb(mol, dm, hermi, self._coulomb_now,
+        vj, vk = get_jk_coulomb(mol, dm, hermi, self._coulomb_level,
                                 opt_llll, opt_ssll, opt_ssss, omega, log)
 
         if self.with_breit:
-            if 'SSSS' in self._coulomb_now.upper():
+            if ('SSSS' in self._coulomb_level.upper() or
+                # for the case both with_breit and with_ssss are set
+                (not self.with_ssss and 'SSLL' in self._coulomb_level.upper())):
                 vj1, vk1 = _call_veff_gaunt_breit(mol, dm, hermi, opt_gaunt, True)
                 log.debug('Add Breit term')
                 vj += vj1
                 vk += vk1
-        elif self.with_gaunt and 'SS' in self._coulomb_now.upper():
+        elif self.with_gaunt and 'SS' in self._coulomb_level.upper():
             log.debug('Add Gaunt term')
             vj1, vk1 = _call_veff_gaunt_breit(mol, dm, hermi, opt_gaunt, False)
             vj += vj1
@@ -526,7 +600,7 @@ class UHF(hf.SCF):
             return vj - vk
 
     def scf(self, dm0=None):
-        cput0 = (time.clock(), time.time())
+        cput0 = (logger.process_clock(), logger.perf_counter())
 
         self.build()
         self.dump_flags()
@@ -577,14 +651,14 @@ class UHF(hf.SCF):
         '''Reset mol and clean up relevant attributes for scanner mode'''
         if mol is not None:
             self.mol = mol
-        self._coulomb_now = 'SSSS' # 'SSSS' ~ LLLL+LLSS+SSSS
+        self._coulomb_level = 'SSSS' # 'SSSS' ~ LLLL+LLSS+SSSS
         self.opt = None # (opt_llll, opt_ssll, opt_ssss, opt_gaunt)
         return self
 
-DHF = UHF
+UHF = UDHF = DHF
 
 
-class HF1e(UHF):
+class HF1e(DHF):
     def scf(self, *args):
         logger.info(self, '\n')
         logger.info(self, '******** 1 electron system ********')
@@ -598,24 +672,35 @@ class HF1e(UHF):
         self._finalize()
         return self.e_tot
 
-class RHF(UHF):
-    '''Dirac-RHF'''
+    def _eigh(self, h, s):
+        if zquatev:
+            return zquatev.solve_KR_FCSCE(self.mol, h, s)
+        else:
+            return DHF._eigh(self, h, s)
+
+
+class RDHF(DHF):
+    '''Kramers restricted Dirac-Hartree-Fock'''
     def __init__(self, mol):
         if mol.nelectron.__mod__(2) != 0:
             raise ValueError('Invalid electron number %i.' % mol.nelectron)
+        if zquatev is None:
+            raise RuntimeError('zquatev library is required to perform Kramers-restricted DHF')
         UHF.__init__(self, mol)
 
-    # full density matrix for RHF
-    def make_rdm1(self, mo_coeff=None, mo_occ=None, **kwargs):
-        r'''D/2 = \psi_i^\dag\psi_i = \psi_{Ti}^\dag\psi_{Ti}
-        D(UHF) = \psi_i^\dag\psi_i + \psi_{Ti}^\dag\psi_{Ti}
-        RHF average the density of spin up and spin down:
-        D(RHF) = (D(UHF) + T[D(UHF)])/2
-        '''
-        if mo_coeff is None: mo_coeff = self.mo_coeff
-        if mo_occ is None: mo_occ = self.mo_occ
-        dm = make_rdm1(mo_coeff, mo_occ, **kwargs)
-        return (dm + time_reversal_matrix(self.mol, dm)) * .5
+    def _eigh(self, h, s):
+        return zquatev.solve_KR_FCSCE(self.mol, h, s)
+
+    def x2c1e(self):
+        from pyscf.x2c import x2c
+        x2chf = x2c.RHF(self.mol)
+        x2c_keys = x2chf._keys
+        x2chf.__dict__.update(self.__dict__)
+        x2chf._keys = self._keys.union(x2c_keys)
+        return x2chf
+    x2c = x2c1e
+
+RHF = RDHF
 
 
 def _jk_triu_(vj, vk, hermi):
@@ -670,8 +755,8 @@ def _call_veff_ssll(mol, dm, hermi=1, mf_opt=None):
     c1 = .5 / lib.param.LIGHT_SPEED
     vx = _vhf.rdirect_bindm('int2e_spsp1_spinor', 's4', jks, dms, 1,
                             mol._atm, mol._bas, mol._env, mf_opt) * c1**2
-    vj = numpy.zeros((n_dm,n2c*2,n2c*2), dtype=numpy.complex)
-    vk = numpy.zeros((n_dm,n2c*2,n2c*2), dtype=numpy.complex)
+    vj = numpy.zeros((n_dm,n2c*2,n2c*2), dtype=numpy.complex128)
+    vk = numpy.zeros((n_dm,n2c*2,n2c*2), dtype=numpy.complex128)
     vj[:,n2c:,n2c:] = vx[      :n_dm  ,:,:]
     vj[:,:n2c,:n2c] = vx[n_dm  :n_dm*2,:,:]
     vk[:,n2c:,:n2c] = vx[n_dm*2:      ,:,:]
@@ -716,8 +801,8 @@ def _call_veff_gaunt_breit(mol, dm, hermi=1, mf_opt=None, with_breit=False):
         dmsl = [dmi[n2c:,:n2c].copy() for dmi in dm]
         dmss = [dmi[n2c:,n2c:].copy() for dmi in dm]
         dms = dmsl + dmsl + dmls + dmll + dmss
-    vj = numpy.zeros((n_dm,n2c*2,n2c*2), dtype=numpy.complex)
-    vk = numpy.zeros((n_dm,n2c*2,n2c*2), dtype=numpy.complex)
+    vj = numpy.zeros((n_dm,n2c*2,n2c*2), dtype=numpy.complex128)
+    vk = numpy.zeros((n_dm,n2c*2,n2c*2), dtype=numpy.complex128)
 
     jks = ('lk->s1ij',) * n_dm \
         + ('jk->s1il',) * n_dm

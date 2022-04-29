@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-# Copyright 2014-2020 The PySCF Developers. All Rights Reserved.
+# Copyright 2014-2021 The PySCF Developers. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -20,7 +20,7 @@
 Solve CISD equation  H C = C e  where e = E_HF + E_CORR
 '''
 
-import time
+
 from functools import reduce
 import numpy
 from pyscf import lib
@@ -34,8 +34,37 @@ BLKMIN = getattr(__config__, 'ci_cisd_blkmin', 4)
 
 
 def kernel(myci, eris, ci0=None, max_cycle=50, tol=1e-8, verbose=logger.INFO):
+    '''
+    Run CISD calculation.
+
+    Args:
+        myci : CISD (inheriting) object
+        eris : ccsd._ChemistsERIs (inheriting) object (poss diff for df)
+            Contains the various (pq|rs) integrals needed.
+
+    Kwargs:
+        ci0 : (List of) numpy array(s) (if None it will set)
+            Initial guess for CISD coeffs.
+        max_cycle : integer
+            Maximum number of iterations to converge to CISD solution.
+            If not converged before, calculation stops without having
+            converged.
+        tol : float
+            Convergence tolerance.
+        verbose : integer
+            Level of output (roughly: the higher, the more output).
+
+    Returns:
+        conv : bool
+            Is it converged?
+        ecisd : List of floats or float
+            The lowest :attr:`myci.nroots` eigenvalues.
+        ci : List of 1D arrays or 1D array
+            The lowest :attr:`myci.nroots` eigenvectors.
+    '''
     log = logger.new_logger(myci, verbose)
     diag = myci.make_diagonal(eris)
+    # Note that ehf is not the HF energy (see `make_diagonal`).
     ehf = diag[0]
     diag -= ehf
 
@@ -69,6 +98,27 @@ def kernel(myci, eris, ci0=None, max_cycle=50, tol=1e-8, verbose=logger.INFO):
     return conv, ecisd, ci
 
 def make_diagonal(myci, eris):
+    '''
+    Return diagonal of CISD hamiltonian in Slater determinant basis.
+
+    Note that a constant has been substracted of all elements.
+    The first element is the HF energy (minus the
+    constant), the next elements are the diagonal elements with singly
+    excited determinants (<D_i^a|H|D_i^a> within the constant), then
+    doubly excited determinants (<D_ij^ab|H|D_ij^ab> within the
+    constant).
+
+    Args:
+        myci : CISD (inheriting) object
+        eris : ccsd._ChemistsERIs (inheriting) object (poss diff for df)
+            Contains the various (pq|rs) integrals needed.
+
+    Returns:
+        numpy array (size: (1, 1 + #single excitations from HF det
+                               + #double excitations from HF det))
+            Diagonal elements of hamiltonian matrix within a constant,
+            see above.
+    '''
     # DO NOT use eris.mo_energy, it may differ to eris.fock.diagonal()
     mo_energy = eris.fock.diagonal()
     nmo = mo_energy.size
@@ -89,6 +139,7 @@ def make_diagonal(myci, eris):
             jdiag[nocc+i,nocc:] = eris.vvvv[ii][diag_idx]
 
     jksum = (jdiag[:nocc,:nocc] * 2 - kdiag[:nocc,:nocc]).sum()
+    # Note that ehf is not the HF energy.
     ehf = mo_energy[:nocc].sum() * 2 - jksum
     e_ia = lib.direct_sum('a-i->ia', mo_energy[nocc:], mo_energy[:nocc])
     e_ia -= jdiag[:nocc,nocc:] - kdiag[:nocc,nocc:]
@@ -102,7 +153,19 @@ def make_diagonal(myci, eris):
     return numpy.hstack((ehf, e1diag.reshape(-1), e2diag.reshape(-1)))
 
 def contract(myci, civec, eris):
-    time0 = time.clock(), time.time()
+    '''
+    Application of CISD hamiltonian onto civec.
+
+    Args:
+        myci : CISD (inheriting) object
+        civec : numpy array, same length as a CI vector.
+        eris : ccsd._ChemistsERIs (inheriting) object (poss diff for df)
+            Contains the various (pq|rs) integrals needed.
+
+    Returns:
+        numpy array, same length as a CI vector.
+    '''
+    time0 = logger.process_clock(), logger.perf_counter()
     log = logger.Logger(myci.stdout, myci.verbose)
     nocc = myci.nocc
     nmo = myci.nmo
@@ -111,7 +174,7 @@ def contract(myci, civec, eris):
 
     t2 = myci._add_vvvv(c2, eris, t2sym='jiba')
     t2 *= .5  # due to t2+t2.transpose(1,0,3,2) in the end
-    time1 = log.timer_debug1('vvvv', *time0)
+    log.timer_debug1('vvvv', *time0)
 
     foo = eris.fock[:nocc,:nocc].copy()
     fov = eris.fock[:nocc,nocc:].copy()
@@ -145,7 +208,7 @@ def contract(myci, civec, eris):
 
         ovov = -.5 * eris_oVoV
         ovov += eris_ovvo.transpose(3,1,0,2)
-        eris_oVoV = eris_ovov = None
+        eris_oVoV = None
         theta = c2[:,:,p0:p1].transpose(2,0,1,3) * 2
         theta-= c2[:,:,p0:p1].transpose(2,1,0,3)
         for j in range(nocc):
@@ -207,10 +270,13 @@ def tn_addrs_signs(norb, nelec, n_excite):
     '''Compute the FCI strings (address) for CIS n-excitation amplitudes and
     the signs of the coefficients when transferring the reference from physics
     vacuum to HF vacuum.
+
+    If the excitation level is not compatible with the number of
+    electrons and holes, empty lists are returned for the addresses and signs.
     '''
-    if n_excite > nelec:
-        print("Warning: Not enough occupied orbitals to excite.")
-        return [0], [0]
+    # Not enough electrons or holes for excitation; return empty lists.
+    if n_excite > min(nelec, norb-nelec):
+        return [], []
     nocc = nelec
 
     hole_strs = cistring.gen_strings4orblist(range(nocc), nocc - n_excite)
@@ -219,7 +285,7 @@ def tn_addrs_signs(norb, nelec, n_excite):
     hole_strs = hole_strs[::-1]
     hole_sum = numpy.zeros(len(hole_strs), dtype=int)
     for i in range(nocc):
-        hole_at_i = (hole_strs & (1<<i)) == 0
+        hole_at_i = (hole_strs & (1 << i)) == 0
         hole_sum[hole_at_i] += i
 
     # The hole operators are listed from low-lying to high-lying orbitals
@@ -297,14 +363,14 @@ def to_fcivec(cisdvec, norb, nelec, frozen=None):
         if frozen_mask[i]:
             if i < neleca:
                 # frozen occupied orbital should be occupied
-                core_mask &= (strs & (1<<i)) != 0
+                core_mask &= (strs & (1 << i)) != 0
                 parity ^= (count & 1) == 1
             else:
                 # frozen virtual orbital should not be occupied.
                 # parity is not needed since it's unoccupied
-                core_mask &= (strs & (1<<i)) == 0
+                core_mask &= (strs & (1 << i)) == 0
         else:
-            count += (strs & (1<<i)) != 0
+            count += (strs & (1 << i)) != 0
     sub_strs = strs[core_mask & (count == nocc)]
     addrs = cistring.strs2addr(norb, neleca, sub_strs)
     fcivec1 = numpy.zeros((na,na))
@@ -450,10 +516,12 @@ def overlap(cibra, ciket, nmo, nocc, s=None):
         ovlp+= lib.einsum('ab,ap,b ,p ->', bra_SS, trans_SD, trans_SS[:,0], ket2aa.ravel())
 
         ovlp+= lib.einsum(' b, p,bq,pq->', bra2aa.ravel(), trans_SS[0,:], trans_DS, ket_SS)
-        ovlp+= lib.einsum(' b, p,b ,p ->', bra2aa.ravel(), trans_SD[0,:], trans_DS[:,0], ket2aa.ravel())
+        ovlp+= lib.einsum(' b, p,b ,p ->', bra2aa.ravel(), trans_SD[0,:], trans_DS[:,0],
+                          ket2aa.ravel())
 
         ovlp+= lib.einsum('a ,ap, q,pq->', bra2aa.ravel(), trans_DS, trans_SS[0,:], ket_SS)
-        ovlp+= lib.einsum('a ,a , q, q->', bra2aa.ravel(), trans_DS[:,0], trans_SD[0,:], ket2aa.ravel())
+        ovlp+= lib.einsum('a ,a , q, q->', bra2aa.ravel(), trans_DS[:,0], trans_SD[0,:],
+                          ket2aa.ravel())
 
         # FIXME: whether to approximate the overlap between double excitation coefficients
         if numpy.linalg.norm(bra2aa)*numpy.linalg.norm(ket2aa) < 1e-4:
@@ -534,7 +602,7 @@ def _gamma1_intermediates(myci, civec, nmo, nocc):
     dov = dvo.T.conj()
 
     theta = c2*2 - c2.transpose(0,1,3,2)
-    doo  =-numpy.einsum('ia,ka->ik', c1.conj(), c1)
+    doo  = -numpy.einsum('ia,ka->ik', c1.conj(), c1)
     doo -= lib.einsum('ijab,ikab->jk', c2.conj(), theta)
     dvv  = numpy.einsum('ia,ic->ac', c1, c1.conj())
     dvv += lib.einsum('ijab,ijac->bc', theta, c2.conj())
@@ -543,8 +611,8 @@ def _gamma1_intermediates(myci, civec, nmo, nocc):
 def _gamma2_intermediates(myci, civec, nmo, nocc, compress_vvvv=False):
     f = lib.H5TmpFile()
     _gamma2_outcore(myci, civec, nmo, nocc, f, compress_vvvv)
-    d2 = (f['dovov'].value, f['dvvvv'].value, f['doooo'].value, f['doovv'].value,
-          f['dovvo'].value, None,             f['dovvv'].value, f['dooov'].value)
+    d2 = (f['dovov'][:], f['dvvvv'][:], f['doooo'][:], f['doovv'][:],
+          f['dovvo'][:], None,          f['dovvv'][:], f['dooov'][:])
     return d2
 
 def _gamma2_outcore(myci, civec, nmo, nocc, h5fobj, compress_vvvv=False):
@@ -562,7 +630,7 @@ def _gamma2_outcore(myci, civec, nmo, nocc, h5fobj, compress_vvvv=False):
     h5fobj['doooo'] = doooo.transpose(0,2,1,3) - doooo.transpose(1,2,0,3)*.5
     doooo = None
 
-    dooov =-lib.einsum('ia,klac->klic', c1*2, c2.conj())
+    dooov = -lib.einsum('ia,klac->klic', c1*2, c2.conj())
     h5fobj['dooov'] = dooov.transpose(0,2,1,3)*2 - dooov.transpose(1,2,0,3)
     dooov = None
 
@@ -581,14 +649,14 @@ def _gamma2_outcore(myci, civec, nmo, nocc, h5fobj, compress_vvvv=False):
     else:
         dvvvv = h5fobj.create_dataset('dvvvv', (nvir,nvir,nvir,nvir), dtype)
 
-    for istep, (p0, p1) in enumerate(lib.prange(0, nvir, blksize)):
+    for (p0, p1) in lib.prange(0, nvir, blksize):
         theta = c2[:,:,p0:p1] - c2[:,:,p0:p1].transpose(1,0,2,3) * .5
         gvvvv = lib.einsum('ijab,ijcd->abcd', theta.conj(), c2)
         if compress_vvvv:
-# symmetrize dvvvv because it does not affect the results of cisd_grad
-# dvvvv = (dvvvv+dvvvv.transpose(0,1,3,2)) * .5
-# dvvvv = (dvvvv+dvvvv.transpose(1,0,2,3)) * .5
-# now dvvvv == dvvvv.transpose(0,1,3,2) == dvvvv.transpose(1,0,3,2)
+            # symmetrize dvvvv because it does not affect the results of cisd_grad
+            # dvvvv = (dvvvv+dvvvv.transpose(0,1,3,2)) * .5
+            # dvvvv = (dvvvv+dvvvv.transpose(1,0,2,3)) * .5
+            # now dvvvv == dvvvv.transpose(0,1,3,2) == dvvvv.transpose(1,0,3,2)
             tmp = numpy.empty((nvir,nvir,nvir))
             tmpvvvv = numpy.empty((p1-p0,nvir,nvir_pair))
             for i in range(p1-p0):
@@ -656,7 +724,7 @@ def trans_rdm1(myci, cibra, ciket, nmo=None, nocc=None):
     dov -= numpy.einsum('jb,ijba->ia', c1ket, c2bra.conj())
 
     theta = c2ket*2 - c2ket.transpose(0,1,3,2)
-    doo  =-numpy.einsum('ia,ka->ik', c1bra.conj(), c1ket)
+    doo  = -numpy.einsum('ia,ka->ik', c1bra.conj(), c1ket)
     doo -= lib.einsum('ijab,ikab->jk', c2bra.conj(), theta)
     dvv  = numpy.einsum('ia,ic->ac', c1ket, c1bra.conj())
     dvv += lib.einsum('ijab,ijac->bc', theta, c2bra.conj())
@@ -727,8 +795,8 @@ def as_scanner(ci):
             if getattr(self.ci, 'size', 0) != self.vector_size():
                 self.ci = None
             if ci0 is None:
-# FIXME: Whether to use the initial guess from last step? If root flips, large
-# errors may be found in the solutions
+                # FIXME: Whether to use the initial guess from last step?
+                # If root flips, large errors may be found in the solutions
                 ci0 = self.ci
             self.kernel(ci0, **kwargs)[0]
             return self.e_tot
@@ -742,7 +810,8 @@ class CISD(lib.StreamObject):
         verbose : int
             Print level.  Default value equals to :class:`Mole.verbose`
         max_memory : float or int
-            Allowed memory in MB.  Default value equals to :class:`Mole.max_memory`
+            Allowed memory in MB.  Default value equals to
+            :class:`Mole.max_memory`
         conv_tol : float
             converge threshold.  Default is 1e-9.
         max_cycle : int
@@ -786,16 +855,19 @@ class CISD(lib.StreamObject):
     async_io = getattr(__config__, 'ci_cisd_CISD_async_io', True)
 
     def __init__(self, mf, frozen=None, mo_coeff=None, mo_occ=None):
-        if 'dft' in str(mf.__module__):
+        from pyscf.scf import hf
+        if isinstance(mf, hf.KohnShamDFT):
             raise RuntimeError('CISD Warning: The first argument mf is a DFT object. '
                                'CISD calculation should be initialized with HF object.\n'
                                'DFT object can be converted to HF object with '
                                'the code below:\n'
                                '    mf_hf = scf.RHF(mol)\n'
+                               '    if getattr(mf_dft, "with_x2c", False):\n'
+                               '        mf_hf = mf_hf.x2c()\n'
                                '    mf_hf.__dict__.update(mf_dft.__dict__)\n')
 
         if mo_coeff is None: mo_coeff = mf.mo_coeff
-        if mo_occ   is None: mo_occ   = mf.mo_occ
+        if mo_occ is None: mo_occ   = mf.mo_occ
 
         self.mol = mf.mol
         self._scf = mf
@@ -913,7 +985,24 @@ class CISD(lib.StreamObject):
         return self
 
     def get_init_guess(self, eris=None, nroots=1, diag=None):
-        # MP2 initial guess
+        '''
+        MP2 energy and MP2 initial guess(es) for CISD coefficients.
+
+        Kwargs:
+            eris : ccsd._ChemistsERIs (inheriting) object (poss diff for df)
+                Contains the various (pq|rs) integrals needed.
+            nroots : integer
+                Number of CISD solutions to be found.
+            diag : numpy array (1D)
+                e.g. CISD Hamiltonian diagonal in Slater determinant
+                space with HF energy subtracted.
+
+        Returns:
+            Tuple of float and numpy array or
+            tuple of float and list of numpy arrays (if nroots > 1)
+            MP2 energy and initial guess(es) for CISD coefficients.
+
+        '''
         if eris is None: eris = self.ao2mo(self.mo_coeff)
         nocc = self.nocc
         mo_e = eris.mo_energy
@@ -969,15 +1058,14 @@ class CISD(lib.StreamObject):
             (mem_incore+mem_now < self.max_memory) or self.mol.incore_anyway):
             return ccsd._make_eris_incore(self, mo_coeff)
 
-        elif getattr(self._scf, 'with_df', None):
+        if getattr(self._scf, 'with_df', None):
             logger.warn(self, 'CISD detected DF being used in the HF object. '
                         'MO integrals are computed based on the DF 3-index tensors.\n'
                         'It\'s recommended to use dfccsd.CCSD for the '
                         'DF-CISD calculations')
             return ccsd._make_df_eris_outcore(self, mo_coeff)
 
-        else:
-            return ccsd._make_eris_outcore(self, mo_coeff)
+        return ccsd._make_eris_outcore(self, mo_coeff)
 
     def _add_vvvv(self, c2, eris, out=None, t2sym=None):
         return ccsd._add_vvvv(self, None, c2, eris, out, False, t2sym)
@@ -1048,7 +1136,6 @@ def _cp(a):
 
 if __name__ == '__main__':
     from pyscf import gto
-    from pyscf import scf
     from pyscf import ao2mo
 
     mol = gto.Mole()

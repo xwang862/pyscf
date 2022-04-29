@@ -18,16 +18,16 @@ kmf.scf()
 
 def tearDownModule():
     global cell_n3d, kmf
+    cell_n3d.stdout.close()
     del cell_n3d, kmf
 
 class KnownValues(unittest.TestCase):
     def test_n3_diffuse(self):
         self.assertAlmostEqual(kmf.e_tot, -6.1870676561721227, 6)
-        cell = make_test_cell.test_cell_n3_diffuse()
-        nmp = [1,1,2]
         '''
+        nmp = [1,1,2]
         # treating 1*1*2 supercell at gamma point
-        supcell = super_cell(cell,nmp)
+        supcell = super_cell(cell_n3d,nmp)
         gmf  = scf.UHF(supcell,exxdiv=None)
         ehf  = gmf.kernel()
         gcc  = cc.UCCSD(gmf)
@@ -119,6 +119,7 @@ class KnownValues(unittest.TestCase):
         3.370137329, 3.370137329, 0.000000000'''
         cell.unit = 'B'
         cell.mesh = [13]*3
+        cell.precision = 1e-10
         cell.build()
 
         np.random.seed(2)
@@ -197,21 +198,21 @@ class KnownValues(unittest.TestCase):
         eris = mycc.ao2mo()
         imds = eom.make_imds(eris)
         hc = eom.matvec(vector, 0, imds)
-        self.assertAlmostEqual(lib.finger(hc), (4.045928342346641 +0.5861843966140339j), 9)
+        self.assertAlmostEqual(lib.finger(hc), (4.045928342346641 +0.5861843966140339j), 8)
         hc = eom.matvec(vector, 1, imds)
-        self.assertAlmostEqual(lib.finger(hc), (1.2695743252320795+2.28060203958305j  ), 9)
+        self.assertAlmostEqual(lib.finger(hc), (1.2695743252320795+2.28060203958305j  ), 8)
         hc = eom.matvec(vector, 2, imds)
-        self.assertAlmostEqual(lib.finger(hc), (-3.435385905375094-5.0991524119952505j), 9)
+        self.assertAlmostEqual(lib.finger(hc), (-3.435385905375094-5.0991524119952505j), 8)
 
         mycc.max_memory = 4000
         eris = mycc.ao2mo()
         imds = eom.make_imds(eris)
         hc = eom.matvec(vector, 0, imds)
-        self.assertAlmostEqual(lib.finger(hc), (4.045928342346641 +0.5861843966140339j), 9)
+        self.assertAlmostEqual(lib.finger(hc), (4.045928342346641 +0.5861843966140339j), 8)
         hc = eom.matvec(vector, 1, imds)
-        self.assertAlmostEqual(lib.finger(hc), (1.2695743252320795+2.28060203958305j  ), 9)
+        self.assertAlmostEqual(lib.finger(hc), (1.2695743252320795+2.28060203958305j  ), 8)
         hc = eom.matvec(vector, 2, imds)
-        self.assertAlmostEqual(lib.finger(hc), (-3.435385905375094-5.0991524119952505j), 9)
+        self.assertAlmostEqual(lib.finger(hc), (-3.435385905375094-5.0991524119952505j), 8)
 
 if __name__ == '__main__':
     print("eom_kccsd_uhf tests")

@@ -116,8 +116,8 @@ def get_jk(mol, dm, hermi=0,
     dms = numpy.vstack((dmaa, dmbb, dmab))
     if dm.dtype == numpy.complex128:
         dms = numpy.vstack((dms.real, dms.imag))
-        hermi = 0
 
+    hermi = 0  # The off-diagonal blocks are not hermitian
     j1, k1 = jkbuild(mol, dms, hermi, with_j, with_k, omega)
     if with_j: j1 = j1.reshape(-1,n_dm,nao,nao)
     if with_k: k1 = k1.reshape(-1,n_dm,nao,nao)
@@ -378,10 +378,22 @@ class GHF(hf.SCF):
         mo_coeff[nao:nao*2] are the coefficients of AO with beta spin.
     '''
 
+    def __init__(self, mol):
+        hf.SCF.__init__(self, mol)
+        self.with_soc = None
+        self._keys = self._keys.union(['with_soc'])
+
     def get_hcore(self, mol=None):
         if mol is None: mol = self.mol
         hcore = hf.get_hcore(mol)
-        return scipy.linalg.block_diag(hcore, hcore)
+        hcore = scipy.linalg.block_diag(hcore, hcore)
+
+        if self.with_soc and mol.has_ecp_soc():
+            # The ECP SOC contribution = <|1j * s * U_SOC|>
+            s = .5 * lib.PauliMatrices
+            ecpso = numpy.einsum('sxy,spq->xpyq', -1j * s, mol.intor('ECPso'))
+            hcore = hcore + ecpso.reshape(hcore.shape)
+        return hcore
 
     def get_ovlp(self, mol=None):
         if mol is None: mol = self.mol
@@ -508,12 +520,23 @@ class GHF(hf.SCF):
         from pyscf.scf import addons
         return addons.convert_to_ghf(mf, out=self)
 
-    def stability(self, internal=None, external=None, verbose=None):
+    def stability(self, internal=None, external=None, verbose=None, return_status=False):
         from pyscf.scf.stability import ghf_stability
-        return ghf_stability(self, verbose)
+        return ghf_stability(self, verbose, return_status)
 
     def nuc_grad_method(self):
         raise NotImplementedError
+
+    def x2c1e(self):
+        '''X2C with spin-orbit coupling effects.
+
+        Note the difference to PySCF-1.7. In PySCF it calls spin-free X2C1E.
+        This result (mol.GHF().x2c() ) should equal to mol.X2C() although they
+        are solved in different AO basis (spherical GTO vs spinor GTO)
+        '''
+        from pyscf.x2c.x2c import x2c1e_ghf
+        return x2c1e_ghf(self)
+    x2c = x2c1e
 
 def _from_rhf_init_dm(dm, breaksym=True):
     dma = dm * .5

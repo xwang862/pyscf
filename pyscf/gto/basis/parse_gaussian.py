@@ -29,15 +29,9 @@ except ImportError:
     optimize_contraction = lambda basis: basis
     remove_zero = lambda basis: basis
 
-MAXL = 8
-MAPSPDF = {'S': 0,
-           'P': 1,
-           'D': 2,
-           'F': 3,
-           'G': 4,
-           'H': 5,
-           'I': 6,
-           'K': 7}
+MAXL = 12
+SPDF = 'SPDFGHIJKLMN'
+MAPSPDF = {key: l for l, key in enumerate(SPDF)}
 
 DELIMETER = '****'
 
@@ -100,6 +94,9 @@ def _parse(raw_basis, optimize=True):
             elif key[0] == 'SP':
                 basis_add.append([0])
                 basis_add.append([1])
+            elif len(key[0])>2 and key[0][:2] in ['l=', 'L=']:
+                # Angular momentum defined explicitly
+                basis_add.append([int(key[0][2:])])
             else:
                 basis_add.append([MAPSPDF[key[0]]])
         else:

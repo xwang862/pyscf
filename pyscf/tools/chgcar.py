@@ -68,10 +68,10 @@ def density(cell, outfile, dm, nx=60, ny=60, nz=60, resolution=RESOLUTION):
         No return value. This function outputs a VASP chgcarlike file
         (with phase if desired)...it can be opened in VESTA or VMD or
         many other softwares
-    
+
     Examples:
 
-        >>> # generates the first MO from the list of mo_coefficents 
+        >>> # generates the first MO from the list of mo_coefficents
         >>> from pyscf.pbc import gto, scf
         >>> from pyscf.tools import chgcar
         >>> cell = gto.M(atom='H 0 0 0; H 0 0 1', a=numpy.eye(3)*3)
@@ -124,10 +124,10 @@ def orbital(cell, outfile, coeff, nx=60, ny=60, nz=60, resolution=RESOLUTION):
         No return value. This function outputs a VASP chgcarlike file
         (with phase if desired)...it can be opened in VESTA or VMD or
         many other softwares
-    
+
     Examples:
 
-        >>> # generates the first MO from the list of mo_coefficents 
+        >>> # generates the first MO from the list of mo_coefficents
         >>> from pyscf.pbc import gto, scf
         >>> from pyscf.tools import chgcar
         >>> cell = gto.M(atom='H 0 0 0; H 0 0 1', a=numpy.eye(3)*3)
@@ -233,10 +233,10 @@ class CHGCAR(cubegen.Cube):
             f.write('\n')
             f.write('%6.5s %6.5s %6.5s \n' % (self.nx,self.ny,self.nz))
             fmt = ' %14.8e '
-            for iz in range(self.nx):
+            for iz in range(self.nz):
                 for iy in range(self.ny):
                     f.write('\n')
-                    for ix in range(self.nz):
+                    for ix in range(self.nx):
                         f.write(fmt % field[ix,iy,iz])
 
     def read(self, chgcar_file):

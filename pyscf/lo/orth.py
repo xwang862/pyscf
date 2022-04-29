@@ -64,15 +64,19 @@ def weight_orth(s, weight):
 def pre_orth_ao(mol, method=REF_BASIS):
     '''Restore AO characters.  Possible methods include the ANO/MINAO
     projection or fraction-averaged atomic RHF calculation'''
-    if method.upper() in ('ANO', 'MINAO'):
+    if isinstance(method, str) and method.upper() == 'SCF':
+        return pre_orth_ao_atm_scf(mol)
+    else:
         # Use ANO/MINAO basis to define the strongly occupied set
         return project_to_atomic_orbitals(mol, method)
-    else:
-        return pre_orth_ao_atm_scf(mol)
 restore_ao_character = pre_orth_ao
 
-def project_to_atomic_orbitals(mol, basname):
+def project_to_atomic_orbitals(mol, ref_basis):
     '''projected AO = |bas><bas|ANO>
+
+    args:
+        ref_basis : str or basis dict
+            Name, or filename, or a dict of reference basis set
     '''
     from pyscf.scf.addons import project_mo_nr2nr
     from pyscf.scf import atom_hf
@@ -119,7 +123,7 @@ def project_to_atomic_orbitals(mol, basname):
         ano_idx = numpy.hstack(ano_idx)
         ecp_occ = numpy.zeros(atm_ecp.nao_nr())
         ecp_occ[ecp_idx] = numpy.hstack(ecp_occ_tmp)
-        nelec_valence_left = int(gto.mole.charge(stdsymb) - nelec_core
+        nelec_valence_left = int(gto.charge(stdsymb) - nelec_core
                                  - sum(ecp_occ[ecp_idx]))
         if nelec_valence_left > 0:
             logger.warn(mol, 'Characters of %d valence electrons are not identified.\n'
@@ -141,6 +145,7 @@ def project_to_atomic_orbitals(mol, basname):
         if symb not in nelec_ecp_dic:
             nelec_ecp_dic[symb] = mol.atom_nelec_core(ia)
 
+    basis_converter = gto.mole._generate_basis_converter()
     aos = {}
     atm = gto.Mole()
     atmp = gto.Mole()
@@ -156,7 +161,14 @@ def project_to_atomic_orbitals(mol, basname):
             aos[symb] = numpy.diag(1./numpy.sqrt(s0.diagonal()))
             continue
 
-        basis_add = gto.basis.load(basname, stdsymb)
+        if isinstance(ref_basis, dict):
+            if symb in ref_basis:
+                basis_add = basis_converter(stdsymb, ref_basis[symb])
+            else:
+                basis_add = basis_converter(stdsymb, ref_basis[stdsymb])
+        else:
+            basis_add = basis_converter(symb, ref_basis)
+
         atmp._atm, atmp._bas, atmp._env = \
                 atmp.make_env([[stdsymb,(0,0,0)]], {stdsymb:basis_add}, [])
         atmp.cart = mol.cart
@@ -178,6 +190,11 @@ def project_to_atomic_orbitals(mol, basname):
                 continue
         else:
             ecpcore = [0] * 4
+
+        # MINAO for heavier elements needs to be used with pseudo potential
+        if (ref_basis.upper() == 'MINAO' and
+            gto.charge(stdsymb) > 36 and symb not in nelec_ecp_dic):
+            raise RuntimeError('Basis MINAO has to be used with ecp for heavy elements')
 
         ano = project_mo_nr2nr(atmp, numpy.eye(atmp.nao_nr()), atm)
         rm_ano = numpy.eye(ano.shape[0]) - reduce(numpy.dot, (ano, ano.T, s0))
@@ -233,24 +250,23 @@ def pre_orth_ao_atm_scf(mol):
     assert(not mol.cart)
     from pyscf.scf import atom_hf
     atm_scf = atom_hf.get_atm_nrhf(mol)
-    nbf = mol.nao_nr()
-    c = numpy.zeros((nbf,nbf))
-    p0 = 0
+    aoslice = mol.aoslice_by_atom()
+    coeff = []
     for ia in range(mol.natm):
         symb = mol.atom_symbol(ia)
-        if symb in atm_scf:
-            e_hf, mo_e, mo_c, mo_occ = atm_scf[symb]
-        else:
+        if symb not in atm_scf:
             symb = mol.atom_pure_symbol(ia)
-            e_hf, mo_e, mo_c, mo_occ = atm_scf[symb]
-        p1 = p0 + mo_e.size
-        c[p0:p1,p0:p1] = mo_c
-        p0 = p1
-    return c
+
+        if symb in atm_scf:
+            e_hf, e, c, occ = atm_scf[symb]
+        else:  # symb's basis is not specified in the input
+            nao_atm = aoslice[ia,3] - aoslice[ia,2]
+            c = numpy.zeros((nao_atm, nao_atm))
+        coeff.append(c)
+    return scipy.linalg.block_diag(*coeff)
 
 
-def orth_ao(mf_or_mol, method=ORTH_METHOD, pre_orth_ao=None, scf_method=None,
-            s=None):
+def orth_ao(mf_or_mol, method=ORTH_METHOD, pre_orth_ao=REF_BASIS, s=None):
     '''Orthogonalize AOs
 
     Kwargs:
@@ -259,15 +275,25 @@ def orth_ao(mf_or_mol, method=ORTH_METHOD, pre_orth_ao=None, scf_method=None,
             | lowdin : Symmetric orthogonalization
             | meta-lowdin : Lowdin orth within core, valence, virtual space separately (JCTC, 10, 3784)
             | NAO
+
+        pre_orth_ao: numpy.ndarray or basis str or basis dict
+            Basis functions may not have AO characters. This variable is the
+            coefficients to restore AO characters for arbitrary basis. If a
+            string of basis name (can be the filename of a basis set) or a
+            dict of basis sets are given, they are interpreted as the
+            reference basis (by default ANO basis) that the projection
+            coefficients are generated based on.  Skip this projection step by
+            setting this variable to None.
     '''
+    from pyscf import scf
     from pyscf.lo import nao
-    mf = scf_method
     if isinstance(mf_or_mol, gto.Mole):
         mol = mf_or_mol
+        mf = None
     else:
+        assert(isinstance(mf_or_mol, scf.hf.SCF))
         mol = mf_or_mol.mol
-        if mf is None:
-            mf = mf_or_mol
+        mf = mf_or_mol
 
     if s is None:
         if getattr(mol, 'pbc_intor', None):  # whether mol object is a cell
@@ -275,20 +301,29 @@ def orth_ao(mf_or_mol, method=ORTH_METHOD, pre_orth_ao=None, scf_method=None,
         else:
             s = mol.intor_symmetric('int1e_ovlp')
 
-    if pre_orth_ao is None:
-        pre_orth_ao = project_to_atomic_orbitals(mol, REF_BASIS)
-
     if method.lower() == 'lowdin':
-        s1 = reduce(numpy.dot, (pre_orth_ao.conj().T, s, pre_orth_ao))
-        c_orth = numpy.dot(pre_orth_ao, lowdin(s1))
+        if pre_orth_ao is None:
+            c_orth = lowdin(s)
+        else:
+            if not isinstance(pre_orth_ao, numpy.ndarray):
+                pre_orth_ao = restore_ao_character(mol, pre_orth_ao)
+            s1 = reduce(numpy.dot, (pre_orth_ao.conj().T, s, pre_orth_ao))
+            c_orth = numpy.dot(pre_orth_ao, lowdin(s1))
+
     elif method.lower() == 'nao':
         assert(mf is not None)
         c_orth = nao.nao(mol, mf, s)
+
     else:
         # meta_lowdin: partition AOs into core, valence and Rydberg sets,
         # orthogonalizing within each set
+        if pre_orth_ao is None:
+            pre_orth_ao = numpy.eye(mol.nao)
+        elif not isinstance(pre_orth_ao, numpy.ndarray):
+            pre_orth_ao = restore_ao_character(mol, pre_orth_ao)
         weight = numpy.ones(pre_orth_ao.shape[0])
         c_orth = nao._nao_sub(mol, weight, pre_orth_ao, s)
+
     # adjust phase
     for i in range(c_orth.shape[1]):
         if c_orth[i,i] < 0:
