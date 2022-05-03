@@ -658,11 +658,11 @@ class RCCSD(pyscf.cc.ccsd.CCSD):
 
         self.converged_lambda, self.l1, self.l2 = \
             kccsd_rhf_lambda.kernel(self, eris, t1, t2, l1, l2, imds,
-                                    max_cycle=self.max_cycle, 
-                                    tol=self.conv_tol_normt, 
+                                    max_cycle=self.max_cycle,
+                                    tol=self.conv_tol_normt,
                                     verbose=self.verbose)
         return self.l1, self.l2
-        
+
 #####################################
 # Wrapper functions for IP/EA-EOM
 #####################################

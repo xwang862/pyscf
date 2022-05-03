@@ -476,11 +476,11 @@ class GCCSD(gccsd.GCCSD):
 
         self.converged_lambda, self.l1, self.l2 = \
             kccsd_lambda.kernel(self, eris, t1, t2, l1, l2,
-                                max_cycle=self.max_cycle, 
-                                tol=self.conv_tol_normt, 
+                                max_cycle=self.max_cycle,
+                                tol=self.conv_tol_normt,
                                 verbose=self.verbose)
         return self.l1, self.l2
-        
+
 
 CCSD = KCCSD = KGCCSD = GCCSD
 

@@ -38,7 +38,8 @@ def kernel(cc, eris=None, t1=None, t2=None, l1=None, l2=None, imds=None, max_cyc
     if imds is None:
         imds = make_intermediates
 
-    return ccsd_lambda.kernel(cc, eris, t1, t2, l1, l2, max_cycle=max_cycle, tol=tol, verbose=verbose, fintermediates=imds, fupdate=update_lambda)
+    return ccsd_lambda.kernel(cc, eris, t1, t2, l1, l2, max_cycle=max_cycle, tol=tol, verbose=verbose,
+                              fintermediates=imds, fupdate=update_lambda)
 
 def make_intermediates(cc, t1=None, t2=None, eris=None, part=None):
     from pyscf.pbc.cc.eom_kccsd_rhf import _IMDS
@@ -78,8 +79,8 @@ def update_lambda(cc, t1, t2, l1, l2, eris, imds):
         ke = ka
         Gvv[ka] -= 2. * einsum('mnaf,mnef->ae', l2[km, kn, ka], t2[km, kn, ke])
         # G_ae <- l_mnaf t_nmef
-        Gvv[ka] += einsum('mnaf,nmef->ae', l2[km, kn, ka], t2[kn, km, ke]) 
-    
+        Gvv[ka] += einsum('mnaf,nmef->ae', l2[km, kn, ka], t2[kn, km, ke])
+
     Goo = numpy.zeros_like(Ftmp_oo)
     for km, kn, ke in kpts_helper.loop_kkk(nkpts):
         # G_mi <= 2 l_inef t_mnef
@@ -208,7 +209,7 @@ def update_lambda(cc, t1, t2, l1, l2, eris, imds):
             #  ki + kj - km - kn = 0
             kn = kconserv[ki, km, kj]
             l2new[ki, kj, ka] += einsum('mnab,ijmn->ijab', l2[km, kn, ka], imds.woOoO[ki, kj, km])
-        
+
         for ke in range(nkpts):
             # l_ijab <- l_ijef W_efab
             #  ki + kj - ke - kf = 0
@@ -262,4 +263,3 @@ def update_lambda(cc, t1, t2, l1, l2, eris, imds):
     time0 = log.timer_debug1('update l1 l2', *time0)
 
     return l1new, l2new
-    

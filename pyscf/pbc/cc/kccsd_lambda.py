@@ -36,7 +36,8 @@ einsum = lib.einsum
 def kernel(cc, eris=None, t1=None, t2=None, l1=None, l2=None, max_cycle=50, tol=1e-8, verbose=logger.INFO):
     log = logger.Logger(cc.stdout, cc.verbose)
     log.info("******** PBC GCCSD lambda solver ********")
-    return ccsd_lambda.kernel(cc, eris, t1, t2, l1, l2, max_cycle=max_cycle, tol=tol, verbose=verbose, fintermediates=make_intermediates, fupdate=update_lambda)
+    return ccsd_lambda.kernel(cc, eris, t1, t2, l1, l2, max_cycle=max_cycle, tol=tol, verbose=verbose,
+                              fintermediates=make_intermediates, fupdate=update_lambda)
 
 
 def make_intermediates(cc, t1=None, t2=None, eris=None):
@@ -91,7 +92,7 @@ def update_lambda(cc, t1, t2, l1, l2, eris, imds):
         # ki - ka = 0
         ka = ki
         # l_ia <- - l_ma Ftmp_im
-        #  km = ka 
+        #  km = ka
         l1new[ki] -= einsum('ma,im->ia', l1[ka], Ftmp_oo[ki])
         # l_ia <- l_ie Ftmp_ea
         #  ke = ka
@@ -161,7 +162,7 @@ def update_lambda(cc, t1, t2, l1, l2, eris, imds):
         # l_ijab <- - P(ij) G_mj V_imab
         #  km - kj = 0
         km = kj
-        tmp -= einsum('mj,imab->ijab', Goo[km], eris.oovv[ki, km, ka])    
+        tmp -= einsum('mj,imab->ijab', Goo[km], eris.oovv[ki, km, ka])
 
         l2new[ki, kj, ka] += tmp
         l2new[kj, ki, ka] -= tmp.transpose(1, 0, 2, 3)
@@ -202,7 +203,7 @@ def update_lambda(cc, t1, t2, l1, l2, eris, imds):
         eia = LARGE_DENOM * numpy.ones((nocc, nvir), dtype=eris.mo_energy[0].dtype)
         n0_ovp_ia = numpy.ix_(nonzero_opadding[ki], nonzero_vpadding[ka])
         eia[n0_ovp_ia] = (mo_e_o[ki][:,None] - mo_e_v[ka])[n0_ovp_ia]
-        l1new[ki] /= eia   
+        l1new[ki] /= eia
 
     # Divide L2 by epsilon_ijab
     for ki, kj, ka in kpts_helper.loop_kkk(nkpts):
@@ -216,7 +217,7 @@ def update_lambda(cc, t1, t2, l1, l2, eris, imds):
         n0_ovp_jb = numpy.ix_(nonzero_opadding[kj], nonzero_vpadding[kb])
         ejb[n0_ovp_jb] = (mo_e_o[kj][:,None] - mo_e_v[kb])[n0_ovp_jb]
         eijab = eia[:, None, :, None] + ejb[:, None, :]
-        l2new[ki, kj, ka] /= eijab             
+        l2new[ki, kj, ka] /= eijab
 
     time0 = log.timer_debug1('update l1 l2', *time0)
 

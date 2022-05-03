@@ -142,11 +142,11 @@ def _adjust_vir(mo_energy, nocc, shift):
 
 def optical_absorption_singlet(cis, scan, eta, kshift=0, tol=1e-5, maxiter=500, eris=None, scissor=None, **kwargs):
     """Compute CIS singlet optical spectrum.
-    
+
     Arguments:
         cis {[type]} -- A CIS class instance
     """
-    cpu0 = (time.clock(), time.time())
+    cpu0 = (logger.process_clock(), logger.perf_counter())
     log = logger.Logger(cis.stdout, cis.verbose)
 
     kpts = cis.kpts
@@ -171,13 +171,13 @@ def optical_absorption_singlet(cis, scan, eta, kshift=0, tol=1e-5, maxiter=500, 
     #
     # I.p matrix in AO basis
 
-    # TODO figure out why 'cint1e_ipovlp_cart' causes shape mismatch for `ip_ao` and `mo_coeff` when basis='gth-dzvp'. 
+    # TODO figure out why 'cint1e_ipovlp_cart' causes shape mismatch for `ip_ao` and `mo_coeff` when basis='gth-dzvp'.
     # Meanwhile, let's use 'cint1e_ipovlp_sph' or 'int1e_ipovlp' because they seems to be fine.
     ip_ao = cis._scf.cell.pbc_intor('cint1e_ipovlp_sph', kpts=kpts, comp=3)
     ip_ao = np.asarray(ip_ao).transpose(1,0,2,3)  # with shape (naxis, nkpts, nmo, nmo)
     ip_ao *= -1j
 
-    # I.p matrix in MO basis (only the occ-vir block) 
+    # I.p matrix in MO basis (only the occ-vir block)
     mo_coeff = eris.mo_coeff
     ip_mo = np.empty((3, nkpts, nocc, nvir), dtype=mo_coeff[0].dtype)
     for k in range(nkpts):
@@ -223,11 +223,11 @@ def optical_absorption_singlet(cis, scan, eta, kshift=0, tol=1e-5, maxiter=500, 
         A = scipy.sparse.linalg.LinearOperator((b_size, b_size), matvec=matvec, dtype=np.complex)
 
         # preconditioner
-        # P should be close to A, but easy to solve. We choose P = H diags shifted by omega + ieta. 
+        # P should be close to A, but easy to solve. We choose P = H diags shifted by omega + ieta.
         P = scipy.sparse.diags(diag * (-1.) + omega + ieta, format='csc', dtype=diag.dtype)
         # M is the inverse of P.
         M_x = lambda x: scipy.sparse.linalg.spsolve(P, x)
-        M = scipy.sparse.linalg.LinearOperator((b_size, b_size), M_x)        
+        M = scipy.sparse.linalg.LinearOperator((b_size, b_size), M_x)
 
         for x in range(3):
 
@@ -237,10 +237,10 @@ def optical_absorption_singlet(cis, scan, eta, kshift=0, tol=1e-5, maxiter=500, 
             else:
                 print('Frequency', np.round(omega,3), 'not converged after', counter.niter, 'iterations')
             counter.reset()
-            
+
             x0[x] = sol
             spectrum[x,i] = np.dot(b_vector[x].conj(), sol)
-    
+
     log.timer('CIS Spectrum', *cpu0)
 
     return -1./np.pi*spectrum.imag
@@ -260,7 +260,8 @@ class gmres_counter(object):
                 res = 0
                 if self.niter > 1:
                     res = np.linalg.norm(rk - self.rk_old)
-                print('iter %3i\tnorm of rk = %.16f, norm of rk residual = %.16f' % (self.niter, np.linalg.norm(rk), res))
+                print('iter %3i\tnorm of rk = %.16f, norm of rk residual = %.16f' %
+                      (self.niter, np.linalg.norm(rk), res))
             else:
                 print('iter %3i\tnorm of rk = %.16f' % (self.niter, np.linalg.norm(rk)))
         if self._rel:
@@ -284,7 +285,7 @@ def cis_matvec_singlet(cis, vector, kshift, eris=None, dielec=1.0):
             Available k-shift indices depend on the k-point mesh. For example,
             a 2 by 2 by 2 k-point mesh allows at most 8 k-shift values, which can
             be targeted by 0, 1, 2, 3, 4, 5, 6, or 7.
-        dielec {float} -- macroscopic dielectric constant, used to scale (oo|vv) 
+        dielec {float} -- macroscopic dielectric constant, used to scale (oo|vv)
             type integral.
 
     Keyword Arguments:
@@ -296,7 +297,7 @@ def cis_matvec_singlet(cis, vector, kshift, eris=None, dielec=1.0):
         1D array -- matrix-vector product of the Hamiltonion matrix and the
             input vector.
     """
-    cput0 = (time.clock(), time.time())
+    cput0 = (logger.process_clock(), logger.perf_counter())
     log = logger.Logger(cis.stdout, cis.verbose)
 
     if eris is None:
@@ -647,7 +648,7 @@ class _CIS_ERIS:
                 fockao = cis._scf.get_hcore() + cis._scf.get_veff(cell, dm)
             self.fock = np.asarray([reduce(np.dot, (mo.T.conj(), fockao[k], mo))
                                     for k, mo in enumerate(mo_coeff)])
-        
+
         self.mo_energy = [self.fock[k].diagonal().real for k in range(nkpts)]
 
         if not cis.keep_exxdiv:
