@@ -171,7 +171,7 @@ def get_hcore(mol):
     t  = mol.intor_symmetric('int1e_spsp_spinor') * .5
     vn = mol.intor_symmetric('int1e_nuc_spinor')
     wn = mol.intor_symmetric('int1e_spnucsp_spinor')
-    h1e = numpy.empty((n4c, n4c), numpy.complex)
+    h1e = numpy.empty((n4c, n4c), numpy.complex128)
     h1e[:n2c,:n2c] = vn
     h1e[n2c:,:n2c] = t
     h1e[:n2c,n2c:] = t
@@ -185,7 +185,7 @@ def get_ovlp(mol):
 
     s = mol.intor_symmetric('int1e_ovlp_spinor')
     t = mol.intor_symmetric('int1e_spsp_spinor')
-    s1e = numpy.zeros((n4c, n4c), numpy.complex)
+    s1e = numpy.zeros((n4c, n4c), numpy.complex128)
     s1e[:n2c,:n2c] = s
     s1e[n2c:,n2c:] = t * (.5/c)**2
     return s1e
@@ -755,8 +755,8 @@ def _call_veff_ssll(mol, dm, hermi=1, mf_opt=None):
     c1 = .5 / lib.param.LIGHT_SPEED
     vx = _vhf.rdirect_bindm('int2e_spsp1_spinor', 's4', jks, dms, 1,
                             mol._atm, mol._bas, mol._env, mf_opt) * c1**2
-    vj = numpy.zeros((n_dm,n2c*2,n2c*2), dtype=numpy.complex)
-    vk = numpy.zeros((n_dm,n2c*2,n2c*2), dtype=numpy.complex)
+    vj = numpy.zeros((n_dm,n2c*2,n2c*2), dtype=numpy.complex128)
+    vk = numpy.zeros((n_dm,n2c*2,n2c*2), dtype=numpy.complex128)
     vj[:,n2c:,n2c:] = vx[      :n_dm  ,:,:]
     vj[:,:n2c,:n2c] = vx[n_dm  :n_dm*2,:,:]
     vk[:,n2c:,:n2c] = vx[n_dm*2:      ,:,:]
@@ -782,8 +782,12 @@ def _call_veff_ssss(mol, dm, hermi=1, mf_opt=None):
 
 def _call_veff_gaunt_breit(mol, dm, hermi=1, mf_opt=None, with_breit=False):
     if with_breit:
+        # integral function int2e_breit_ssp1ssp2_spinor evaluates
+        # -1/2[alpha1*alpha2/r12 + (alpha1*r12)(alpha2*r12)/r12^3]
         intor_prefix = 'int2e_breit_'
     else:
+        # integral function int2e_ssp1ssp2_spinor evaluates only
+        # alpha1*alpha2/r12. Minus sign was not included.
         intor_prefix = 'int2e_'
     if isinstance(dm, numpy.ndarray) and dm.ndim == 2:
         n_dm = 1
@@ -801,8 +805,8 @@ def _call_veff_gaunt_breit(mol, dm, hermi=1, mf_opt=None, with_breit=False):
         dmsl = [dmi[n2c:,:n2c].copy() for dmi in dm]
         dmss = [dmi[n2c:,n2c:].copy() for dmi in dm]
         dms = dmsl + dmsl + dmls + dmll + dmss
-    vj = numpy.zeros((n_dm,n2c*2,n2c*2), dtype=numpy.complex)
-    vk = numpy.zeros((n_dm,n2c*2,n2c*2), dtype=numpy.complex)
+    vj = numpy.zeros((n_dm,n2c*2,n2c*2), dtype=numpy.complex128)
+    vk = numpy.zeros((n_dm,n2c*2,n2c*2), dtype=numpy.complex128)
 
     jks = ('lk->s1ij',) * n_dm \
         + ('jk->s1il',) * n_dm

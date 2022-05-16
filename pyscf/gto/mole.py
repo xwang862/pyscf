@@ -100,6 +100,9 @@ NUC_ECP = 4  # atoms with pseudo potential
 BASE = getattr(__config__, 'BASE', 0)
 NORMALIZE_GTO = getattr(__config__, 'NORMALIZE_GTO', True)
 DISABLE_EVAL = getattr(__config__, 'DISABLE_EVAL', False)
+# Whether to disable the explicit call to gc.collect(). gc.collect() may cause
+# non-negligible overhead (https://github.com/pyscf/pyscf/issues/1038).
+DISABLE_GC = getattr(__config__, 'DISABLE_GC', False)
 
 def M(**kwargs):
     r'''This is a shortcut to build up Mole object.
@@ -204,7 +207,7 @@ def cart2spinor_kappa(kappa, l=None, normalized=None):
         assert(l <= 12)
         nd = l * 4 + 2
     nf = (l+1)*(l+2)//2
-    c2smat = numpy.zeros((nf*2,nd), order='F', dtype=numpy.complex)
+    c2smat = numpy.zeros((nf*2,nd), order='F', dtype=numpy.complex128)
     cmat = numpy.eye(nf)
     fn = moleintor.libcgto.CINTc2s_ket_spinor_sf1
     fn(c2smat.ctypes.data_as(ctypes.c_void_p),
@@ -345,7 +348,7 @@ def format_atom(atoms, origin=0, axes=None,
                 sys.stderr.write('\nFailed to parse geometry file  %s\n\n' % atoms)
                 raise
 
-        atoms = str(atoms.replace(';','\n').replace(',',' ').replace('\t',' '))
+        atoms = atoms.replace(';','\n').replace(',',' ').replace('\t',' ')
         fmt_atoms = []
         for dat in atoms.split('\n'):
             dat = dat.strip()
@@ -694,7 +697,7 @@ def conc_mol(mol1, mol2):
         if len(mol1._ecpbas) == 0:
             mol3._ecpbas = ecpbas2
         else:
-            mol3._ecpbas = numpy.hstack((mol1._ecpbas, ecpbas2))
+            mol3._ecpbas = numpy.vstack((mol1._ecpbas, ecpbas2))
 
     mol3.verbose = mol1.verbose
     mol3.output = mol1.output
@@ -1159,7 +1162,7 @@ def loads(molstr):
                 c = numpy.zeros(shape)
                 c[numpy.array(x),numpy.array(y)] = numpy.array(val_real)
             else:
-                c = numpy.zeros(shape, dtype=numpy.complex)
+                c = numpy.zeros(shape, dtype=numpy.complex128)
                 val = numpy.array(val_real) + numpy.array(val_imag) * 1j
                 c[numpy.array(x),numpy.array(y)] = val
             symm_orb.append(c)
@@ -1838,6 +1841,11 @@ def atom_mass_list(mol, isotope_avg=False):
 def condense_to_shell(mol, mat, compressor='max'):
     '''The given matrix is first partitioned to blocks, based on AO shell as
     delimiter. Then call compressor function to abstract each block.
+
+    Args:
+        compressor: string or function
+            if compressor is a string, its value can be  sum, max, min, abssum,
+            absmax, absmin, norm
     '''
     ao_loc = mol.ao_loc_nr()
     if callable(compressor):
@@ -2310,7 +2318,8 @@ class Mole(lib.StreamObject):
                 name, the given point group symmetry will be used.
 
         '''
-        gc.collect()  # To release circular referred objects
+        if not DISABLE_GC:
+            gc.collect()  # To release circular referred objects
 
         if isinstance(dump_input, (str, unicode)):
             sys.stderr.write('Assigning the first argument %s to mol.atom\n' %
@@ -2404,10 +2413,11 @@ class Mole(lib.StreamObject):
         if dump_input and not self._built and self.verbose > logger.NOTE:
             self.dump_input()
 
-        logger.debug3(self, 'arg.atm = %s', str(self._atm))
-        logger.debug3(self, 'arg.bas = %s', str(self._bas))
-        logger.debug3(self, 'arg.env = %s', str(self._env))
-        logger.debug3(self, 'ecpbas  = %s', str(self._ecpbas))
+        if self.verbose >= logger.DEBUG3:
+            logger.debug3(self, 'arg.atm = %s', self._atm)
+            logger.debug3(self, 'arg.bas = %s', self._bas)
+            logger.debug3(self, 'arg.env = %s', self._env)
+            logger.debug3(self, 'ecpbas  = %s', self._ecpbas)
 
         self._built = True
         return self
@@ -2423,31 +2433,42 @@ class Mole(lib.StreamObject):
 
         if isinstance(self.symmetry, (str, unicode)):
             self.symmetry = str(symm.std_symb(self.symmetry))
-            try:
-                self.groupname, axes = symm.as_subgroup(self.topgroup, axes,
-                                                        self.symmetry)
-            except PointGroupSymmetryError:
-                raise PointGroupSymmetryError(
-                    'Unable to identify input symmetry %s. Try symmetry="%s"' %
-                    (self.symmetry, self.topgroup))
+            groupname = None
+            if abs(axes - np.eye(3)).max() < symm.TOLERANCE:
+                if symm.check_symm(self.symmetry, self._atom, self._basis):
+                    # Try to use original axes (issue #1209)
+                    groupname = self.symmetry
+                    axes = np.eye(3)
+                else:
+                    logger.warn(self, 'Unable to to identify input symmetry using original axes.\n'
+                                'Different symmetry axes will be used.')
+            if groupname is None:
+                try:
+                    groupname, axes = symm.as_subgroup(self.topgroup, axes,
+                                                       self.symmetry)
+                except PointGroupSymmetryError as e:
+                    raise PointGroupSymmetryError(
+                        'Unable to identify input symmetry %s. Try symmetry="%s"' %
+                        (self.symmetry, self.topgroup)) from e
         else:
-            self.groupname, axes = symm.as_subgroup(self.topgroup, axes,
-                                                    self.symmetry_subgroup)
+            groupname, axes = symm.as_subgroup(self.topgroup, axes,
+                                               self.symmetry_subgroup)
         self._symm_orig = orig
         self._symm_axes = axes
 
-        if self.cart and self.groupname in ('Dooh', 'Coov', 'SO3'):
-            if self.groupname == 'Coov':
-                self.groupname, lgroup = 'C2v', self.groupname
+        if self.cart and groupname in ('Dooh', 'Coov', 'SO3'):
+            if groupname == 'Coov':
+                groupname, lgroup = 'C2v', groupname
             else:
-                self.groupname, lgroup = 'D2h', self.groupname
+                groupname, lgroup = 'D2h', groupname
             logger.warn(self, 'This version does not support symmetry %s '
                         'for cartesian GTO basis. Its subgroup %s is used',
-                        lgroup, self.groupname)
+                        lgroup, groupname)
+        self.groupname = groupname
 
         self.symm_orb, self.irrep_id = \
-                symm.symm_adapted_basis(self, self.groupname, orig, axes)
-        self.irrep_name = [symm.irrep_id2name(self.groupname, ir)
+                symm.symm_adapted_basis(self, groupname, orig, axes)
+        self.irrep_name = [symm.irrep_id2name(groupname, ir)
                            for ir in self.irrep_id]
         return self
 
@@ -2612,6 +2633,10 @@ class Mole(lib.StreamObject):
                 else:
                     logger.info(self, 'point group symmetry = %s, use subgroup %s',
                                 self.topgroup, self.groupname)
+                logger.info(self, "symmetry origin: %s", self._symm_orig)
+                logger.info(self, "symmetry axis x: %s", self._symm_axes[0])
+                logger.info(self, "symmetry axis y: %s", self._symm_axes[1])
+                logger.info(self, "symmetry axis z: %s", self._symm_axes[2])
                 for ir in range(self.symm_orb.__len__()):
                     logger.info(self, 'num. orbitals of irrep %s = %d',
                                 self.irrep_name[ir], self.symm_orb[ir].shape[1])
@@ -2841,8 +2866,6 @@ class Mole(lib.StreamObject):
             mol.atom = atoms_or_coords
 
         if isinstance(atoms_or_coords, numpy.ndarray) and not symmetry:
-            mol._atom = mol.atom
-
             if isinstance(unit, (str, unicode)):
                 if unit.upper().startswith(('B', 'AU')):
                     unit = 1.
@@ -2850,6 +2873,9 @@ class Mole(lib.StreamObject):
                     unit = 1./param.BOHR
             else:
                 unit = 1./unit
+
+            mol._atom = list(zip([x[0] for x in mol._atom],
+                                 (atoms_or_coords * unit).tolist()))
             ptr = mol._atm[:,PTR_COORD]
             mol._env[ptr+0] = unit * atoms_or_coords[:,0]
             mol._env[ptr+1] = unit * atoms_or_coords[:,1]

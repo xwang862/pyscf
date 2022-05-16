@@ -704,7 +704,7 @@ class EOMIP(eom_rccsd.EOMIP):
 
     def get_init_guess(self, kshift, nroots=1, koopmans=False, diag=None):
         size = self.vector_size()
-        dtype = getattr(diag, 'dtype', np.complex)
+        dtype = getattr(diag, 'dtype', np.complex128)
         nroots = min(nroots, size)
         guess = []
         if koopmans:
@@ -1221,7 +1221,7 @@ class EOMEA(eom_rccsd.EOMEA):
 
     def get_init_guess(self, kshift, nroots=1, koopmans=False, diag=None):
         size = self.vector_size()
-        dtype = getattr(diag, 'dtype', np.complex)
+        dtype = getattr(diag, 'dtype', np.complex128)
         nroots = min(nroots, size)
         guess = []
         if koopmans:

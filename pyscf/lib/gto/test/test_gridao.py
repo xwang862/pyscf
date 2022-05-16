@@ -51,7 +51,7 @@ def eval_gto(mol, eval_name, coords,
 
     if non0tab is None:
         non0tab = numpy.ones(((ngrids+BLKSIZE-1)//BLKSIZE,nbas),
-                             dtype=numpy.int8)
+                             dtype=numpy.uint8)
 
     drv = getattr(libcgto, eval_name)
     drv(ctypes.c_int(ngrids),
@@ -258,7 +258,7 @@ class KnownValues(unittest.TestCase):
 #        print 'x', aonr[0,0,:3]
 #        print 'y', aonr[1,0,:3]
 #        print 'z', aonr[2,0,:3]
-#        aa = numpy.zeros((3,2,6),dtype=numpy.complex)
+#        aa = numpy.zeros((3,2,6),dtype=numpy.complex128)
 #        aa[0,:1,3:] = aonr[0,0,:3]
 #        aa[0,1:,:3] = aonr[0,0,:3]
 #        aa[1,:1,3:] =-aonr[1,0,:3]*1j
