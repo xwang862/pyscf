@@ -1,13 +1,13 @@
 #!/usr/bin/env python
 
-import os
 import numpy as np
 from pyscf import lib
 from pyscf.lib import logger, einsum
 from pyscf.pbc.df import df
 from pyscf import __config__
 from pyscf.lib.parameters import LARGE_DENOM
-from pyscf.pbc.mp.kmp2 import padding_k_idx, _init_mp_df_eris, _add_padding
+from pyscf.pbc.mp import kmp2
+from pyscf.pbc.mp.kmp2 import padding_k_idx, _init_mp_df_eris
 
 import scipy
 from scipy import integrate, optimize
@@ -15,7 +15,6 @@ from scipy import integrate, optimize
 
 WITH_T2 = getattr(__config__, "mp_mp2_with_t2", True)
 
-# Laplace transform followed by logarithmic transform
 def laplace_ayala2001(eijab, eia, tau=7):
     """Laplace transform followed by logarithmic transform.
     Ref: Ayala, Kudin, and Scuseria. J. Chem. Phys. 115, 9698 (2001)
@@ -44,7 +43,7 @@ def laplace_ayala2001(eijab, eia, tau=7):
 
 
 def laplace_haser1992(eijab, eia, tau=7):
-    """Least square fit by Almlof & Haser. 
+    """Least square fit by Almlof & Haser.
     Ref: Marco Häser and Jan Almlöf, J. Chem. Phys. 96, 489 (1992)
     Note 1: I use Levenberg–Marquardt (LM) least-squares algorithm (implemented in scipy.optimize.least_squares)
     instead of Simplex algorithm. LM was also used by
@@ -292,12 +291,23 @@ def kernel(
 
 
 class LaplaceKMP2(kmp2.KMP2):
-    def kernel(self, mo_energy=None, mo_coeff=None, with_t2=WITH_T2, method=3, tau=7):
-        if mo_energy is None: mo_energy = self.mo_energy
-        if mo_coeff is None: mo_coeff = self.mo_coeff
+    def kernel(
+        self,
+        mo_energy=None,
+        mo_coeff=None,
+        with_t2=WITH_T2,
+        method=3,
+        tau=7
+    ):
+        if mo_energy is None:
+            mo_energy = self.mo_energy
+        if mo_coeff is None:
+            mo_coeff = self.mo_coeff
         if mo_energy is None or mo_coeff is None:
-            logger.warn('mo_coeff, mo_energy are not given.\n'
-                        'You may need to call mf.kernel() to generate them.')
+            logger.warn(
+                "mo_coeff, mo_energy are not given.\n"
+                "You may need to call mf.kernel() to generate them."
+            )
             raise RuntimeError
 
         mo_coeff, mo_energy = kmp2._add_padding(self, mo_coeff, mo_energy)
@@ -305,68 +315,47 @@ class LaplaceKMP2(kmp2.KMP2):
         # TODO: compute e_hf for non-canonical SCF
         self.e_hf = self._scf.e_tot
 
-        self.e_corr, self.t2 = \
-                kernel(self, mo_energy, mo_coeff, verbose=self.verbose, with_t2=with_t2, method=method, tau=tau)
+        self.e_corr, self.t2 = kernel(
+            self,
+            mo_energy,
+            mo_coeff,
+            verbose=self.verbose,
+            with_t2=with_t2,
+            method=method,
+            tau=tau,
+        )
 
-        self.e_corr_ss = getattr(self.e_corr, 'e_corr_ss', 0)
-        self.e_corr_os = getattr(self.e_corr, 'e_corr_os', 0)
+        self.e_corr_ss = getattr(self.e_corr, "e_corr_ss", 0)
+        self.e_corr_os = getattr(self.e_corr, "e_corr_os", 0)
         self.e_corr = float(self.e_corr)
 
         self._finalize()
-        
+
         return self.e_corr, self.t2
-
-def main():
-    from pyscf.pbc import gto, scf, mp
-    from pyscf.pbc.tools import lattice, pyscf_ase
-
-    # Create a Cell object
-    cell = gto.Cell()
-    cell.unit = "B"
-    ase_atom = lattice.get_ase_atom("c")
-    cell.atom = pyscf_ase.ase_atoms_to_pyscf(ase_atom)
-    cell.a = ase_atom.cell
-    cell.basis = "gth-szv"
-    cell.pseudo = "gth-pade"
-    cell.verbose = 3
-    # cell.max_memory = 500000
-    cell.build()
-
-    # KHF
-    nk = [2, 2, 2]
-    kpts = cell.make_kpts(nk)
-    kmf = scf.KRHF(cell, kpts).density_fit()
-    # save ERIs if not exist
-    h5name = "./cderi-c-szv-222.h5"
-    kmf.with_df._cderi_to_save = h5name
-    if os.path.isfile(h5name):
-        kmf.with_df._cderi = h5name
-    kmf.kernel()
-
-    # reference KMP2
-    kmp = mp.KMP2(kmf)
-    emp2_ref = kmp.kernel()[0]
-
-    energies = []
-    methods = [2, 3]
-    taus = range(3, 8)
-    # laplace MP2
-    mo_coeff, mo_energy = _add_padding(kmp, kmp.mo_coeff, kmp.mo_energy)
-    for method in methods:
-        for tau in taus:
-            emp2_new = kernel(
-                kmp, mo_energy, mo_coeff, with_t2=False, method=method, tau=tau
-            )[0]
-            diff = emp2_new - emp2_ref
-            energies.append([method, tau, emp2_ref, emp2_new, diff])
-
-    print(f"\n{'Method':>8} {'Tau':>8} {'EMP2_ref':>20} {'EMP2_new':>20} {'Diff':>20}")
-    for method in methods:
-        for tau in taus:
-            method, tau, emp2_ref, emp2_new, diff = energies.pop(0)
-            print(f"{method:>8} {tau:>8} {emp2_ref:>20.12f} {emp2_new:>20.12f} {diff:>20.12f}")
-
 
 
 if __name__ == "__main__":
-    main()
+    from pyscf.pbc import gto, scf
+
+    cell = gto.Cell()
+    cell.atom = """
+    C 0.000000000000   0.000000000000   0.000000000000
+    C 1.685068664391   1.685068664391   1.685068664391
+    """
+    cell.basis = "gth-szv"
+    cell.pseudo = "gth-pade"
+    cell.a = """
+    0.000000000, 3.370137329, 3.370137329
+    3.370137329, 0.000000000, 3.370137329
+    3.370137329, 3.370137329, 0.000000000"""
+    cell.unit = "B"
+    cell.verbose = 5
+    cell.build()
+
+    kpts = cell.make_kpts([2, 2, 2])
+    kmf = scf.KRHF(cell, kpts=kpts, exxdiv=None)
+    ehf = kmf.kernel()
+
+    mymp = LaplaceKMP2(kmf)
+    emp2 = mymp.kernel(with_t2=False, method=3, tau=7)[0]
+    print(emp2 - -0.13314158977189)
