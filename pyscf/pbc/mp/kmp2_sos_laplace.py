@@ -43,8 +43,8 @@ def laplace_ayala2001(eijab, eia, tau=7):
     return inv_e_ijab
 
 
-def laplace_haser1992(eijab, eia, tau=7):
-    """Least square fit by Almlof & Haser.
+def get_weights_haser1992(eia, tau=7):
+    """Get weights and grids for Laplace transform using least square fit by Almlof & Haser.
     Ref: Marco Häser and Jan Almlöf, J. Chem. Phys. 96, 489 (1992)
     Note 1: I use Levenberg–Marquardt (LM) least-squares algorithm (implemented in scipy.optimize.least_squares)
     instead of Simplex algorithm. LM was also used by
@@ -54,7 +54,6 @@ def laplace_haser1992(eijab, eia, tau=7):
     Nelder and Mead, A Simplex Method for Function Minimization, The Computer Journal, 7, 308 (1965)
 
     Args:
-        eijab (numpy array): ei + ej - ea - eb
         eia (numpy array): ei - ea
         tau (int, optional): Number of quadrature points. Defaults to 7.
 
@@ -116,18 +115,25 @@ def laplace_haser1992(eijab, eia, tau=7):
         kwargs={"interval": interval, "ngrid": ngrid},
     )
 
-    # print(f"fitting error: {opt_result.cost}")
-
     ts = opt_result.x
     ws = get_ws(ts, interval=interval, ngrid=ngrid)
-    # print(f"ts: {ts}")
-    # print(f"ws: {ws}")
+    return ws, ts
 
-    inv_e_ijab = -np.sum(
-        [w * np.exp(t * eijab) for t, w in zip(ts, ws)], axis=0
+def laplace_transform(denom, weights, grids):
+    """Laplace transform of 1/x.
+    If x < 0, then 1/x ~= - sum_i weights[i] * exp(grids[i] * x)
+
+    Args:
+        denom (ndarray): denominator in 1/x
+        weights (1d array): weights for each grid point
+        grids (1d array): grid points
+
+    Returns:
+        ndarray: evaluated 1/x, with same shape as denom
+    """ 
+    return -np.sum(
+        [w * np.exp(t * denom) for t, w in zip(grids, weights)], axis=0
     )
-    return inv_e_ijab
-
 
 def kernel(
     mp,
@@ -218,19 +224,14 @@ def kernel(
     }
     print(f"\nLaplace method: {method_name[method]}\ntau: {tau}\n")
 
+    if method != 3:
+        raise NotImplementedError(f"Only method 3 ({method_name[method]}) is implemented.")
+    
     emp2_ss = emp2_os = 0.0
     for ki in range(nkpts):
         for kj in range(nkpts):
             for ka in range(nkpts):
                 kb = kconserv[ki, ka, kj]
-                # (ia|jb)
-                oovv_ij[ka] = (1.0 / nkpts) * einsum(
-                    "Lia,Ljb->iajb", Lov[ki, ka], Lov[kj, kb]
-                ).transpose(0, 2, 1, 3)
-
-            for ka in range(nkpts):
-                kb = kconserv[ki, ka, kj]
-
                 # Remove zero/padded elements from denominator
                 eia = LARGE_DENOM * np.ones(
                     (nocc, nvir), dtype=mo_energy[0].dtype
@@ -244,24 +245,57 @@ def kernel(
                 n0_ovp_jb = np.ix_(nonzero_opadding[kj], nonzero_vpadding[kb])
                 ejb[n0_ovp_jb] = (mo_e_o[kj][:, None] - mo_e_v[kb])[n0_ovp_jb]
 
-                eijab = lib.direct_sum("ia,jb->ijab", eia, ejb)
+                # Get weights and grids for laplace transform
+                ws, ts = get_weights_haser1992(eia, tau)
+                # For each quad point t, 
+                # M_PQ = L_ia^P.conj * L_ia^Q * exp((ei-ea)*t)
+                # N_PQ = L_jb^P.conj * L_jb^Q * exp((ej-eb)*t)
+                mtensor = (1.0 / nkpts) * np.array([einsum("Pia,Qia,ia->PQ", Lov[ki,ka].conj(), Lov[ki,ka], np.exp(eia*t)) for t in ts]) 
+                ntensor = (1.0 / nkpts) * np.array([einsum("Pjb,Qjb,jb->PQ", Lov[kj,kb].conj(), Lov[kj,kb], np.exp(ejb*t)) for t in ts])
+                emp2_os += -1.*einsum("q,qPQ,qPQ", ws, mtensor, ntensor)
 
-                ### Start of Laplace
-                if method == 0:
-                    # Reference method
-                    inv_e_ijab = 1.0 / eijab
-                elif method == 2:
-                    inv_e_ijab = laplace_ayala2001(eijab, eia, tau)
-                elif method == 3:
-                    inv_e_ijab = laplace_haser1992(eijab, eia, tau)
+            # for ka in range(nkpts):
+            #     kb = kconserv[ki, ka, kj]
+            #     # (ia|jb)
+            #     oovv_ij[ka] = (1.0 / nkpts) * einsum(
+            #         "Lia,Ljb->iajb", Lov[ki, ka], Lov[kj, kb]
+            #     ).transpose(0, 2, 1, 3)
 
-                t2_ijab = np.conj(oovv_ij[ka] * inv_e_ijab)
-                if with_t2:
-                    t2[ki, kj, ka] = t2_ijab
-                edi = einsum("ijab,ijab", t2_ijab, oovv_ij[ka]).real * 2
-                exi = -einsum("ijab,ijba", t2_ijab, oovv_ij[kb]).real
-                emp2_ss += edi * 0.5 + exi
-                emp2_os += edi * 0.5
+            # for ka in range(nkpts):
+            #     kb = kconserv[ki, ka, kj]
+
+            #     # Remove zero/padded elements from denominator
+            #     eia = LARGE_DENOM * np.ones(
+            #         (nocc, nvir), dtype=mo_energy[0].dtype
+            #     )
+            #     n0_ovp_ia = np.ix_(nonzero_opadding[ki], nonzero_vpadding[ka])
+            #     eia[n0_ovp_ia] = (mo_e_o[ki][:, None] - mo_e_v[ka])[n0_ovp_ia]
+
+            #     ejb = LARGE_DENOM * np.ones(
+            #         (nocc, nvir), dtype=mo_energy[0].dtype
+            #     )
+            #     n0_ovp_jb = np.ix_(nonzero_opadding[kj], nonzero_vpadding[kb])
+            #     ejb[n0_ovp_jb] = (mo_e_o[kj][:, None] - mo_e_v[kb])[n0_ovp_jb]
+
+            #     eijab = lib.direct_sum("ia,jb->ijab", eia, ejb)
+
+            #     ### Start of Laplace
+            #     if method == 0:
+            #         # Reference method
+            #         inv_e_ijab = 1.0 / eijab
+            #     elif method == 2:
+            #         # inv_e_ijab = laplace_ayala2001(eijab, eia, tau)
+            #     elif method == 3:
+            #         ws, ts = get_weights_haser1992(eia, tau)
+            #         inv_e_ijab = laplace_transform(eijab, ws, ts)
+
+            #     t2_ijab = np.conj(oovv_ij[ka] * inv_e_ijab)
+            #     if with_t2:
+            #         t2[ki, kj, ka] = t2_ijab
+            #     edi = einsum("ijab,ijab", t2_ijab, oovv_ij[ka]).real * 2
+            #     exi = -einsum("ijab,ijba", t2_ijab, oovv_ij[kb]).real
+            #     emp2_ss += edi * 0.5 + exi
+            #     emp2_os += edi * 0.5
 
     log.timer("KMP2", *cput0)
 
@@ -306,7 +340,7 @@ class LaplaceSOSKMP2(kmp2.KMP2):
 
         self.e_corr_ss = getattr(self.e_corr, "e_corr_ss", 0)
         self.e_corr_os = getattr(self.e_corr, "e_corr_os", 0)
-        self.e_corr = float(self.e_corr)
+        self.e_corr = np.real(self.e_corr)
 
         self._finalize()
 
