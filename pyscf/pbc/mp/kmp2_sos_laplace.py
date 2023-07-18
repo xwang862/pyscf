@@ -119,6 +119,7 @@ def get_weights_haser1992(eia, tau=7):
     ws = get_ws(ts, interval=interval, ngrid=ngrid)
     return ws, ts
 
+
 def laplace_transform(denom, weights, grids):
     """Laplace transform of 1/x.
     If x < 0, then 1/x ~= - sum_i weights[i] * exp(grids[i] * x)
@@ -130,17 +131,19 @@ def laplace_transform(denom, weights, grids):
 
     Returns:
         ndarray: evaluated 1/x, with same shape as denom
-    """ 
+    """
     return -np.sum(
         [w * np.exp(t * denom) for t, w in zip(grids, weights)], axis=0
     )
+
 
 def kernel(
     mp,
     mo_energy,
     mo_coeff,
+    cos=1.36,
     verbose=logger.NOTE,
-    with_t2=WITH_T2,
+    with_t2=False,
     method=3,
     tau=3,
 ):
@@ -152,8 +155,11 @@ def kernel(
                           shape (Nmo,) for one kpt
         mo_coeff (list): a list of numpy.ndarray. Each array contains MO coefficients
                          of shape (Nao, Nmo) for one kpt
+        cos (float, optional): scaling coefficient for SOS-MP2. Defaults to 1.36.
         verbose (int, optional): level of verbosity. Defaults to logger.NOTE (=3).
-        with_t2 (bool, optional): whether to compute t2 amplitudes. Defaults to WITH_T2 (=True).
+        with_t2 (bool, optional): whether to compute t2 amplitudes. Defaults to False.
+        method (int, optional): Laplace transform method to compute SOS-MP2 energy. Defaults to 3 (least square fit by Haser & Almlof).
+        tau (int, optional): Number of quadrature points. Defaults to 3.
 
     Returns:
         KMP2 energy and t2 amplitudes (=None if with_t2 is False)
@@ -193,12 +199,8 @@ def kernel(
         )
 
     eia = np.zeros((nocc, nvir))
-    eijab = np.zeros((nocc, nocc, nvir, nvir))
 
     kconserv = mp.khelper.kconserv
-    oovv_ij = np.zeros(
-        (nkpts, nocc, nocc, nvir, nvir), dtype=mo_coeff[0].dtype
-    )
 
     mo_e_o = [mo_energy[k][:nocc] for k in range(nkpts)]
     mo_e_v = [mo_energy[k][nocc:] for k in range(nkpts)]
@@ -207,11 +209,10 @@ def kernel(
     nonzero_opadding, nonzero_vpadding = padding_k_idx(mp, kind="split")
 
     if with_t2:
-        t2 = np.zeros(
-            (nkpts, nkpts, nkpts, nocc, nocc, nvir, nvir), dtype=complex
+        raise NotImplementedError(
+            "t2 amplitudes are not implemented for O(N^4) algorithm."
         )
-    else:
-        t2 = None
+    t2 = None
 
     # Build 3-index DF tensor Lov
     if with_df_ints:
@@ -225,8 +226,10 @@ def kernel(
     print(f"\nLaplace method: {method_name[method]}\ntau: {tau}\n")
 
     if method != 3:
-        raise NotImplementedError(f"Only method 3 ({method_name[method]}) is implemented.")
-    
+        raise NotImplementedError(
+            f"Only method 3 ({method_name[method]}) is implemented."
+        )
+
     emp2_ss = emp2_os = 0.0
     for ki in range(nkpts):
         for kj in range(nkpts):
@@ -247,70 +250,44 @@ def kernel(
 
                 # Get weights and grids for laplace transform
                 ws, ts = get_weights_haser1992(eia, tau)
-                # For each quad point t, 
+                # For each quad point t,
                 # M_PQ = L_ia^P.conj * L_ia^Q * exp((ei-ea)*t)
                 # N_PQ = L_jb^P.conj * L_jb^Q * exp((ej-eb)*t)
-                mtensor = (1.0 / nkpts) * np.array([einsum("Pia,Qia,ia->PQ", Lov[ki,ka].conj(), Lov[ki,ka], np.exp(eia*t)) for t in ts]) 
-                ntensor = (1.0 / nkpts) * np.array([einsum("Pjb,Qjb,jb->PQ", Lov[kj,kb].conj(), Lov[kj,kb], np.exp(ejb*t)) for t in ts])
-                emp2_os += -1.*einsum("q,qPQ,qPQ", ws, mtensor, ntensor)
-
-            # for ka in range(nkpts):
-            #     kb = kconserv[ki, ka, kj]
-            #     # (ia|jb)
-            #     oovv_ij[ka] = (1.0 / nkpts) * einsum(
-            #         "Lia,Ljb->iajb", Lov[ki, ka], Lov[kj, kb]
-            #     ).transpose(0, 2, 1, 3)
-
-            # for ka in range(nkpts):
-            #     kb = kconserv[ki, ka, kj]
-
-            #     # Remove zero/padded elements from denominator
-            #     eia = LARGE_DENOM * np.ones(
-            #         (nocc, nvir), dtype=mo_energy[0].dtype
-            #     )
-            #     n0_ovp_ia = np.ix_(nonzero_opadding[ki], nonzero_vpadding[ka])
-            #     eia[n0_ovp_ia] = (mo_e_o[ki][:, None] - mo_e_v[ka])[n0_ovp_ia]
-
-            #     ejb = LARGE_DENOM * np.ones(
-            #         (nocc, nvir), dtype=mo_energy[0].dtype
-            #     )
-            #     n0_ovp_jb = np.ix_(nonzero_opadding[kj], nonzero_vpadding[kb])
-            #     ejb[n0_ovp_jb] = (mo_e_o[kj][:, None] - mo_e_v[kb])[n0_ovp_jb]
-
-            #     eijab = lib.direct_sum("ia,jb->ijab", eia, ejb)
-
-            #     ### Start of Laplace
-            #     if method == 0:
-            #         # Reference method
-            #         inv_e_ijab = 1.0 / eijab
-            #     elif method == 2:
-            #         # inv_e_ijab = laplace_ayala2001(eijab, eia, tau)
-            #     elif method == 3:
-            #         ws, ts = get_weights_haser1992(eia, tau)
-            #         inv_e_ijab = laplace_transform(eijab, ws, ts)
-
-            #     t2_ijab = np.conj(oovv_ij[ka] * inv_e_ijab)
-            #     if with_t2:
-            #         t2[ki, kj, ka] = t2_ijab
-            #     edi = einsum("ijab,ijab", t2_ijab, oovv_ij[ka]).real * 2
-            #     exi = -einsum("ijab,ijba", t2_ijab, oovv_ij[kb]).real
-            #     emp2_ss += edi * 0.5 + exi
-            #     emp2_os += edi * 0.5
+                mtensor = (1.0 / nkpts) * np.array(
+                    [
+                        einsum(
+                            "Pia,Qia,ia->PQ",
+                            Lov[ki, ka].conj(),
+                            Lov[ki, ka],
+                            np.exp(eia * t),
+                        )
+                        for t in ts
+                    ]
+                )
+                ntensor = (1.0 / nkpts) * np.array(
+                    [
+                        einsum(
+                            "Pjb,Qjb,jb->PQ",
+                            Lov[kj, kb].conj(),
+                            Lov[kj, kb],
+                            np.exp(ejb * t),
+                        )
+                        for t in ts
+                    ]
+                )
+                emp2_os += -einsum("q,qPQ,qPQ", ws, mtensor, ntensor).real
 
     log.timer("KMP2", *cput0)
 
-    emp2_ss /= nkpts
     emp2_os /= nkpts
-    emp2 = lib.tag_array(
-        emp2_ss + emp2_os, e_corr_ss=emp2_ss, e_corr_os=emp2_os
-    )
+    emp2 = lib.tag_array(cos * emp2_os, e_corr_ss=emp2_ss, e_corr_os=emp2_os)
 
     return emp2, t2
 
 
 class LaplaceSOSKMP2(kmp2.KMP2):
     def kernel(
-        self, mo_energy=None, mo_coeff=None, with_t2=WITH_T2, method=3, tau=7
+        self, mo_energy=None, mo_coeff=None, with_t2=False, method=3, tau=7
     ):
         if mo_energy is None:
             mo_energy = self.mo_energy
@@ -340,7 +317,7 @@ class LaplaceSOSKMP2(kmp2.KMP2):
 
         self.e_corr_ss = getattr(self.e_corr, "e_corr_ss", 0)
         self.e_corr_os = getattr(self.e_corr, "e_corr_os", 0)
-        self.e_corr = np.real(self.e_corr)
+        self.e_corr = float(self.e_corr)
 
         self._finalize()
 
