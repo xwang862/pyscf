@@ -10,41 +10,41 @@ from pyscf.pbc.mp import kmp2
 from pyscf.pbc.mp.kmp2 import padding_k_idx, _init_mp_df_eris
 
 import scipy
-from scipy import integrate, optimize
+from scipy import optimize, special
 
 
 WITH_T2 = getattr(__config__, "mp_mp2_with_t2", True)
 
 
-def laplace_ayala2001(eijab, eia, tau=7):
-    """Laplace transform followed by logarithmic transform.
+def get_grids_weights_ayala2001(eia, tau=7):
+    """Get grids, weights, and alpha for Laplace transform followed by logarithmic transform.
     Ref: Ayala, Kudin, and Scuseria. J. Chem. Phys. 115, 9698 (2001)
 
     Args:
-        eijab (numpy array): ei + ej - ea - eb
         eia (numpy array): ei - ea
         tau (int, optional): Number of quadrature points. Defaults to 7.
 
     Returns:
-        ndarray: 1/e_ijab
+        tuple: grids, weights, alpha
     """
     nocc, nvir = eia.shape
+
+    # Logaritmic transform involves a parameter alpha,
+    # alpha <= minimum value of (ea + eb - ei - ej).
+    # For MP2 energies, alpha = twice the HF band gap
+    # For MP2 band gap corrections, alpha = HF band gap
     alpha = -2.0 * eia[nocc - 1, 0]
 
-    def laplace(t):
-        if isinstance(t, (list, tuple, np.ndarray)):
-            return np.array(
-                [np.power(x, -eijab / alpha - 1.0) for x in t]
-            ).transpose(1, 2, 3, 4, 0)
-        else:
-            return np.power(t, -eijab / alpha - 1.0)
+    # Gauss-Legendre quadrature roots and weights over interval [-1, 1]
+    roots, weights = special.roots_legendre(tau)
 
-    inv_e_ijab = -1.0 / alpha * integrate.fixed_quad(laplace, 0, 1, n=tau)[0]
-    return inv_e_ijab
+    # Map the roots from interval [-1, 1] to [0, 1]
+    grids = 1.0 / 2.0 * roots + 1.0 / 2.0
+    return grids, weights, alpha
 
 
-def get_weights_haser1992(eia, tau=7):
-    """Get weights and grids for Laplace transform using least square fit by Almlof & Haser.
+def get_grids_weights_haser1992(eia, tau=7):
+    """Get weights and grids for Laplace transform using least square fit.
     Ref: Marco Häser and Jan Almlöf, J. Chem. Phys. 96, 489 (1992)
     Note 1: I use Levenberg–Marquardt (LM) least-squares algorithm (implemented in scipy.optimize.least_squares)
     instead of Simplex algorithm. LM was also used by
@@ -58,7 +58,7 @@ def get_weights_haser1992(eia, tau=7):
         tau (int, optional): Number of quadrature points. Defaults to 7.
 
     Returns:
-        ndarray: 1/e_ijab
+        tuple: grids, weights
     """
 
     def get_log_grids(interval, ngrid):
@@ -117,24 +117,7 @@ def get_weights_haser1992(eia, tau=7):
 
     ts = opt_result.x
     ws = get_ws(ts, interval=interval, ngrid=ngrid)
-    return ws, ts
-
-
-def laplace_transform(denom, weights, grids):
-    """Laplace transform of 1/x.
-    If x < 0, then 1/x ~= - sum_i weights[i] * exp(grids[i] * x)
-
-    Args:
-        denom (ndarray): denominator in 1/x
-        weights (1d array): weights for each grid point
-        grids (1d array): grid points
-
-    Returns:
-        ndarray: evaluated 1/x, with same shape as denom
-    """
-    return -np.sum(
-        [w * np.exp(t * denom) for t, w in zip(grids, weights)], axis=0
-    )
+    return ts, ws
 
 
 def kernel(
@@ -155,7 +138,7 @@ def kernel(
                           shape (Nmo,) for one kpt
         mo_coeff (list): a list of numpy.ndarray. Each array contains MO coefficients
                          of shape (Nao, Nmo) for one kpt
-        cos (float, optional): scaling coefficient for SOS-MP2. Defaults to 1.36.
+        cos (float, optional): scaling coefficient for SOS-MP2. Defaults to 1.36. Ref: Goldzak, Wang, Ye, and Berkelbach, J. Chem. Phys. 157, 174112 (2022)
         verbose (int, optional): level of verbosity. Defaults to logger.NOTE (=3).
         with_t2 (bool, optional): whether to compute t2 amplitudes. Defaults to False.
         method (int, optional): Laplace transform method to compute SOS-MP2 energy. Defaults to 3 (least square fit by Haser & Almlof).
@@ -225,9 +208,9 @@ def kernel(
     }
     print(f"\nLaplace method: {method_name[method]}\ntau: {tau}\n")
 
-    if method != 3:
+    if method not in [2, 3]:
         raise NotImplementedError(
-            f"Only method 3 ({method_name[method]}) is implemented."
+            f"Only method 2 ({method_name[2]}) and method 3 ({method_name[3]}) is implemented."
         )
 
     emp2_ss = emp2_os = 0.0
@@ -248,34 +231,73 @@ def kernel(
                 n0_ovp_jb = np.ix_(nonzero_opadding[kj], nonzero_vpadding[kb])
                 ejb[n0_ovp_jb] = (mo_e_o[kj][:, None] - mo_e_v[kb])[n0_ovp_jb]
 
-                # Get weights and grids for laplace transform
-                ws, ts = get_weights_haser1992(eia, tau)
-                # For each quad point t,
-                # M_PQ = L_ia^P.conj * L_ia^Q * exp((ei-ea)*t)
-                # N_PQ = L_jb^P.conj * L_jb^Q * exp((ej-eb)*t)
-                mtensor = (1.0 / nkpts) * np.array(
-                    [
-                        einsum(
-                            "Pia,Qia,ia->PQ",
-                            Lov[ki, ka].conj(),
-                            Lov[ki, ka],
-                            np.exp(eia * t),
-                        )
-                        for t in ts
-                    ]
-                )
-                ntensor = (1.0 / nkpts) * np.array(
-                    [
-                        einsum(
-                            "Pjb,Qjb,jb->PQ",
-                            Lov[kj, kb].conj(),
-                            Lov[kj, kb],
-                            np.exp(ejb * t),
-                        )
-                        for t in ts
-                    ]
-                )
-                emp2_os += -einsum("q,qPQ,qPQ", ws, mtensor, ntensor).real
+                if method == 2:
+                    # Get grids and weights for laplace transform
+                    ts, ws, alpha = get_grids_weights_ayala2001(eia, tau)
+                    # For each quad point t,
+                    # M_PQ = L_ia^P.conj * L_ia^Q * t^((ea-ei)/alpha)
+                    # N_PQ = L_jb^P.conj * L_jb^Q * t^((eb-ej)/alpha)
+                    mtensor = (1.0 / nkpts) * np.array(
+                        [
+                            einsum(
+                                "Pia,Qia,ia->PQ",
+                                Lov[ki, ka].conj(),
+                                Lov[ki, ka],
+                                np.power(t, -eia / alpha),
+                            )
+                            for t in ts
+                        ]
+                    )
+                    ntensor = (1.0 / nkpts) * np.array(
+                        [
+                            einsum(
+                                "Pjb,Qjb,jb->PQ",
+                                Lov[kj, kb].conj(),
+                                Lov[kj, kb],
+                                np.power(t, -ejb / alpha),
+                            )
+                            for t in ts
+                        ]
+                    )
+                    emp2_os += (
+                        -1.0
+                        / (2.0 * alpha)
+                        * einsum(
+                            "q,qPQ,qPQ,q", ws, mtensor, ntensor, 1.0 / ts
+                        ).real
+                    )
+
+                elif method == 3:
+                    # Get grids and weights for laplace transform
+                    ts, ws = get_grids_weights_haser1992(eia, tau)
+                    # For each quad point t,
+                    # M_PQ = L_ia^P.conj * L_ia^Q * exp((ei-ea)*t)
+                    # N_PQ = L_jb^P.conj * L_jb^Q * exp((ej-eb)*t)
+                    mtensor = (1.0 / nkpts) * np.array(
+                        [
+                            einsum(
+                                "Pia,Qia,ia->PQ",
+                                Lov[ki, ka].conj(),
+                                Lov[ki, ka],
+                                np.exp(eia * t),
+                            )
+                            for t in ts
+                        ]
+                    )
+                    ntensor = (1.0 / nkpts) * np.array(
+                        [
+                            einsum(
+                                "Pjb,Qjb,jb->PQ",
+                                Lov[kj, kb].conj(),
+                                Lov[kj, kb],
+                                np.exp(ejb * t),
+                            )
+                            for t in ts
+                        ]
+                    )
+                    emp2_os += -einsum("q,qPQ,qPQ", ws, mtensor, ntensor).real
+                else:
+                    raise NotImplementedError
 
     log.timer("KMP2", *cput0)
 
@@ -326,6 +348,7 @@ class LaplaceSOSKMP2(kmp2.KMP2):
     def _finalize(self):
         """Hook for dumping results and clearing up the object"""
         log = logger.new_logger(self)
+        log.note("E(Laplace-SOS-KMP2) = %.15g", self.e_corr)
         log.info("E_corr(oppo-spin) = %.15g", self.e_corr_os)
         return self
 
