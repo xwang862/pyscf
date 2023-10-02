@@ -2171,9 +2171,8 @@ class EOMEESinglet(EOMEE):
     matvec = eeccsd_matvec_singlet
     get_init_guess = get_init_guess_cis
     cis = cis_easy
-    # get_absorption_spectrum = optical_absorption_singlet_approx1
 
-    def get_absorption_spectrum(self, scan, eta, approx=1, **kwargs):
+    def get_absorption_spectrum(self, scan, eta, approx=0, **kwargs):
         if approx == 0:
             return optical_absorption_singlet(self, scan, eta, **kwargs)
         elif approx == 1:
