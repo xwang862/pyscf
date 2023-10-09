@@ -53,9 +53,9 @@ def orbital_coeff(mol, fout, mo_coeff, spin='Alpha', symm=None, ene=None,
                                       mo_coeff, tol=1e-5)
             except ValueError as e:
                 logger.warn(mol, str(e))
-    if ene is None:
+    if ene is None or len(ene) != nmo:
         ene = numpy.arange(nmo)
-    assert(spin == 'Alpha' or spin == 'Beta')
+    assert (spin == 'Alpha' or spin == 'Beta')
     if occ is None:
         occ = numpy.zeros(nmo)
         neleca, nelecb = mol.nelec
@@ -135,14 +135,17 @@ def from_chkfile(filename, chkfile, key='scf/mo_coeff', ignore_h=IGNORE_H):
                 ene = dat['mo_energy']
             else:
                 ene = None
-            occ = dat['mo_occ']
+            if 'mo_occ' in dat:
+                occ = dat['mo_occ']
+            else:
+                occ = None
             mo = dat['mo_coeff']
 
         if isinstance(ene, str) and ene == 'None':
             ene = None
         if isinstance(ene, str) and occ == 'None':
             occ = None
-        if occ.ndim == 2:
+        if occ is not None and occ.ndim == 2:
             orbital_coeff(mol, f, mo[0], spin='Alpha', ene=ene[0], occ=occ[0],
                           ignore_h=ignore_h)
             orbital_coeff(mol, f, mo[1], spin='Beta', ene=ene[1], occ=occ[1],
@@ -300,7 +303,7 @@ def _parse_core(lines, envs):
             mol.ecp[atoms[atm_id][0]] = [nelec_core, []]
 
     if mol.ecp:
-        sys.stderr.write('\nECP were dectected in the molden file.\n'
+        sys.stderr.write('\nECP were detected in the molden file.\n'
                          'Note Molden format does not support ECP data. '
                          'ECP information was lost when saving to molden format.\n\n')
     return mol.ecp
@@ -438,7 +441,7 @@ def header(mol, fout, ignore_h=IGNORE_H):
     fout.write('\n')
 
 def order_ao_index(mol):
-    # reorder d,f,g fucntion to
+    # reorder d,f,g function to
     #  5D: D 0, D+1, D-1, D+2, D-2
     #  6D: xx, yy, zz, xy, xz, yz
     #

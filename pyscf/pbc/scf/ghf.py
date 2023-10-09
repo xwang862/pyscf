@@ -22,6 +22,7 @@ Generalized Hartree-Fock for periodic systems at a single k-point
 
 import numpy as np
 import scipy.linalg
+from pyscf.lib import logger
 import pyscf.scf.ghf as mol_ghf
 from pyscf.pbc.scf import hf as pbchf
 from pyscf.pbc.scf import addons
@@ -38,31 +39,59 @@ def get_jk(mf, cell=None, dm=None, hermi=0, kpt=None, kpts_band=None,
     nso = dm.shape[-1]
     nao = nso // 2
     dms = dm.reshape(-1,nso,nso)
-    n_dm = dms.shape[0]
+    if kpts_band is None:  # kpts_band is set to kpt
+        nband = 1
+        jk_shape = dm.shape
+    elif getattr(kpts_band, 'ndim', None) == 1:  # single kpt_band
+        nband = 1
+        jk_shape = dm.shape
+    elif dm.ndim == 2:
+        nband = len(kpts_band)
+        jk_shape = (nband, nso, nso)
+    else:
+        nband = len(kpts_band)
+        jk_shape = (dm.shape[0], nband, nso, nso)
 
     dmaa = dms[:,:nao,:nao]
     dmab = dms[:,nao:,:nao]
     dmbb = dms[:,nao:,nao:]
-    dms = np.vstack((dmaa, dmbb, dmab))
+    if with_k:
+        if hermi:
+            dms = np.stack((dmaa, dmbb, dmab))
+        else:
+            dmba = dms[:,nao:,:nao]
+            dms = np.stack((dmaa, dmbb, dmab, dmba))
+        # Note the off-diagonal block breaks the hermitian
+        _hermi = 0
+    else:
+        dms = np.stack((dmaa, dmbb))
+        _hermi = 1
+    nblocks, n_dm = dms.shape[:2]
+    dms = dms.reshape(nblocks*n_dm, nao, nao)
 
-    j1, k1 = mf.with_df.get_jk(dms, hermi, kpt, kpts_band, with_j, with_k,
+    if mf.rsjk:
+        logger.warn(mf, 'RSJK does not support GHF')
+    j1, k1 = mf.with_df.get_jk(dms, _hermi, kpt, kpts_band, with_j, with_k,
                                exxdiv=mf.exxdiv)
-    j1 = j1.reshape(3,n_dm,nao,nao)
-    k1 = k1.reshape(3,n_dm,nao,nao)
 
     vj = vk = None
     if with_j:
-        vj = np.zeros((n_dm,nso,nso), j1.dtype)
+        j1 = j1.reshape(nblocks,n_dm*nband,nao,nao)
+        vj = np.zeros((n_dm*nband,nso,nso), j1.dtype)
         vj[:,:nao,:nao] = vj[:,nao:,nao:] = j1[0] + j1[1]
-        vj = vj.reshape(dm.shape)
+        vj = vj.reshape(jk_shape)
 
     if with_k:
-        vk = np.zeros((n_dm,nso,nso), k1.dtype)
+        k1 = k1.reshape(nblocks,n_dm*nband,nao,nao)
+        vk = np.zeros((n_dm*nband,nso,nso), k1.dtype)
         vk[:,:nao,:nao] = k1[0]
         vk[:,nao:,nao:] = k1[1]
         vk[:,:nao,nao:] = k1[2]
-        vk[:,nao:,:nao] = k1[2].transpose(0,2,1).conj()
-        vk = vk.reshape(dm.shape)
+        if hermi:
+            vk[:,nao:,:nao] = k1[2].conj().transpose(0,2,1)
+        else:
+            vk[:,nao:,:nao] = k1[3]
+        vk = vk.reshape(jk_shape)
 
     return vj, vk
 
@@ -108,19 +137,22 @@ class GHF(pbchf.SCF, mol_ghf.GHF):
         '''
         raise NotImplementedError
 
-    def get_init_guess(self, cell=None, key='minao'):
-        if cell is None: cell = self.cell
-        dm = mol_ghf.GHF.get_init_guess(self, cell, key)
-        dm = pbchf.normalize_dm_(self, dm)
-        return dm
+    get_init_guess = pbchf.RHF.get_init_guess
+    init_guess_by_chkfile = mol_ghf.GHF.init_guess_by_chkfile
+    init_guess_by_minao = mol_ghf.GHF.init_guess_by_minao
+    init_guess_by_atom = mol_ghf.GHF.init_guess_by_atom
+    init_guess_by_huckel = mol_ghf.GHF.init_guess_by_huckel
 
     def convert_from_(self, mf):
         '''Convert given mean-field object to RHF/ROHF'''
         addons.convert_to_ghf(mf, self)
         return self
 
-    stability = None
-    nuc_grad_method = None
+    def x2c1e(self):
+        '''X2C with spin-orbit coupling effects in spin-orbital basis'''
+        from pyscf.pbc.x2c.x2c1e import x2c1e_gscf
+        return x2c1e_gscf(self)
+    x2c = sfx2c1e = x2c1e
 
 
 if __name__ == '__main__':

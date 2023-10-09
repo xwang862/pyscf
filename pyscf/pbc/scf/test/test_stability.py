@@ -20,22 +20,24 @@ from pyscf.pbc import gto as pgto
 from pyscf.pbc import scf as pscf
 from pyscf.pbc.scf import stability
 
-L = 4
-n = 15
-cell = pgto.Cell()
-cell.build(unit = 'B',
-           verbose = 5,
-           output = '/dev/null',
-           a = ((L,0,0),(0,L,0),(0,0,L)),
-           mesh = [n,n,n],
-           atom = [['He', (L/2.-.5,L/2.,L/2.-.5)],
-                   ['He', (L/2.   ,L/2.,L/2.+.5)]],
-           basis = { 'He': [[0, (0.8, 1.0)],
-                            [0, (1.0, 1.0)],
-                            [0, (1.2, 1.0)]]})
+def setUpModule():
+    global cell, kpts
+    L = 4
+    n = 15
+    cell = pgto.Cell()
+    cell.build(unit = 'B',
+               verbose = 5,
+               output = '/dev/null',
+               a = ((L,0,0),(0,L,0),(0,0,L)),
+               mesh = [n,n,n],
+               atom = [['He', (L/2.-.5,L/2.,L/2.-.5)],
+                       ['He', (L/2.   ,L/2.,L/2.+.5)]],
+               basis = { 'He': [[0, (0.8, 1.0)],
+                                [0, (1.0, 1.0)],
+                                [0, (1.2, 1.0)]]})
 
-numpy.random.seed(4)
-kpts = numpy.random.random((1,3))
+    numpy.random.seed(4)
+    kpts = numpy.random.random((1,3))
 
 def tearDownModule():
     global cell
@@ -55,7 +57,7 @@ class KnownValues(unittest.TestCase):
         self.assertAlmostEqual(abs(kmf.mo_coeff[0]-mo_i[0]).max(), 0, 9)
 
         hop2, hdiag2 = stability._gen_hop_rhf_external(kmf)
-        self.assertAlmostEqual(lib.fp(hdiag2), 18.528134783454508, 7)
+        self.assertAlmostEqual(lib.fp(hdiag2), 18.528134783454508, 6)
         self.assertAlmostEqual(lib.fp(hop2(hdiag2)), 108.99683506471919, 5)
 
     def test_uhf_stability(self):

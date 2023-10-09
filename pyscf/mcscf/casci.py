@@ -100,6 +100,7 @@ def analyze(casscf, mo_coeff=None, ci=None, verbose=None,
         dm1a = dm1b + reduce(numpy.dot, (mocas, casdm1a, mocas.conj().T))
         dm1b += reduce(numpy.dot, (mocas, casdm1b, mocas.conj().T))
         dm1 = dm1a + dm1b
+        spin_dm1 = dm1a - dm1b
         if log.verbose >= logger.DEBUG2:
             log.info('alpha density matrix (on AO)')
             dump_mat.dump_tri(log.stdout, dm1a, label, **kwargs)
@@ -111,6 +112,7 @@ def analyze(casscf, mo_coeff=None, ci=None, verbose=None,
                 reduce(numpy.dot, (mocas, casdm1, mocas.conj().T)))
         dm1b = None
         dm1 = dm1a
+        spin_dm1 = None
 
     if log.verbose >= logger.INFO:
         ovlp_ao = casscf._scf.get_ovlp()
@@ -156,18 +158,32 @@ def analyze(casscf, mo_coeff=None, ci=None, verbose=None,
                 for i, civec in enumerate(ci):
                     log.info('  [alpha occ-orbitals] [beta occ-orbitals]  state %-3d CI coefficient', i)
                     for c,ia,ib in res[i]:
-                        log.info('  %-20s %-30s %.12f', ia, ib, c)
+                        log.info('  %-20s %-30s % .12f', ia, ib, c)
             else:
                 log.info('  [alpha occ-orbitals] [beta occ-orbitals]            CI coefficient')
                 res = casscf.fcisolver.large_ci(ci, casscf.ncas, casscf.nelecas,
                                                 large_ci_tol, return_strs=False)
                 for c,ia,ib in res:
-                    log.info('  %-20s %-30s %.12f', ia, ib, c)
+                    log.info('  %-20s %-30s % .12f', ia, ib, c)
 
         if with_meta_lowdin:
             casscf._scf.mulliken_meta(casscf.mol, dm1, s=ovlp_ao, verbose=log)
         else:
             casscf._scf.mulliken_pop(casscf.mol, dm1, s=ovlp_ao, verbose=log)
+        if spin_dm1 is not None:
+            if with_meta_lowdin:
+                log.info('Mulliken spin population analysis on meta-Lowdin AOs:')
+                spin_pop, spin_chg = casscf._scf.mulliken_meta(casscf.mol, spin_dm1, s=ovlp_ao, verbose=log)
+            else:
+                log.info('Mulliken spin population analysis on AOs:')
+                spin_pop, spin_chg = casscf._scf.mulliken_pop(casscf.mol, spin_dm1, s=ovlp_ao, verbose=log)
+            for i, s in enumerate(label):
+                log.info('spop of %-12s %10.5f', s, spin_pop[i])
+            spin_chg = casscf.mol.atom_charges() - spin_chg
+            log.note('Mulliken atomic spins:')
+            for ia in range(casscf.mol.natm):
+                symb = casscf.mol.atom_symbol(ia)
+                log.note('spin of  %d%s =   %10.5f', ia, symb, spin_chg[ia])
     return dm1a, dm1b
 
 def get_fock(mc, mo_coeff=None, ci=None, eris=None, casdm1=None, verbose=None):
@@ -238,7 +254,7 @@ def get_fock(mc, mo_coeff=None, ci=None, eris=None, casdm1=None, verbose=None):
 
 def cas_natorb(mc, mo_coeff=None, ci=None, eris=None, sort=False,
                casdm1=None, verbose=None, with_meta_lowdin=WITH_META_LOWDIN):
-    '''Transform active orbitals to natrual orbitals, and update the CI wfn
+    '''Transform active orbitals to natural orbitals, and update the CI wfn
     accordingly
 
     Args:
@@ -266,8 +282,17 @@ def cas_natorb(mc, mo_coeff=None, ci=None, eris=None, sort=False,
     nmo = mo_coeff.shape[1]
     if casdm1 is None:
         casdm1 = mc.fcisolver.make_rdm1(ci, ncas, nelecas)
+    if getattr(mo_coeff, 'orbsym', None) is not None:
+        orbsym = numpy.copy(mo_coeff.orbsym)
+    else:
+        orbsym = numpy.zeros(mo_coeff.shape[1], dtype=int)
+    if getattr(mc, 'extrasym', None) is not None:
+        orbsym_extra = numpy.asarray([str(i1) + str(i2)
+                                      for i1, i2 in zip(orbsym, mc.extrasym)])
+    else:
+        orbsym_extra = orbsym
     # orbital symmetry is reserved in this _eig call
-    cas_occ, ucas = mc._eig(-casdm1, ncore, nocc)
+    cas_occ, ucas = mc._eig(-casdm1, ncore, nocc, orbsym_extra[ncore:nocc])
     if sort:
         casorb_idx = numpy.argsort(cas_occ.round(9), kind='mergesort')
         cas_occ = cas_occ[casorb_idx]
@@ -281,7 +306,6 @@ def cas_natorb(mc, mo_coeff=None, ci=None, eris=None, sort=False,
     mo_coeff1 = mo_coeff.copy()
     mo_coeff1[:,ncore:nocc] = numpy.dot(mo_coeff[:,ncore:nocc], ucas)
     if getattr(mo_coeff, 'orbsym', None) is not None:
-        orbsym = numpy.copy(mo_coeff.orbsym)
         if sort:
             orbsym[ncore:nocc] = orbsym[ncore:nocc][casorb_idx]
         mo_coeff1 = lib.tag_array(mo_coeff1, orbsym=orbsym)
@@ -320,10 +344,10 @@ def cas_natorb(mc, mo_coeff=None, ci=None, eris=None, sort=False,
     # Rotate CI according to the unitary coefficients ucas if applicable
     fcivec = None
     if getattr(mc.fcisolver, 'transform_ci_for_orbital_rotation', None):
-        if isinstance(ci, numpy.ndarray):
+        if isinstance(ci, (fci.FCIvector, fci.SCIvector, numpy.ndarray)):
             fcivec = mc.fcisolver.transform_ci_for_orbital_rotation(ci, ncas, nelecas, ucas)
         elif (isinstance(ci, (list, tuple)) and
-              all(isinstance(x[0], numpy.ndarray) for x in ci)):
+              all(isinstance(x[0], (fci.FCIvector, fci.SCIvector, numpy.ndarray)) for x in ci)):
             fcivec = [mc.fcisolver.transform_ci_for_orbital_rotation(x, ncas, nelecas, ucas)
                       for x in ci]
     elif getattr(mc.fcisolver, 'states_transform_ci_for_orbital_rotation', None):
@@ -387,7 +411,7 @@ def cas_natorb(mc, mo_coeff=None, ci=None, eris=None, sort=False,
                                    mc._scf.get_ovlp(), mc._scf.mo_coeff))
             idx = numpy.argwhere(abs(s)>.4)
             for i,j in idx:
-                log.info('<CAS-nat-orb|mo-hf>  %d  %d  %12.8f',
+                log.info('<CAS-nat-orb|mo-hf>  %-5d  %-5d  % 12.8f',
                          ncore+i+1, j+1, s[i,j])
     return mo_coeff1, fcivec, mo_occ
 
@@ -488,13 +512,19 @@ def canonicalize(mc, mo_coeff=None, ci=None, eris=None, sort=False,
         orbsym = mo_coeff.orbsym
     else:
         orbsym = numpy.zeros(nmo, dtype=int)
+    extrasym = getattr(mc, 'extrasym', None)
+    if extrasym is not None:
+        orbsym_extra = numpy.asarray([str(i1) + str(i2)
+                                      for i1, i2 in zip(orbsym, extrasym)])
+    else:
+        orbsym_extra = orbsym
 
     def _diag_subfock_(idx):
         if idx.size > 1:
             c = mo_coeff1[:,idx]
             fock = reduce(numpy.dot, (c.conj().T, fock_ao, c))
             # note the last argument orbysm is needed by mc1step_symm._eig
-            w, c = mc._eig(fock, None, None, orbsym[idx])
+            w, c = mc._eig(fock, None, None, orbsym_extra[idx])
 
             if sort:
                 sub_order = numpy.argsort(w.round(9), kind='mergesort')
@@ -626,6 +656,7 @@ def as_scanner(mc):
             # may be created for mc separately, e.g. when mcscf.approx_hessian is
             # called. For safety, the code below explicitly resets these
             # properties.
+            self.reset (mol)
             for key in ('with_df', 'with_x2c', 'with_solvent', 'with_dftd3'):
                 sub_mod = getattr(self, key, None)
                 if sub_mod:
@@ -765,11 +796,13 @@ class CASCI(lib.StreamObject):
         self.fcisolver = fci.solver(mol, singlet, symm=False)
 # CI solver parameters are set in fcisolver object
         self.fcisolver.lindep = getattr(__config__,
-                                        'mcscf_casci_CASCI_fcisolver_lindep', 1e-10)
+                                        'mcscf_casci_CASCI_fcisolver_lindep', 1e-12)
         self.fcisolver.max_cycle = getattr(__config__,
                                            'mcscf_casci_CASCI_fcisolver_max_cycle', 200)
         self.fcisolver.conv_tol = getattr(__config__,
                                           'mcscf_casci_CASCI_fcisolver_conv_tol', 1e-8)
+        self.frozen = None
+        self.extrasym = None
 
 ##################################################
 # don't modify the following attributes, they are not input options
@@ -808,6 +841,10 @@ class CASCI(lib.StreamObject):
         nvir = self.mo_coeff.shape[1] - ncore - ncas
         log.info('CAS (%de+%de, %do), ncore = %d, nvir = %d',
                  self.nelecas[0], self.nelecas[1], ncas, ncore, nvir)
+        if self.frozen is not None:
+            log.info('frozen orbitals %s', str(self.frozen))
+        if self.extrasym is not None:
+            log.info('extra symmetry labels:\n%s', str(self.extrasym))
         log.info('natorb = %s', self.natorb)
         log.info('canonicalization = %s', self.canonicalization)
         log.info('sorting_mo_energy = %s', self.sorting_mo_energy)
@@ -902,7 +939,7 @@ To enable the solvent model for CASCI, the following code needs to be called
         elif mo_coeff.shape[1] != ncas:
             mo_coeff = mo_coeff[:,ncore:nocc]
 
-        if self._scf._eri is not None:
+        if hasattr(self._scf, '_eri') and self._scf._eri is not None:
             eri = ao2mo.full(self._scf._eri, mo_coeff,
                              max_memory=self.max_memory)
         else:
@@ -973,20 +1010,29 @@ To enable the solvent model for CASCI, the following code needs to be called
         log = logger.Logger(self.stdout, self.verbose)
         if log.verbose >= logger.NOTE and getattr(self.fcisolver, 'spin_square', None):
             if isinstance(self.e_cas, (float, numpy.number)):
-                ss = self.fcisolver.spin_square(self.ci, self.ncas, self.nelecas)
-                log.note('CASCI E = %.15g  E(CI) = %.15g  S^2 = %.7f',
-                         self.e_tot, self.e_cas, ss[0])
+                try:
+                    ss = self.fcisolver.spin_square(self.ci, self.ncas, self.nelecas)
+                    log.note('CASCI E = %#.15g  E(CI) = %#.15g  S^2 = %.7f',
+                             self.e_tot, self.e_cas, ss[0])
+                except NotImplementedError:
+                    log.note('CASCI E = %#.15g  E(CI) = %#.15g',
+                             self.e_tot, self.e_cas)
             else:
                 for i, e in enumerate(self.e_cas):
-                    ss = self.fcisolver.spin_square(self.ci[i], self.ncas, self.nelecas)
-                    log.note('CASCI state %d  E = %.15g  E(CI) = %.15g  S^2 = %.7f',
-                             i, self.e_tot[i], e, ss[0])
+                    try:
+                        ss = self.fcisolver.spin_square(self.ci[i], self.ncas, self.nelecas)
+                        log.note('CASCI state %3d  E = %#.15g  E(CI) = %#.15g  S^2 = %.7f',
+                                 i, self.e_tot[i], e, ss[0])
+                    except NotImplementedError:
+                        log.note('CASCI state %3d  E = %#.15g  E(CI) = %#.15g',
+                                 i, self.e_tot[i], e)
+
         else:
             if isinstance(self.e_cas, (float, numpy.number)):
-                log.note('CASCI E = %.15g  E(CI) = %.15g', self.e_tot, self.e_cas)
+                log.note('CASCI E = %#.15g  E(CI) = %#.15g', self.e_tot, self.e_cas)
             else:
                 for i, e in enumerate(self.e_cas):
-                    log.note('CASCI state %d  E = %.15g  E(CI) = %.15g',
+                    log.note('CASCI state %3d  E = %#.15g  E(CI) = %#.15g',
                              i, self.e_tot[i], e)
         return self
 
@@ -1112,7 +1158,7 @@ To enable the solvent model for CASCI, the following code needs to be called
 scf.hf.RHF.CASCI = scf.rohf.ROHF.CASCI = lib.class_as_method(CASCI)
 scf.uhf.UHF.CASCI = None
 
-del(WITH_META_LOWDIN, LARGE_CI_TOL, PENALTY)
+del (WITH_META_LOWDIN, LARGE_CI_TOL, PENALTY)
 
 
 if __name__ == '__main__':

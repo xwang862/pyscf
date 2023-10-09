@@ -56,7 +56,8 @@ def make_rdm1(mo_coeff_kpts, mo_occ_kpts, **kwargs):
         return [np.dot(mos[k]*occs[k], mos[k].T.conj()) for k in range(nkpts)]
     dm_kpts =(make_dm(mo_coeff_kpts[0], mo_occ_kpts[0]) +
               make_dm(mo_coeff_kpts[1], mo_occ_kpts[1]))
-    return lib.asarray(dm_kpts).reshape(2,nkpts,nao,nao)
+    dm = lib.asarray(dm_kpts).reshape(2,nkpts,nao,nao)
+    return lib.tag_array(dm, mo_coeff=mo_coeff_kpts, mo_occ=mo_occ_kpts)
 
 def get_fock(mf, h1e=None, s1e=None, vhf=None, dm=None, cycle=-1, diis=None,
              diis_start_cycle=None, level_shift_factor=None, damp_factor=None):
@@ -108,8 +109,8 @@ def get_fermi(mf, mo_energy_kpts=None, mo_occ_kpts=None):
     if mo_occ_kpts is None: mo_occ_kpts = mf.mo_occ
 
     # mo_energy_kpts and mo_occ_kpts are k-point UHF quantities
-    assert(mo_energy_kpts[0][0].ndim == 1)
-    assert(mo_occ_kpts[0][0].ndim == 1)
+    assert (mo_energy_kpts[0][0].ndim == 1)
+    assert (mo_occ_kpts[0][0].ndim == 1)
 
     nocca = sum(mo_occ.sum() for mo_occ in mo_occ_kpts[0])
     noccb = sum(mo_occ.sum() for mo_occ in mo_occ_kpts[1])
@@ -325,22 +326,14 @@ def init_guess_by_chkfile(cell, chkfile_name, project=None, kpts=None):
                 mo[k] /= np.sqrt(norm)
         return mo
 
-    if kpts.shape == chk_kpts.shape and np.allclose(kpts, chk_kpts):
-        def makedm(mos, occs):
-            moa, mob = mos
-            mos =([fproj(mo, None) for mo in moa],
-                  [fproj(mo, None) for mo in mob])
-            return make_rdm1(mos, occs)
-    else:
-        def makedm(mos, occs):
-            where = [np.argmin(lib.norm(chk_kpts-kpt, axis=1)) for kpt in kpts]
-            moa, mob = mos
-            occa, occb = occs
-            dkpts = [chk_kpts[w]-kpts[i] for i,w in enumerate(where)]
-            mos = (fproj([moa[w] for w in where], dkpts),
-                   fproj([mob[w] for w in where], dkpts))
-            occs = ([occa[i] for i in where], [occb[i] for i in where])
-            return make_rdm1(mos, occs)
+    def makedm(mos, occs):
+        moa, mob = mos
+        mos = (fproj(moa, chk_kpts), fproj(mob, chk_kpts))
+        dm = make_rdm1(mos, occs)
+        if kpts.shape != chk_kpts.shape or not np.allclose(kpts, chk_kpts):
+            dm = [addons.project_dm_k2k(cell, dm[0], chk_kpts, kpts),
+                  addons.project_dm_k2k(cell, dm[1], chk_kpts, kpts)]
+        return np.asarray(dm)
 
     if getattr(mo[0], 'ndim', None) == 2:  # KRHF
         mo_occa = [(occ>1e-8).astype(np.double) for occ in mo_occ]
@@ -357,7 +350,7 @@ def init_guess_by_chkfile(cell, chkfile_name, project=None, kpts=None):
 
 def dip_moment(cell, dm_kpts, unit='Debye', verbose=logger.NOTE,
                grids=None, rho=None, kpts=np.zeros((1,3))):
-    ''' Dipole moment in the unit cell.
+    ''' Dipole moment in the cell.
 
     Args:
          cell : an instance of :class:`Cell`
@@ -376,7 +369,6 @@ get_rho = khf.get_rho
 class KUHF(khf.KSCF, pbcuhf.UHF):
     '''UHF class with k-point sampling.
     '''
-    conv_tol = getattr(__config__, 'pbc_scf_KSCF_conv_tol', 1e-7)
     conv_tol_grad = getattr(__config__, 'pbc_scf_KSCF_conv_tol_grad', None)
     direct_scf = getattr(__config__, 'pbc_scf_SCF_direct_scf', True)
 
@@ -408,46 +400,21 @@ class KUHF(khf.KSCF, pbcuhf.UHF):
 
     def dump_flags(self, verbose=None):
         khf.KSCF.dump_flags(self, verbose)
-        logger.info(self, 'number of electrons per unit cell  '
+        logger.info(self, 'number of electrons per cell  '
                     'alpha = %d beta = %d', *self.nelec)
         return self
 
     def get_init_guess(self, cell=None, key='minao'):
-        if cell is None:
-            cell = self.cell
-        dm_kpts = None
-        key = key.lower()
-        if key == '1e' or key == 'hcore':
-            dm_kpts = self.init_guess_by_1e(cell)
-        elif getattr(cell, 'natm', 0) == 0:
-            logger.info(self, 'No atom found in cell. Use 1e initial guess')
-            dm_kpts = self.init_guess_by_1e(cell)
-        elif key == 'atom':
-            dm = self.init_guess_by_atom(cell)
-        elif key[:3] == 'chk':
-            try:
-                dm_kpts = self.from_chk()
-            except (IOError, KeyError):
-                logger.warn(self, 'Fail to read %s. Use MINAO initial guess',
-                            self.chkfile)
-                dm = self.init_guess_by_minao(cell)
-        else:
-            dm = self.init_guess_by_minao(cell)
-
-        if dm_kpts is None:
-            nkpts = len(self.kpts)
+        dm_kpts = khf.KSCF.get_init_guess(self, cell, key)
+        assert dm_kpts.shape[0] == 2
+        nkpts = len(self.kpts)
+        if dm_kpts.ndim != 4:
             # dm[spin,nao,nao] at gamma point -> dm_kpts[spin,nkpts,nao,nao]
-            dm_kpts = np.repeat(dm[:,None,:,:], nkpts, axis=1)
-            dm_kpts[0,:] *= 1.01
-            dm_kpts[1,:] *= 0.99  # To slightly break spin symmetry
-            assert dm_kpts.shape[0]==2
+            dm_kpts = np.repeat(dm_kpts[:,None,:,:], nkpts, axis=1)
 
         ne = np.einsum('xkij,kji->x', dm_kpts, self.get_ovlp(cell)).real
-        # FIXME: consider the fractional num_electron or not? This maybe
-        # relates to the charged system.
-        nkpts = len(self.kpts)
         nelec = np.asarray(self.nelec)
-        if np.any(abs(ne - nelec) > 1e-7*nkpts):
+        if np.any(abs(ne - nelec) > 0.01*nkpts):
             logger.debug(self, 'Big error detected in the electron number '
                          'of initial guess density matrix (Ne/cell = %g)!\n'
                          '  This can cause huge error in Fock matrix and '
@@ -461,29 +428,20 @@ class KUHF(khf.KSCF, pbcuhf.UHF):
     get_fermi = get_fermi
     get_occ = get_occ
     energy_elec = energy_elec
-
     get_rho = get_rho
 
     def get_veff(self, cell=None, dm_kpts=None, dm_last=0, vhf_last=0, hermi=1,
                  kpts=None, kpts_band=None):
         if dm_kpts is None:
             dm_kpts = self.make_rdm1()
-        if self.rsjk and self.direct_scf:
-            ddm = dm_kpts - dm_last
-            vj, vk = self.get_jk(cell, ddm, hermi, kpts, kpts_band)
-            vhf = vj[0] + vj[1] - vk
-            vhf += vhf_last
-        else:
-            vj, vk = self.get_jk(cell, dm_kpts, hermi, kpts, kpts_band)
-            vhf = vj[0] + vj[1] - vk
+        vj, vk = self.get_jk(cell, dm_kpts, hermi, kpts, kpts_band)
+        vhf = vj[0] + vj[1] - vk
         return vhf
-
 
     def analyze(self, verbose=None, with_meta_lowdin=WITH_META_LOWDIN,
                 **kwargs):
         if verbose is None: verbose = self.verbose
         return khf.analyze(self, verbose, with_meta_lowdin, **kwargs)
-
 
     def get_grad(self, mo_coeff_kpts, mo_occ_kpts, fock=None):
         if fock is None:
@@ -496,7 +454,7 @@ class KUHF(khf.KSCF, pbcuhf.UHF):
             g = reduce(np.dot, (mo[:,viridx].T.conj(), fock, mo[:,occidx]))
             return g.ravel()
 
-        nkpts = len(self.kpts)
+        nkpts = len(mo_occ_kpts[0])
         grad_kpts = [grad(mo_coeff_kpts[0][k], mo_occ_kpts[0][k], fock[0][k])
                      for k in range(nkpts)]
         grad_kpts+= [grad(mo_coeff_kpts[1][k], mo_occ_kpts[1][k], fock[1][k])
@@ -550,6 +508,7 @@ class KUHF(khf.KSCF, pbcuhf.UHF):
     init_guess_by_minao  = pbcuhf.UHF.init_guess_by_minao
     init_guess_by_atom   = pbcuhf.UHF.init_guess_by_atom
     init_guess_by_huckel = pbcuhf.UHF.init_guess_by_huckel
+    init_guess_by_mod_huckel = pbcuhf.UHF.init_guess_by_mod_huckel
 
     @lib.with_doc(mulliken_meta.__doc__)
     def mulliken_meta(self, cell=None, dm=None, verbose=logger.DEBUG,
@@ -616,7 +575,7 @@ class KUHF(khf.KSCF, pbcuhf.UHF):
         from pyscf.pbc.grad import kuhf
         return kuhf.Gradients(self)
 
-del(WITH_META_LOWDIN, PRE_ORTH_METHOD)
+del (WITH_META_LOWDIN, PRE_ORTH_METHOD)
 
 
 if __name__ == '__main__':

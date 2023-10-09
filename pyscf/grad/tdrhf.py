@@ -126,10 +126,11 @@ def grad_elec(td_grad, x_y, singlet=True, atmlst=None,
                                   dmxmy-dmxmy.T))
     vj = vj.reshape(-1,3,nao,nao)
     vk = vk.reshape(-1,3,nao,nao)
+    vhf1 = -vk
     if singlet:
-        vhf1 = vj * 2 - vk
+        vhf1 += vj * 2
     else:
-        vhf1 = numpy.vstack((vj[:2]*2-vk[:2], -vk[2:]))
+        vhf1[:2] += vj[:2]*2
     time1 = log.timer('2e AO integral derivatives', *time1)
 
     if atmlst is None:
@@ -155,6 +156,8 @@ def grad_elec(td_grad, x_y, singlet=True, atmlst=None,
         de[k] += numpy.einsum('xij,ij->x', vhf1[3,:,p0:p1], dmxmy[p0:p1,:]) * 2
         de[k] += numpy.einsum('xji,ij->x', vhf1[2,:,p0:p1], dmxpy[:,p0:p1]) * 2
         de[k] -= numpy.einsum('xji,ij->x', vhf1[3,:,p0:p1], dmxmy[:,p0:p1]) * 2
+
+        de[k] += td_grad.extra_force(ia, locals())
 
     log.timer('TDHF nuclear gradients', *time0)
     return de
@@ -197,10 +200,10 @@ def as_scanner(td_grad, state=1):
                 mol = mol_or_geom
             else:
                 mol = self.mol.set_geom_(mol_or_geom, inplace=False)
+            self.reset(mol)
 
             td_scanner = self.base
             td_scanner(mol)
-            self.mol = mol
 # TODO: Check root flip.  Maybe avoid the initial guess in TDHF otherwise
 # large error may be found in the excited states amplitudes
             de = self.kernel(state=state, **kwargs)
@@ -310,83 +313,3 @@ Grad = Gradients
 
 from pyscf import tdscf
 tdscf.rhf.TDA.Gradients = tdscf.rhf.TDHF.Gradients = lib.class_as_method(Gradients)
-
-
-if __name__ == '__main__':
-    from pyscf import gto
-    from pyscf import scf
-    from pyscf import tddft
-    mol = gto.Mole()
-    mol.verbose = 0
-    mol.output = None
-
-    mol.atom = [
-        ['H' , (0. , 0. , 1.804)],
-        ['F' , (0. , 0. , 0.)], ]
-    mol.unit = 'B'
-    mol.basis = '631g'
-    mol.build()
-
-    mf = scf.RHF(mol).run(conv_tol=1e-14)
-    td = tddft.TDA(mf)
-    td.nstates = 3
-    e, z = td.kernel()
-    tdg = td.Gradients()
-    #tdg.verbose = 5
-    g1 = tdg.kernel(z[0])
-    print(g1)
-    print(lib.fp(g1) - 0.18686561181358813)
-#[[ 0  0  -2.67023832e-01]
-# [ 0  0   2.67023832e-01]]
-    td_solver = td.as_scanner()
-    e1 = td_solver(mol.set_geom_('H 0 0 1.805; F 0 0 0', unit='B'))
-    e2 = td_solver(mol.set_geom_('H 0 0 1.803; F 0 0 0', unit='B'))
-    print(abs((e1[0]-e2[0])/.002 - g1[0,2]).max())
-
-    mol.set_geom_('H 0 0 1.804; F 0 0 0', unit='B')
-    td = tddft.TDDFT(mf)
-    td.nstates = 3
-    e, z = td.kernel()
-    tdg = td.Gradients()
-    g1 = tdg.kernel(state=1)
-    print(g1)
-    print(lib.fp(g1) - 0.18967687762609461)
-# [[ 0  0  -2.71041021e-01]
-#  [ 0  0   2.71041021e-01]]
-    td_solver = td.as_scanner()
-    e1 = td_solver(mol.set_geom_('H 0 0 1.805; F 0 0 0', unit='B'))
-    e2 = td_solver(mol.set_geom_('H 0 0 1.803; F 0 0 0', unit='B'))
-    print(abs((e1[0]-e2[0])/.002 - g1[0,2]).max())
-
-    mol.set_geom_('H 0 0 1.804; F 0 0 0', unit='B')
-    td = tddft.TDA(mf)
-    td.nstates = 3
-    td.singlet = False
-    e, z = td.kernel()
-    tdg = Gradients(td)
-    g1 = tdg.kernel(state=1)
-    print(g1)
-    print(lib.fp(g1) - 0.19667995802487931)
-# [[ 0  0  -2.81048403e-01]
-#  [ 0  0   2.81048403e-01]]
-    td_solver = td.as_scanner()
-    e1 = td_solver(mol.set_geom_('H 0 0 1.805; F 0 0 0', unit='B'))
-    e2 = td_solver(mol.set_geom_('H 0 0 1.803; F 0 0 0', unit='B'))
-    print(abs((e1[0]-e2[0])/.002 - g1[0,2]).max())
-
-    mol.set_geom_('H 0 0 1.804; F 0 0 0', unit='B')
-    td = tddft.TDDFT(mf)
-    td.nstates = 3
-    td.singlet = False
-    e, z = td.kernel()
-    tdg = Gradients(td)
-    g1 = tdg.kernel(state=1)
-    print(g1)
-    print(lib.fp(g1) - 0.20032088639558535)
-# [[ 0  0  -2.86250870e-01]
-#  [ 0  0   2.86250870e-01]]
-    td_solver = td.as_scanner()
-    e1 = td_solver(mol.set_geom_('H 0 0 1.805; F 0 0 0', unit='B'))
-    e2 = td_solver(mol.set_geom_('H 0 0 1.803; F 0 0 0', unit='B'))
-    print(abs((e1[0]-e2[0])/.002 - g1[0,2]).max())
-

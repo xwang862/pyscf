@@ -224,6 +224,7 @@ def as_scanner(grad_mp):
                 mol = mol_or_geom
             else:
                 mol = self.mol.set_geom_(mol_or_geom, inplace=False)
+            self.reset(mol)
 
             mp_scanner = self.base
             mp_scanner(mol, with_t2=True)
@@ -279,7 +280,7 @@ class Gradients(rhf_grad.GradientsMixin):
     def kernel(self, t2=None, atmlst=None, verbose=None):
         log = logger.new_logger(self, verbose)
         if t2 is None: t2 = self.base.t2
-        if t2 is None: t2 = self.base.kernel()
+        if t2 is None: t2 = self.base.kernel()[1]
         if atmlst is None:
             atmlst = self.atmlst
         else:
@@ -304,80 +305,3 @@ Grad = Gradients
 
 # Inject to RMP2 class
 mp2.MP2.Gradients = lib.class_as_method(Gradients)
-
-
-if __name__ == '__main__':
-    from pyscf import gto
-    from pyscf import scf
-
-    mol = gto.M(
-        atom = [
-            ["O" , (0. , 0.     , 0.)],
-            [1   , (0. ,-0.757  , 0.587)],
-            [1   , (0. , 0.757  , 0.587)]],
-        basis = '631g'
-    )
-    mf = scf.RHF(mol).run()
-    mp = mp2.MP2(mf).run()
-    g1 = Gradients(mp).kernel()
-# O    -0.0000000000    -0.0000000000     0.0089211366
-# H     0.0000000000     0.0222745046    -0.0044605683
-# H     0.0000000000    -0.0222745046    -0.0044605683
-    print(lib.finger(g1) - -0.035681171529705444)
-
-    mcs = mp.as_scanner()
-    mol.set_geom_([
-            ["O" , (0. , 0.     , 0.001)],
-            [1   , (0. ,-0.757  , 0.587)],
-            [1   , (0. , 0.757  , 0.587)]])
-    e1 = mcs(mol)
-    mol.set_geom_([
-            ["O" , (0. , 0.     ,-0.001)],
-            [1   , (0. ,-0.757  , 0.587)],
-            [1   , (0. , 0.757  , 0.587)]])
-    e2 = mcs(mol)
-    print(g1[0,2], (e1-e2)/0.002*lib.param.BOHR)
-
-    print('-----------------------------------')
-    mol = gto.M(
-        atom = [
-            ["O" , (0. , 0.     , 0.)],
-            [1   , (0. ,-0.757  , 0.587)],
-            [1   , (0. , 0.757  , 0.587)]],
-        basis = '631g'
-    )
-    mf = scf.RHF(mol).run()
-    mp = mp2.MP2(mf)
-    mp.frozen = [0,1,10,11,12]
-    mp.max_memory = 1
-    mp.kernel()
-    g1 = Gradients(mp).kernel()
-# O    -0.0000000000    -0.0000000000     0.0037319667
-# H    -0.0000000000    -0.0897959298    -0.0018659834
-# H     0.0000000000     0.0897959298    -0.0018659834
-    print(lib.finger(g1) - 0.12458103614793946)
-
-    mcs = mp.as_scanner()
-    mol.set_geom_([
-            ["O" , (0. , 0.     , 0.001)],
-            [1   , (0. ,-0.757  , 0.587)],
-            [1   , (0. , 0.757  , 0.587)]])
-    e1 = mcs(mol)
-    mol.set_geom_([
-            ["O" , (0. , 0.     ,-0.001)],
-            [1   , (0. ,-0.757  , 0.587)],
-            [1   , (0. , 0.757  , 0.587)]])
-    e2 = mcs(mol)
-    print(g1[0,2], (e1-e2)/0.002*lib.param.BOHR)
-
-    mol = gto.M(
-        atom = 'H 0 0 0; H 0 0 1.76',
-        basis = '631g',
-        unit='Bohr')
-    mf = scf.RHF(mol).run(conv_tol=1e-14)
-    mp = mp2.MP2(mf)
-    mp.kernel()
-    g1 = mp.Gradients().kernel()
-# H     0.0000000000     0.0000000000    -0.0800309688
-# H     0.0000000000     0.0000000000     0.0800309688
-

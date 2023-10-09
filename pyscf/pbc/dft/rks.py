@@ -32,10 +32,12 @@ from pyscf import lib
 from pyscf.lib import logger
 from pyscf.pbc.scf import hf as pbchf
 from pyscf.pbc.scf import khf
+from pyscf.pbc.scf import addons
 from pyscf.pbc.dft import gen_grid
 from pyscf.pbc.dft import numint
 from pyscf.dft import rks as mol_ks
 from pyscf.pbc.dft import multigrid
+from pyscf.pbc.lib.kpts import KPoints
 from pyscf import __config__
 
 
@@ -62,8 +64,11 @@ def get_veff(ks, cell=None, dm=None, dm_last=0, vhf_last=0, hermi=1,
     if kpt is None: kpt = ks.kpt
     t0 = (logger.process_clock(), logger.perf_counter())
 
-    omega, alpha, hyb = ks._numint.rsh_and_hybrid_coeff(ks.xc, spin=cell.spin)
-    hybrid = abs(hyb) > 1e-10 or abs(alpha) > 1e-10
+    ni = ks._numint
+    if ks.nlc or ni.libxc.is_nlc(ks.xc):
+        raise NotImplementedError(f'NLC functional {ks.xc} + {ks.nlc}')
+
+    hybrid = ni.libxc.is_hybrid_xc(ks.xc)
 
     if not hybrid and isinstance(ks.with_df, multigrid.MultiGridFFTDF):
         n, exc, vxc = multigrid.nr_rks(ks.with_df, ks.xc, dm, hermi,
@@ -89,8 +94,9 @@ def get_veff(ks, cell=None, dm=None, dm_last=0, vhf_last=0, hermi=1,
     if hermi == 2:  # because rho = 0
         n, exc, vxc = 0, 0, 0
     else:
-        n, exc, vxc = ks._numint.nr_rks(cell, ks.grids, ks.xc, dm, 0,
-                                        kpt, kpts_band)
+        max_memory = ks.max_memory - lib.current_memory()[0]
+        n, exc, vxc = ks._numint.nr_rks(cell, ks.grids, ks.xc, dm, hermi,
+                                        kpt, kpts_band, max_memory=max_memory)
         logger.debug(ks, 'nelec by numeric integration = %s', n)
         t0 = logger.timer(ks, 'vxc', *t0)
 
@@ -98,11 +104,10 @@ def get_veff(ks, cell=None, dm=None, dm_last=0, vhf_last=0, hermi=1,
         vj = ks.get_j(cell, dm, hermi, kpt, kpts_band)
         vxc += vj
     else:
-        if getattr(ks.with_df, '_j_only', False):  # for GDF and MDF
-            ks.with_df._j_only = False
+        omega, alpha, hyb = ks._numint.rsh_and_hybrid_coeff(ks.xc, spin=cell.spin)
         vj, vk = ks.get_jk(cell, dm, hermi, kpt, kpts_band)
         vk *= hyb
-        if abs(omega) > 1e-10:
+        if omega != 0:
             vklr = ks.get_k(cell, dm, hermi, kpt, kpts_band, omega=omega)
             vklr *= (alpha - hyb)
             vk += vklr
@@ -122,7 +127,7 @@ def get_veff(ks, cell=None, dm=None, dm_last=0, vhf_last=0, hermi=1,
 def _patch_df_beckegrids(density_fit):
     def new_df(self, auxbasis=None, with_df=None, *args, **kwargs):
         mf = density_fit(self, auxbasis, with_df, *args, **kwargs)
-        mf.with_df._j_only = True
+        mf.with_df._j_only = not self._numint.libxc.is_hybrid_xc(self.xc)
         mf.grids = gen_grid.BeckeGrids(self.cell)
         mf.grids.level = getattr(__config__, 'pbc_dft_rks_RKS_grids_level',
                                  mf.grids.level)
@@ -155,25 +160,28 @@ def get_rho(mf, dm=None, grids=None, kpt=None):
     return rho
 
 
-def _dft_common_init_(mf, xc='LDA,VWN'):
-    mf.xc = xc
-    mf.grids = gen_grid.UniformGrids(mf.cell)
-    # Use rho to filter grids
-    mf.small_rho_cutoff = getattr(__config__,
-                                  'pbc_dft_rks_RKS_small_rho_cutoff', 1e-7)
-##################################################
-# don't modify the following attributes, they are not input options
-    # Note Do not refer to .with_df._numint because mesh/coords may be different
-    if isinstance(mf, khf.KSCF):
-        mf._numint = numint.KNumInt(mf.kpts)
-    else:
-        mf._numint = numint.NumInt()
-    mf._keys = mf._keys.union(['xc', 'grids', 'small_rho_cutoff'])
-
 class KohnShamDFT(mol_ks.KohnShamDFT):
     '''PBC-KS'''
 
-    __init__ = _dft_common_init_
+    def __init__(self, xc='LDA,VWN'):
+        self.xc = xc
+        self.grids = gen_grid.UniformGrids(self.cell)
+        self.nlc = ''
+        self.nlcgrids = None
+        # Use rho to filter grids
+        self.small_rho_cutoff = getattr(
+            __config__, 'pbc_dft_rks_RKS_small_rho_cutoff', 1e-7)
+##################################################
+# don't modify the following attributes, they are not input options
+        # Note Do not refer to .with_df._numint because mesh/coords may be different
+        if isinstance(self, khf.KSCF):
+            if isinstance(self.kpts, KPoints):
+                self._numint = numint.KNumInt(self.kpts.kpts)
+            else:
+                self._numint = numint.KNumInt(self.kpts)
+        else:
+            self._numint = numint.NumInt()
+        self._keys = self._keys.union(['xc', 'grids', 'small_rho_cutoff'])
 
     def dump_flags(self, verbose=None):
         logger.info(self, 'XC functionals = %s', self.xc)
@@ -185,6 +193,57 @@ class KohnShamDFT(mol_ks.KohnShamDFT):
         pbchf.SCF.reset(self, mol)
         self.grids.reset(mol)
         return self
+
+    def jk_method(self, J='FFTDF', K=None):
+        if K is None:
+            K = J
+        if (('RS' in J or 'RS' in K) and
+            not isinstance(self.grids, gen_grid.BeckeGrids)):
+            self.grids = gen_grid.BeckeGrids(self.cell)
+        super().jk_method(J, K)
+        return self
+
+    def to_rks(self, xc=None):
+        '''Convert the input mean-field object to a RKS/ROKS object.
+
+        Note this conversion only changes the class of the mean-field object.
+        The total energy and wave-function are the same as them in the input
+        mean-field object.
+        '''
+        mf = addons.convert_to_rhf(self)
+        if xc is not None:
+            mf.xc = xc
+        if xc != self.xc or not isinstance(self, RKS):
+            mf.converged = False
+        return mf
+
+    def to_uks(self, xc=None):
+        '''Convert the input mean-field object to a UKS object.
+
+        Note this conversion only changes the class of the mean-field object.
+        The total energy and wave-function are the same as them in the input
+        mean-field object.
+        '''
+        mf = addons.convert_to_uhf(self)
+        if xc is not None:
+            mf.xc = xc
+        if xc != self.xc:
+            mf.converged = False
+        return mf
+
+    def to_gks(self, xc=None):
+        '''Convert the input mean-field object to a GKS object.
+
+        Note this conversion only changes the class of the mean-field object.
+        The total energy and wave-function are the same as them in the input
+        mean-field object.
+        '''
+        mf = addons.convert_to_ghf(self)
+        if xc is not None:
+            mf.xc = xc
+        if xc != self.xc:
+            mf.converged = False
+        return mf
 
 # Update the KohnShamDFT label in pbc.scf.hf module
 pbchf.KohnShamDFT = KohnShamDFT
@@ -205,6 +264,9 @@ class RKS(KohnShamDFT, pbchf.RHF):
         pbchf.RHF.dump_flags(self, verbose)
         KohnShamDFT.dump_flags(self, verbose)
         return self
+
+    get_vsap = mol_ks.get_vsap
+    init_guess_by_vsap = mol_ks.init_guess_by_vsap
 
     get_veff = get_veff
     energy_elec = pyscf.dft.rks.energy_elec

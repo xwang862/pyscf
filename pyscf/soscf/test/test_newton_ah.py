@@ -24,71 +24,73 @@ from pyscf import gto
 from pyscf import scf
 from pyscf import dft
 
-h2o_z0 = gto.M(
-    verbose = 5,
-    output = '/dev/null',
-    atom = [
-    ["O" , (0. , 0.     , 0.)],
-    [1   , (0. , -0.757 , 0.587)],
-    [1   , (0. , 0.757  , 0.587)] ],
-    basis = '6-31g')
+def setUpModule():
+    global h2o_z0, h2o_z1, h2o_z0_s, h2o_z1_s, h4_z0_s, h4_z1_s
+    h2o_z0 = gto.M(
+        verbose = 5,
+        output = '/dev/null',
+        atom = [
+        ["O" , (0. , 0.     , 0.)],
+        [1   , (0. , -0.757 , 0.587)],
+        [1   , (0. , 0.757  , 0.587)] ],
+        basis = '6-31g')
 
-h2o_z1 = gto.M(
-    verbose = 5,
-    output = '/dev/null',
-    atom = [
-    ["O" , (0. , 0.     , 0.)],
-    [1   , (0. , -0.757 , 0.587)],
-    [1   , (0. , 0.757  , 0.587)] ],
-    basis = '6-31g',
-    charge = 1,
-    spin = 1,)
+    h2o_z1 = gto.M(
+        verbose = 5,
+        output = '/dev/null',
+        atom = [
+        ["O" , (0. , 0.     , 0.)],
+        [1   , (0. , -0.757 , 0.587)],
+        [1   , (0. , 0.757  , 0.587)] ],
+        basis = '6-31g',
+        charge = 1,
+        spin = 1,)
 
-h2o_z0_s = gto.M(
-    verbose = 5,
-    output = '/dev/null',
-    atom = [
-    ["O" , (0. , 0.     , 0.)],
-    [1   , (0. , -0.757 , 0.587)],
-    [1   , (0. , 0.757  , 0.587)] ],
-    symmetry = 1,
-    basis = '6-31g')
+    h2o_z0_s = gto.M(
+        verbose = 5,
+        output = '/dev/null',
+        atom = [
+        ["O" , (0. , 0.     , 0.)],
+        [1   , (0. , -0.757 , 0.587)],
+        [1   , (0. , 0.757  , 0.587)] ],
+        symmetry = 1,
+        basis = '6-31g')
 
-h2o_z1_s = gto.M(
-    verbose = 5,
-    output = '/dev/null',
-    atom = [
-    ["O" , (0. , 0.     , 0.)],
-    [1   , (0. , -0.757 , 0.587)],
-    [1   , (0. , 0.757  , 0.587)] ],
-    basis = '6-31g',
-    charge = 1,
-    spin = 1,
-    symmetry = 1,)
+    h2o_z1_s = gto.M(
+        verbose = 5,
+        output = '/dev/null',
+        atom = [
+        ["O" , (0. , 0.     , 0.)],
+        [1   , (0. , -0.757 , 0.587)],
+        [1   , (0. , 0.757  , 0.587)] ],
+        basis = '6-31g',
+        charge = 1,
+        spin = 1,
+        symmetry = 1,)
 
-h4_z0_s = gto.M(
-    verbose = 5,
-    output = '/dev/null',
-    atom = '''C 0 0 0
-    H  1  1  1
-    H -1 -1  1
-    H -1  1 -1
-    H  1 -1 -1''',
-    basis = '6-31g',
-    symmetry = 1,)
+    h4_z0_s = gto.M(
+        verbose = 5,
+        output = '/dev/null',
+        atom = '''C 0 0 0
+        H  1  1  1
+        H -1 -1  1
+        H -1  1 -1
+        H  1 -1 -1''',
+        basis = '6-31g',
+        symmetry = 1,)
 
-h4_z1_s = gto.M(
-    verbose = 5,
-    output = '/dev/null',
-    atom = '''C 0 0 0
-    H  1  1  1
-    H -1 -1  1
-    H -1  1 -1
-    H  1 -1 -1''',
-    basis = '6-31g',
-    charge = 1,
-    spin = 1,
-    symmetry = 1,)
+    h4_z1_s = gto.M(
+        verbose = 5,
+        output = '/dev/null',
+        atom = '''C 0 0 0
+        H  1  1  1
+        H -1 -1  1
+        H -1  1 -1
+        H  1 -1 -1''',
+        basis = '6-31g',
+        charge = 1,
+        spin = 1,
+        symmetry = 1,)
 
 def tearDownModule():
     global h2o_z0, h2o_z1, h2o_z0_s, h2o_z1_s, h4_z0_s, h4_z1_s
@@ -152,7 +154,7 @@ class KnownValues(unittest.TestCase):
 
     def test_nr_rohf_symm(self):
         mf = scf.RHF(h2o_z1_s)
-        mf.irrep_nelec['B2'] = (1,0)
+        mf.irrep_nelec['B1'] = (1,0)
         mf.max_cycle = 1
         mf.conv_check = False
         mf.kernel()
@@ -212,7 +214,7 @@ class KnownValues(unittest.TestCase):
     def test_rks_gen_g_hop(self):
         mf = dft.RKS(h2o_z0)
         mf.grids.build()
-        mf.xc = 'b3lyp'
+        mf.xc = 'b3lyp5'
         nao = h2o_z0.nao_nr()
         numpy.random.seed(1)
         mo = numpy.random.random((nao,nao))
@@ -279,7 +281,7 @@ class KnownValues(unittest.TestCase):
 
     def test_nr_uks_fast_newton(self):
         mf = dft.UKS(h4_z1_s)
-        mf.xc = 'b3lyp'
+        mf.xc = 'b3lyp5'
         mf1 = scf.fast_newton(mf)
         self.assertAlmostEqual(mf1.e_tot, -39.696083841107587, 8)
 
@@ -288,7 +290,7 @@ class KnownValues(unittest.TestCase):
 
     def test_nr_rks_fast_newton(self):
         mf = dft.RKS(h4_z0_s)
-        mf.xc = 'b3lyp'
+        mf.xc = 'b3lyp5'
         mf1 = scf.fast_newton(mf)
         self.assertAlmostEqual(mf1.e_tot, -40.10277421254213, 9)
 
@@ -300,7 +302,7 @@ class KnownValues(unittest.TestCase):
     def test_uks_gen_g_hop(self):
         mf = dft.UKS(h2o_z0)
         mf.grids.build()
-        mf.xc = 'b3p86'
+        mf.xc = 'b3p86v5'
         nao = h2o_z0.nao_nr()
         numpy.random.seed(1)
         mo =(numpy.random.random((nao,nao)),
@@ -365,4 +367,3 @@ class KnownValues(unittest.TestCase):
 if __name__ == "__main__":
     print("Full Tests for Newton solver")
     unittest.main()
-

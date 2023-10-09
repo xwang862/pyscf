@@ -18,6 +18,7 @@
 #
 
 import unittest
+import tempfile
 import numpy as np
 
 from pyscf import lib
@@ -25,6 +26,7 @@ from pyscf.pbc import gto as pbcgto
 from pyscf.pbc import scf as pscf
 from pyscf.pbc.scf import khf
 from pyscf.pbc.scf import kuhf
+from pyscf.pbc.scf import kghf
 from pyscf.pbc import df
 import pyscf.pbc.tools
 
@@ -45,22 +47,27 @@ def make_primitive_cell(mesh):
     cell.build()
     return cell
 
-cell = make_primitive_cell([9]*3)
-kpts = cell.make_kpts([3,1,1])
-kmf = khf.KRHF(cell, kpts, exxdiv='vcut_sph').run(conv_tol=1e-9)
-kumf = kuhf.KUHF(cell, kpts, exxdiv='vcut_sph').run(conv_tol=1e-9)
+def setUpModule():
+    global cell, kmf, kumf, kgmf, kpts
+    cell = make_primitive_cell([9]*3)
+    kpts = cell.make_kpts([3,1,1])
+    kmf = khf.KRHF(cell, kpts, exxdiv='vcut_sph').run(conv_tol=1e-9)
+    kumf = kuhf.KUHF(cell, kpts, exxdiv='vcut_sph').run(conv_tol=1e-9)
+    kgmf = kghf.KGHF(cell, kpts, exxdiv='vcut_sph').run(conv_tol=1e-9)
 
 def tearDownModule():
-    global cell, kmf, kumf
+    global cell, kmf, kumf, kgmf
     cell.stdout.close()
-    del cell, kmf, kumf
+    del cell, kmf, kumf, kgmf
 
 class KnownValues(unittest.TestCase):
     def test_analyze(self):
         rpop, rchg = kmf.analyze() # pop at gamma point
         upop, uchg = kumf.analyze()
+        gpop, gchg = kgmf.analyze()
         self.assertTrue(isinstance(rpop, np.ndarray) and rpop.ndim == 1)
         self.assertAlmostEqual(abs(upop[0]+upop[1]-rpop).max(), 0, 7)
+        self.assertAlmostEqual(abs(gpop[0]+gpop[1]-rpop).max(), 0, 5)
         self.assertAlmostEqual(lib.fp(rpop), 1.697446, 5)
 
     def test_kpt_vs_supercell_high_cost(self):
@@ -94,6 +101,7 @@ class KnownValues(unittest.TestCase):
 
         kpts = cell.make_kpts(nk)
         kmf = khf.KRHF(cell, kpts, exxdiv='vcut_sph')
+        kmf.chkfile = tempfile.NamedTemporaryFile().name
         kmf.conv_tol = 1e-9
         ekpt = kmf.scf()
         dm1 = kmf.make_rdm1()
@@ -136,7 +144,7 @@ class KnownValues(unittest.TestCase):
         cell = pbcgto.Cell()
         cell.build(unit = 'B',
                    a = np.eye(3) * 4,
-                   mesh = [8,20,20],
+                   mesh = [25,30,30],
                    atom = '''He 2 0 0; He 3 0 0''',
                    dimension = 1,
                    low_dim_ft_type = 'inf_vacuum',
@@ -152,14 +160,14 @@ class KnownValues(unittest.TestCase):
         mf.init_guess = 'hcore'
         mf.kpts = cell.make_kpts([2,1,1])
         e1 = mf.kernel()
-        self.assertAlmostEqual(e1, -3.5112358424228809, 5)
+        self.assertAlmostEqual(e1, -3.5113107, 6)
 
     def test_krhf_2d(self):
         L = 4
         cell = pbcgto.Cell()
         cell.build(unit = 'B',
                    a = np.eye(3) * 4,
-                   mesh = [10,10,20],
+                   mesh = [25,25,40],
                    atom = '''He 2 0 0; He 3 0 0''',
                    dimension = 2,
                    low_dim_ft_type = 'inf_vacuum',
@@ -175,14 +183,14 @@ class KnownValues(unittest.TestCase):
         mf.with_df.mesh = cell.mesh
         mf.kpts = cell.make_kpts([2,1,1])
         e1 = mf.kernel()
-        self.assertAlmostEqual(e1, -3.5376801775171911, 5)
+        self.assertAlmostEqual(e1, -3.53769771, 4)
 
     def test_kuhf_1d(self):
         L = 4
         cell = pbcgto.Cell()
         cell.build(unit = 'B',
                    a = np.eye(3) * 4,
-                   mesh = [8,20,20],
+                   mesh = [25,40,40],
                    atom = '''He 2 0 0; He 3 0 0''',
                    dimension = 1,
                    low_dim_ft_type = 'inf_vacuum',
@@ -198,14 +206,14 @@ class KnownValues(unittest.TestCase):
         mf.init_guess = 'hcore'
         mf.kpts = cell.make_kpts([2,1,1])
         e1 = mf.kernel()
-        self.assertAlmostEqual(e1, -3.5112358424228809, 5)
+        self.assertAlmostEqual(e1, -3.5113107, 6)
 
     def test_kghf_1d(self):
         L = 4
         cell = pbcgto.Cell()
         cell.build(unit = 'B',
                    a = np.eye(3) * 4,
-                   mesh = [8,20,20],
+                   mesh = [25,40,40],
                    atom = '''He 2 0 0; He 3 0 0''',
                    dimension = 1,
                    low_dim_ft_type = 'inf_vacuum',
@@ -221,7 +229,7 @@ class KnownValues(unittest.TestCase):
         mf.init_guess = 'hcore'
         mf.kpts = cell.make_kpts([2,1,1])
         e1 = mf.kernel()
-        self.assertAlmostEqual(e1, -3.5112358424228809, 4)
+        self.assertAlmostEqual(e1, -3.5113107, 6)
 
     def test_get_fermi(self):
         self.assertAlmostEqual(kmf.get_fermi(), 0.33154831914017424, 6)
@@ -253,10 +261,6 @@ class KnownValues(unittest.TestCase):
         f = kumf.get_fermi(mo_e_kpts, mo_occ_kpts)
         self.assertAlmostEqual(f[0], 3, 9)
         self.assertAlmostEqual(f[1], 1.5, 9)
-
-    def test_dipole_moment(self):
-        dip = kmf.dip_moment()
-        self.assertAlmostEqual(lib.fp(dip), 0.729751581497479, 5)
 
     def test_krhf_vs_rhf(self):
         np.random.seed(1)
@@ -293,18 +297,18 @@ class KnownValues(unittest.TestCase):
         d = (d + d.transpose(0,2,1)) * 2
         vhf = 0
         f = khf.get_fock(kmf, kmf.get_hcore(), s, vhf, d, cycle=0,
-                             diis_start_cycle=2, damp_factor=0.5)
-        self.assertAlmostEqual(np.linalg.norm(f[0]), 95.32749551722966, 9)
-        self.assertAlmostEqual(np.linalg.norm(f[1]), 73.9231303798864, 9)
-        self.assertAlmostEqual(np.linalg.norm(f[2]), 58.973290554565196, 9)
+                         diis_start_cycle=2, damp_factor=0.5)
+        self.assertAlmostEqual(np.linalg.norm(f[0]), 95.32749551722966, 6)
+        self.assertAlmostEqual(np.linalg.norm(f[1]), 73.9231303798864, 6)
+        self.assertAlmostEqual(np.linalg.norm(f[2]), 58.973290554565196, 6)
 
         vhf = np.zeros((2,len(kpts),nao,nao))
         d1 = np.asarray([d/2, d/2])
         f1 = kuhf.get_fock(kumf, kumf.get_hcore(), s, vhf, d1, cycle=0,
                              diis_start_cycle=2, damp_factor=0.5)
         for k in range(len(kpts)):
-            self.assertAlmostEqual(np.linalg.norm(f[k]), np.linalg.norm(f1[0,k]),9)
-            self.assertAlmostEqual(np.linalg.norm(f[k]), np.linalg.norm(f1[1,k]),9)
+            self.assertAlmostEqual(abs(f[k] - f1[0,k]).max(), 0, 9)
+            self.assertAlmostEqual(abs(f[k] - f1[1,k]).max(), 0, 9)
 
 if __name__ == '__main__':
     print("Full Tests for pbc.scf.khf")

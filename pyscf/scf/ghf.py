@@ -44,7 +44,7 @@ def init_guess_by_chkfile(mol, chkfile_name, project=None):
             Whether to project chkfile's orbitals to the new basis.  Note when
             the geometry of the chkfile and the given molecule are very
             different, this projection can produce very poor initial guess.
-            In PES scanning, it is recommended to swith off project.
+            In PES scanning, it is recommended to switch off project.
 
             If project is set to None, the projection is only applied when the
             basis sets of the chkfile's molecule are different to the basis
@@ -113,18 +113,19 @@ def get_jk(mol, dm, hermi=0,
     dmaa = dms[:,:nao,:nao]
     dmab = dms[:,:nao,nao:]
     dmbb = dms[:,nao:,nao:]
-    dms = numpy.vstack((dmaa, dmbb, dmab))
-    if dm.dtype == numpy.complex128:
-        dms = numpy.vstack((dms.real, dms.imag))
+    if with_k:
+        if hermi:
+            dms = numpy.stack((dmaa, dmbb, dmab))
+        else:
+            dmba = dms[:,nao:,:nao]
+            dms = numpy.stack((dmaa, dmbb, dmab, dmba))
+        # Note the off-diagonal block breaks the hermitian
+        _hermi = 0
+    else:
+        dms = numpy.stack((dmaa, dmbb))
+        _hermi = 1
 
-    hermi = 0  # The off-diagonal blocks are not hermitian
-    j1, k1 = jkbuild(mol, dms, hermi, with_j, with_k, omega)
-    if with_j: j1 = j1.reshape(-1,n_dm,nao,nao)
-    if with_k: k1 = k1.reshape(-1,n_dm,nao,nao)
-
-    if dm.dtype == numpy.complex128:
-        if with_j: j1 = j1[:3] + j1[3:] * 1j
-        if with_k: k1 = k1[:3] + k1[3:] * 1j
+    j1, k1 = jkbuild(mol, dms, _hermi, with_j, with_k, omega)
 
     vj = vk = None
     if with_j:
@@ -137,14 +138,17 @@ def get_jk(mol, dm, hermi=0,
         vk[:,:nao,:nao] = k1[0]
         vk[:,nao:,nao:] = k1[1]
         vk[:,:nao,nao:] = k1[2]
-        vk[:,nao:,:nao] = k1[2].transpose(0,2,1).conj()
+        if hermi:
+            vk[:,nao:,:nao] = k1[2].conj().transpose(0,2,1)
+        else:
+            vk[:,nao:,:nao] = k1[3]
         vk = vk.reshape(dm.shape)
 
     return vj, vk
 
 def get_occ(mf, mo_energy=None, mo_coeff=None):
     if mo_energy is None: mo_energy = mf.mo_energy
-    e_idx = numpy.argsort(mo_energy)
+    e_idx = numpy.argsort(mo_energy.round(9), kind='stable')
     e_sort = mo_energy[e_idx]
     nmo = mo_energy.size
     mo_occ = numpy.zeros(nmo)
@@ -262,7 +266,7 @@ def spin_square(mo, s=1):
     '''
     nao = mo.shape[0] // 2
     if isinstance(s, numpy.ndarray):
-        assert(s.size == nao**2 or numpy.allclose(s[:nao,:nao], s[nao:,nao:]))
+        assert (s.size == nao**2 or numpy.allclose(s[:nao,:nao], s[nao:,nao:]))
         s = s[:nao,:nao]
     mo_a = mo[:nao]
     mo_b = mo[nao:]
@@ -311,7 +315,7 @@ def mulliken_pop(mol, dm, s=None, verbose=logger.DEBUG):
     dma = dm[:nao,:nao]
     dmb = dm[nao:,nao:]
     if s is not None:
-        assert(s.size == nao**2 or numpy.allclose(s[:nao,:nao], s[nao:,nao:]))
+        assert (s.size == nao**2 or numpy.allclose(s[:nao,:nao], s[nao:,nao:]))
         s = s[:nao,:nao]
     return uhf.mulliken_pop(mol, (dma,dmb), s, verbose)
 
@@ -323,7 +327,7 @@ def mulliken_meta(mol, dm_ao, verbose=logger.DEBUG,
     dma = dm_ao[:nao,:nao]
     dmb = dm_ao[nao:,nao:]
     if s is not None:
-        assert(s.size == nao**2 or numpy.allclose(s[:nao,:nao], s[nao:,nao:]))
+        assert (s.size == nao**2 or numpy.allclose(s[:nao,:nao], s[nao:,nao:]))
         s = s[:nao,:nao]
     return uhf.mulliken_meta(mol, (dma,dmb), verbose, pre_orth_method, s)
 
@@ -412,6 +416,8 @@ class GHF(hf.SCF):
                                mo_coeff[:,viridx]))
         return g.conj().T.ravel()
 
+    get_init_guess = hf.RHF.get_init_guess
+
     @lib.with_doc(hf.SCF.init_guess_by_minao.__doc__)
     def init_guess_by_minao(self, mol=None):
         return _from_rhf_init_dm(hf.SCF.init_guess_by_minao(self, mol))
@@ -426,6 +432,13 @@ class GHF(hf.SCF):
         logger.info(self, 'Initial guess from on-the-fly Huckel, doi:10.1021/acs.jctc.8b01089.')
         return _from_rhf_init_dm(hf.init_guess_by_huckel(mol))
 
+    @lib.with_doc(hf.SCF.init_guess_by_mod_huckel.__doc__)
+    def init_guess_by_mod_huckel(self, mol=None):
+        if mol is None: mol = self.mol
+        logger.info(self, '''Initial guess from on-the-fly Huckel, doi:10.1021/acs.jctc.8b01089,
+employing the updated GWH rule from doi:10.1021/ja00480a005.''')
+        return _from_rhf_init_dm(hf.init_guess_by_mod_huckel(mol))
+
     @lib.with_doc(hf.SCF.init_guess_by_chkfile.__doc__)
     def init_guess_by_chkfile(self, chkfile=None, project=None):
         if chkfile is None: chkfile = self.chkfile
@@ -438,20 +451,15 @@ class GHF(hf.SCF):
         if dm is None: dm = self.make_rdm1()
         nao = mol.nao
         dm = numpy.asarray(dm)
+        # nao = 0 for HF with custom Hamiltonian
+        if dm.shape[-1] != nao * 2 and nao != 0:
+            raise ValueError('Dimension inconsistent '
+                             f'dm.shape = {dm.shape}, mol.nao = {nao}')
 
         def jkbuild(mol, dm, hermi, with_j, with_k, omega=None):
-            if (not omega and
-                (self._eri is not None or mol.incore_anyway or self._is_mem_enough())):
-                if self._eri is None:
-                    self._eri = mol.intor('int2e', aosym='s8')
-                return hf.dot_eri_dm(self._eri, dm, hermi, with_j, with_k)
-            else:
-                return hf.SCF.get_jk(self, mol, dm, hermi, with_j, with_k, omega)
+            return hf.RHF.get_jk(self, mol, dm, hermi, with_j, with_k, omega)
 
-        if nao == dm.shape[-1]:
-            vj, vk = jkbuild(mol, dm, hermi, with_j, with_k, omega)
-        else:  # GHF density matrix, shape (2N,2N)
-            vj, vk = get_jk(mol, dm, hermi, with_j, with_k, jkbuild, omega)
+        vj, vk = get_jk(mol, dm, hermi, with_j, with_k, jkbuild, omega)
         return vj, vk
 
     def get_veff(self, mol=None, dm=None, dm_last=0, vhf_last=0, hermi=1):
@@ -547,27 +555,6 @@ def _from_rhf_init_dm(dm, breaksym=True):
         dm[idx+nao,idy] = dm[idx,idy+nao] = dma.diagonal() * .05
     return dm
 
-del(PRE_ORTH_METHOD)
 
-
-if __name__ == '__main__':
-    mol = gto.Mole()
-    mol.verbose = 3
-    mol.atom = 'H 0 0 0; H 0 0 1; O .5 .6 .2'
-    mol.basis = 'ccpvdz'
-    mol.build()
-
-    mf = GHF(mol)
-    mf.kernel()
-
-    dm = mf.init_guess_by_1e(mol)
-    dm = dm + 0j
-    nao = mol.nao_nr()
-    numpy.random.seed(12)
-    dm[:nao,nao:] = numpy.random.random((nao,nao)) * .1j
-    dm[nao:,:nao] = dm[:nao,nao:].T.conj()
-    mf.kernel(dm)
-    mf.canonicalize(mf.mo_coeff, mf.mo_occ)
-    mf.analyze()
-    print(mf.spin_square())
-    print(mf.e_tot - -75.9125824421352)
+class HF1e(GHF):
+    scf = hf._hf1e_scf

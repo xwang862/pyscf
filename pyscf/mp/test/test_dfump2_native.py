@@ -23,21 +23,27 @@ from pyscf import lib
 from pyscf.mp.dfump2_native import DFUMP2, SCSUMP2
 
 
-mol = gto.Mole()
-mol.verbose = 0
-mol.output = None
-mol.atom = '''
-O    0.000   0.000  -1.141
-O    0.000   0.000   1.141
-'''
-mol.unit = 'Bohr'
-mol.basis = 'def2-SVP'
-mol.spin = 2
-mol.build()
+def setUpModule():
+    global mol, mf
+    mol = gto.Mole()
+    mol.verbose = 0
+    mol.output = None
+    mol.atom = '''
+    O    0.000   0.000  -1.141
+    O    0.000   0.000   1.141
+    '''
+    mol.unit = 'Bohr'
+    mol.basis = 'def2-SVP'
+    mol.spin = 2
+    mol.build()
 
-mf = scf.UHF(mol)
-mf.conv_tol = 1.0e-12
-mf.kernel()
+    mf = scf.UHF(mol)
+    mf.conv_tol = 1.0e-12
+    mf.kernel()
+
+def tearDownModule():
+    global mol, mf
+    del mol, mf
 
 
 def check_orth(obj, mol, mo_coeff, thresh=1.0e-12):
@@ -94,7 +100,7 @@ class KnownValues(unittest.TestCase):
             self.assertAlmostEqual(natocc[8], 1.0168954406, delta=1.0e-7)
             self.assertAlmostEqual(natocc[9], 0.0478262909, delta=1.0e-7)
             self.assertAlmostEqual(natocc[27], 0.0002326288, delta=1.0e-7)
-            
+
     def test_natorbs_fc(self):
         mol = self.mf.mol
         with DFUMP2(self.mf, frozen=2) as pt:
@@ -112,7 +118,7 @@ class KnownValues(unittest.TestCase):
             self.assertAlmostEqual(natocc[8], 1.0168965649, delta=1.0e-7)
             self.assertAlmostEqual(natocc[9], 0.0477790944, delta=1.0e-7)
             self.assertAlmostEqual(natocc[27], 0.0002307322, delta=1.0e-7)
-    
+
     def test_natorbs_fclist(self):
         self.mf.mo_coeff[0, :, [1, 3]] = self.mf.mo_coeff[0, :, [3, 1]]
         self.mf.mo_energy[0, [1, 3]] = self.mf.mo_energy[0, [3, 1]]

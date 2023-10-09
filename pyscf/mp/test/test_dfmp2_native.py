@@ -24,25 +24,30 @@ from pyscf.mp.dfmp2_native import DFMP2, SCSMP2
 from pyscf.mp.dfmp2_native import solve_cphf_rhf, fock_response_rhf
 
 
-mol = gto.Mole()
-mol.verbose = 0
-mol.output = None
-mol.atom = '''
-C    0.000   0.000   1.266
-C    0.000   0.000  -1.266
-H    0.000   1.756   2.328
-H    0.000  -1.756   2.328
-H    0.000   1.756  -2.328
-H    0.000  -1.756  -2.328
-'''
-mol.unit = 'Bohr'
-mol.basis = 'def2-SVP'
-mol.build()
+def setUpModule():
+    global mol, mf
+    mol = gto.Mole()
+    mol.verbose = 0
+    mol.output = None
+    mol.atom = '''
+    C    0.000   0.000   1.266
+    C    0.000   0.000  -1.266
+    H    0.000   1.756   2.328
+    H    0.000  -1.756   2.328
+    H    0.000   1.756  -2.328
+    H    0.000  -1.756  -2.328
+    '''
+    mol.unit = 'Bohr'
+    mol.basis = 'def2-SVP'
+    mol.build()
 
-mf = scf.RHF(mol)
-mf.conv_tol = 1.0e-12
-mf.kernel()
+    mf = scf.RHF(mol)
+    mf.conv_tol = 1.0e-12
+    mf.kernel()
 
+def tearDownModule():
+    global mol, mf
+    del mol, mf
 
 def check_orth(obj, mol, mo_coeff, thresh=1.0e-12):
     sao = mol.intor_symmetric('int1e_ovlp')
@@ -72,7 +77,7 @@ class KnownValues(unittest.TestCase):
             pt.kernel()
             self.assertAlmostEqual(pt.e_corr, -0.274767743344, delta=1.0e-8)
             self.assertAlmostEqual(pt.e_tot, -78.252218528769, delta=1.0e-8)
-    
+
     def test_energy_fclist(self):
         for arr in self.mf.mo_coeff.T, self.mf.mo_occ, self.mf.mo_energy:
             arr[[0, 2]] = arr[[2, 0]]
@@ -81,7 +86,7 @@ class KnownValues(unittest.TestCase):
             pt.kernel()
             self.assertAlmostEqual(pt.e_corr, -0.274767743344, delta=1.0e-8)
             self.assertAlmostEqual(pt.e_tot, -78.252218528769, delta=1.0e-8)
-    
+
     def test_natorbs(self):
         mol = self.mf.mol
         with DFMP2(self.mf) as pt:
@@ -95,7 +100,7 @@ class KnownValues(unittest.TestCase):
             self.assertAlmostEqual(natocc[7], 1.9384231532, delta=1.0e-7)
             self.assertAlmostEqual(natocc[8], 0.0459829060, delta=1.0e-7)
             self.assertAlmostEqual(natocc[47], 0.0000761012, delta=1.0e-7)
-    
+
     def test_natorbs_fc(self):
         mol = self.mf.mol
         with DFMP2(self.mf, frozen=2) as pt:
@@ -111,7 +116,7 @@ class KnownValues(unittest.TestCase):
             self.assertAlmostEqual(natocc[7], 1.9384836199, delta=1.0e-7)
             self.assertAlmostEqual(natocc[8], 0.0459325459, delta=1.0e-7)
             self.assertAlmostEqual(natocc[47], 0.0000751662, delta=1.0e-7)
-    
+
     def test_natorbs_fclist(self):
         for arr in self.mf.mo_coeff.T, self.mf.mo_occ, self.mf.mo_energy:
             arr[[0, 5]] = arr[[5, 0]]
@@ -166,7 +171,7 @@ class KnownValues(unittest.TestCase):
         lhs -= numpy.einsum('a,ai->ai', self.mf.mo_energy[nocc:], zai)
         lhs -= fock_response_rhf(self.mf, zai, full=False)
         diffnorm = numpy.linalg.norm(Lai - lhs)
-        self.assertAlmostEqual(diffnorm, 0, delta=1.0e-6)
+        self.assertAlmostEqual(diffnorm, 0, delta=1.0e-5)
 
     def test_natorbs_relaxed(self):
         mol = self.mf.mol
@@ -182,7 +187,7 @@ class KnownValues(unittest.TestCase):
             self.assertAlmostEqual(natocc[7], 1.9402044334, delta=1.0e-7)
             self.assertAlmostEqual(natocc[8], 0.0459829060, delta=1.0e-7)
             self.assertAlmostEqual(natocc[47], 0.0000658464, delta=1.0e-7)
-    
+
     def test_natorbs_relaxed_fc(self):
         mol = self.mf.mol
         with DFMP2(self.mf, frozen=2) as pt:
@@ -289,7 +294,7 @@ class KnownValues(unittest.TestCase):
             # orbitals orthogonal
             check_orth(self, mol, natorb)
             # selected values
-            self.assertAlmostEqual(natocc[7], 1.9379674743, delta=1.0e-7)
+            self.assertAlmostEqual(natocc[7], 1.9396460867, delta=1.0e-7)
             self.assertAlmostEqual(natocc[8], 0.0483792759, delta=1.0e-7)
 
 

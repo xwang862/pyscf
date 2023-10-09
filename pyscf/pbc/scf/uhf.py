@@ -89,7 +89,7 @@ def init_guess_by_chkfile(cell, chkfile_name, project=None, kpt=None):
 
 def dip_moment(cell, dm, unit='Debye', verbose=logger.NOTE,
                grids=None, rho=None, kpt=np.zeros(3)):
-    ''' Dipole moment in the unit cell.
+    ''' Dipole moment in the cell.
 
     Args:
          cell : an instance of :class:`Cell`
@@ -138,7 +138,7 @@ class UHF(pbchf.SCF, mol_uhf.UHF):
 
     def dump_flags(self, verbose=None):
         pbchf.SCF.dump_flags(self, verbose)
-        logger.info(self, 'number of electrons per unit cell  '
+        logger.info(self, 'number of electrons per cell  '
                     'alpha = %d beta = %d', *self.nelec)
         return self
 
@@ -159,15 +159,8 @@ class UHF(pbchf.SCF, mol_uhf.UHF):
         if kpt is None: kpt = self.kpt
         if isinstance(dm, np.ndarray) and dm.ndim == 2:
             dm = np.asarray((dm*.5,dm*.5))
-        if self.rsjk and self.direct_scf:
-            # Enable direct-SCF for real space JK builder
-            ddm = dm - dm_last
-            vj, vk = self.get_jk(cell, ddm, hermi, kpt, kpts_band)
-            vhf = vj[0] + vj[1] - vk
-            vhf += vhf_last
-        else:
-            vj, vk = self.get_jk(cell, dm, hermi, kpt, kpts_band)
-            vhf = vj[0] + vj[1] - vk
+        vj, vk = self.get_jk(cell, dm, hermi, kpt, kpts_band)
+        vhf = vj[0] + vj[1] - vk
         return vhf
 
     def get_bands(self, kpts_band, cell=None, dm=None, kpt=None):
@@ -212,18 +205,16 @@ class UHF(pbchf.SCF, mol_uhf.UHF):
     @lib.with_doc(dip_moment.__doc__)
     def dip_moment(self, cell=None, dm=None, unit='Debye', verbose=logger.NOTE,
                    **kwargs):
-        if cell is None: cell = self.cell
-        if dm is None: dm = self.make_rdm1()
+        if cell is None:
+            cell = self.cell
+        if dm is None:
+            dm = self.make_rdm1()
         rho = kwargs.pop('rho', None)
         if rho is None:
             rho = self.get_rho(dm)
         return dip_moment(cell, dm, unit, verbose, rho=rho, kpt=self.kpt, **kwargs)
 
-    def get_init_guess(self, cell=None, key='minao'):
-        if cell is None: cell = self.cell
-        dm = mol_uhf.UHF.get_init_guess(self, cell, key)
-        dm = pbchf.normalize_dm_(self, dm)
-        return dm
+    get_init_guess = pbchf.RHF.get_init_guess
 
     def init_guess_by_1e(self, cell=None):
         if cell is None: cell = self.cell
@@ -240,6 +231,7 @@ class UHF(pbchf.SCF, mol_uhf.UHF):
     init_guess_by_minao  = mol_uhf.UHF.init_guess_by_minao
     init_guess_by_atom   = mol_uhf.UHF.init_guess_by_atom
     init_guess_by_huckel = mol_uhf.UHF.init_guess_by_huckel
+    init_guess_by_mod_huckel = mol_uhf.UHF.init_guess_by_mod_huckel
 
     analyze = mol_uhf.UHF.analyze
     mulliken_pop = mol_uhf.UHF.mulliken_pop

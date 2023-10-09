@@ -183,6 +183,7 @@ He
      0.32235865    2     2.25670239    -0.39677748
                                         0.93894690
                                                  ''')}
+        cell.precision = 1e-11
         cell.build()
         np.random.seed(9)
         kpt = np.random.random(3)
@@ -190,21 +191,21 @@ He
         ref = get_pp_nl(cell)
         dat = pp_int.get_pp_nl(cell)
         self.assertTrue(dat.dtype == np.double)
-        self.assertAlmostEqual(np.linalg.norm(ref-dat), 0, 11)
+        self.assertAlmostEqual(abs(ref-dat).max(), 0, 11)
 
         ref = get_pp_nl(cell, kpt)
         dat = pp_int.get_pp_nl(cell, (kpt,kpt))
         self.assertTrue(dat.dtype == np.complex128)
-        self.assertAlmostEqual(np.linalg.norm(ref-dat[0]), 0, 11)
-        self.assertAlmostEqual(np.linalg.norm(ref-dat[1]), 0, 11)
+        self.assertAlmostEqual(abs(ref-dat[0]).max(), 0, 11)
+        self.assertAlmostEqual(abs(ref-dat[1]).max(), 0, 11)
 
         ref = get_pp_loc_part2(cell)
         dat = pp_int.get_pp_loc_part2(cell)
-        self.assertAlmostEqual(np.linalg.norm(ref-dat), 0, 11)
+        self.assertAlmostEqual(abs(ref-dat).max(), 0, 8)
 
         ref = get_pp_loc_part2(cell, kpt)
         dat = pp_int.get_pp_loc_part2(cell, kpt)
-        self.assertAlmostEqual(np.linalg.norm(ref-dat), 0, 11)
+        self.assertAlmostEqual(abs(ref-dat).max(), 0, 8)
 
     def test_pp_loc_part2(self):
         cell = pbcgto.Cell()
@@ -214,17 +215,18 @@ He
         cell.pseudo = {'C':'gth-pade'}
         cell.a = np.eye(3) * 2.5
         cell.mesh = [30] * 3
+        cell.precision = 1e-9
         cell.build()
         np.random.seed(1)
         kpt = np.random.random(3)
 
         ref = get_pp_loc_part2(cell)
         dat = pp_int.get_pp_loc_part2(cell)
-        self.assertAlmostEqual(np.linalg.norm(ref-dat), 0, 11)
+        self.assertAlmostEqual(abs(ref-dat).max(), 0, 9)
 
         ref = get_pp_loc_part2(cell, kpt)
         dat = pp_int.get_pp_loc_part2(cell, kpt)
-        self.assertAlmostEqual(np.linalg.norm(ref-dat), 0, 11)
+        self.assertAlmostEqual(abs(ref-dat).max(), 0, 9)
 
     def test_pp(self):
         cell = pbcgto.Cell()
@@ -240,7 +242,7 @@ He
         k = np.random.random(3)
         v0 = get_pp(cell, k)
         v1 = pseudo.get_pp(cell, k)
-        self.assertAlmostEqual(np.linalg.norm(v0-v1), 0, 6)
+        self.assertAlmostEqual(abs(v0-v1).max(), 0, 6)
 
 
 

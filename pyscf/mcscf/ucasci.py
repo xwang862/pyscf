@@ -120,7 +120,7 @@ def kernel(casci, mo_coeff=None, ci0=None, verbose=logger.NOTE, envs=None):
 class UCASCI(casci.CASCI):
     # nelecas is tuple of (nelecas_alpha, nelecas_beta)
     def __init__(self, mf_or_mol, ncas, nelecas, ncore=None):
-        #assert('UHF' == mf.__class__.__name__)
+        #assert ('UHF' == mf.__class__.__name__)
         if isinstance(mf_or_mol, gto.Mole):
             mf = scf.UHF(mf_or_mol)
         else:
@@ -271,6 +271,9 @@ class UCASCI(casci.CASCI):
     def kernel(self, mo_coeff=None, ci0=None):
         if mo_coeff is None:
             mo_coeff = self.mo_coeff
+        else: # overwrite self.mo_coeff because it is needed in many methods of this class
+            self.mo_coeff = mo_coeff
+
         if ci0 is None:
             ci0 = self.ci
 
@@ -296,13 +299,13 @@ class UCASCI(casci.CASCI):
             ss_core = self._scf.spin_square(mocore, ovlp_ao)
             if isinstance(self.e_cas, (float, numpy.number)):
                 ss = fci.spin_op.spin_square(self.ci, self.ncas, self.nelecas,
-                                             mocas, ovlp_ao)
+                                             mocas, ovlp_ao, self.fcisolver)
                 log.note('UCASCI E = %.15g  E(CI) = %.15g  S^2 = %.7f',
                          self.e_tot, self.e_cas, ss[0]+ss_core[0])
             else:
                 for i, e in enumerate(self.e_cas):
                     ss = fci.spin_op.spin_square(self.ci[i], self.ncas, self.nelecas,
-                                                 mocas, ovlp_ao)
+                                                 mocas, ovlp_ao, self.fcisolver)
                     log.note('UCASCI root %d  E = %.15g  E(CI) = %.15g  S^2 = %.7f',
                              i, self.e_tot[i], e, ss[0]+ss_core[0])
         else:
@@ -381,15 +384,16 @@ class UCASCI(casci.CASCI):
                 log.info('Natural beta-orbital (expansion on AOs) in CAS space')
                 dump_mat.dump_rec(log.stdout, mocas_b, label, start=1, **kwargs)
 
-            tol = getattr(__config__, 'mcscf_addons_map2hf_tol', 0.4)
-            s = reduce(numpy.dot, (mo_coeff[0].T, ovlp_ao, self._scf.mo_coeff[0]))
-            idx = numpy.argwhere(abs(s)>tol)
-            for i,j in idx:
-                log.info('alpha <mo-mcscf|mo-hf> %d  %d  %12.8f' % (i+1,j+1,s[i,j]))
-            s = reduce(numpy.dot, (mo_coeff[1].T, ovlp_ao, self._scf.mo_coeff[1]))
-            idx = numpy.argwhere(abs(s)>tol)
-            for i,j in idx:
-                log.info('beta <mo-mcscf|mo-hf> %d  %d  %12.8f' % (i+1,j+1,s[i,j]))
+            if self._scf.mo_coeff is not None:
+                tol = getattr(__config__, 'mcscf_addons_map2hf_tol', 0.4)
+                s = reduce(numpy.dot, (mo_coeff[0].T, ovlp_ao, self._scf.mo_coeff[0]))
+                idx = numpy.argwhere(abs(s)>tol)
+                for i,j in idx:
+                    log.info('alpha <mo-mcscf|mo-hf> %d  %d  %12.8f' % (i+1,j+1,s[i,j]))
+                s = reduce(numpy.dot, (mo_coeff[1].T, ovlp_ao, self._scf.mo_coeff[1]))
+                idx = numpy.argwhere(abs(s)>tol)
+                for i,j in idx:
+                    log.info('beta <mo-mcscf|mo-hf> %d  %d  %12.8f' % (i+1,j+1,s[i,j]))
 
             if getattr(self.fcisolver, 'large_ci', None) and ci is not None:
                 log.info('\n** Largest CI components **')
@@ -411,7 +415,7 @@ class UCASCI(casci.CASCI):
     def spin_square(self, fcivec=None, mo_coeff=None, ovlp=None):
         return addons.spin_square(self, mo_coeff, fcivec, ovlp)
 
-    fix_spin_ = fix_spin = None
+    fix_spin_ = fix_spin = lib.invalid_method('fix_spin')
 
     @lib.with_doc(addons.sort_mo.__doc__)
     def sort_mo(self, caslst, mo_coeff=None, base=1):
@@ -446,7 +450,7 @@ class UCASCI(casci.CASCI):
 
 CASCI = UCASCI
 
-del(WITH_META_LOWDIN, LARGE_CI_TOL)
+del (WITH_META_LOWDIN, LARGE_CI_TOL)
 
 
 if __name__ == '__main__':

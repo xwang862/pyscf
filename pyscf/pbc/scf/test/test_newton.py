@@ -23,24 +23,26 @@ from pyscf.pbc import gto
 from pyscf.pbc import scf
 from pyscf.pbc import dft
 
-cell = gto.Cell()
-cell.unit = 'B'
-cell.atom = '''
-C  0.          0.          0.
-C  1.68506879  1.68506879  1.68506879
-'''
-cell.a = '''
-0.          3.37013758  3.37013758
-3.37013758  0.          3.37013758
-3.37013758  3.37013758  0.
-'''
+def setUpModule():
+    global cell
+    cell = gto.Cell()
+    cell.unit = 'B'
+    cell.atom = '''
+    C  0.          0.          0.
+    C  1.68506879  1.68506879  1.68506879
+    '''
+    cell.a = '''
+    0.          3.37013758  3.37013758
+    3.37013758  0.          3.37013758
+    3.37013758  3.37013758  0.
+    '''
 
-cell.basis = 'gth-szv'
-cell.pseudo = 'gth-pade'
-cell.mesh = [19]*3
-cell.verbose = 5
-cell.output = '/dev/null'
-cell.build()
+    cell.basis = 'gth-szv'
+    cell.pseudo = 'gth-pade'
+    cell.mesh = [19]*3
+    cell.verbose = 5
+    cell.output = '/dev/null'
+    cell.build()
 
 
 def tearDownModule():
@@ -164,7 +166,7 @@ class KnowValues(unittest.TestCase):
 
     def test_rks_gen_g_hop(self):
         mf = dft.KRKS(cell, cell.make_kpts([2,1,1]))
-        mf.xc = 'b3lyp'
+        mf.xc = 'b3lyp5'
         nao = cell.nao_nr()
         numpy.random.seed(1)
         mo = numpy.random.random((2,nao,nao)) + 0j
@@ -179,7 +181,7 @@ class KnowValues(unittest.TestCase):
 
     def test_uks_gen_g_hop(self):
         mf = dft.KUKS(cell, cell.make_kpts([2,1,1]))
-        mf.xc = 'b3lyp'
+        mf.xc = 'b3lyp5'
         nao = cell.nao_nr()
         numpy.random.seed(1)
         mo = numpy.random.random((2,2,nao,nao)) + 0j
@@ -196,4 +198,3 @@ class KnowValues(unittest.TestCase):
 if __name__ == "__main__":
     print("Full Tests for PBC Newton solver")
     unittest.main()
-

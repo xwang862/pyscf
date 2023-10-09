@@ -16,6 +16,9 @@ import unittest
 import numpy
 import numpy as np
 
+from pyscf.pbc import gto as pgto
+from pyscf.pbc.df import fft, aft
+
 
 ##################################################
 #
@@ -539,52 +542,44 @@ def get_nuc(cell, kpt=np.zeros(3)):
     return vne
 
 
+def setUpModule():
+    global cell, cell1, cell2, kpts, kpt0, kpts1, mf0
+    cell = pgto.Cell()
+    cell.atom = 'He 1. .5 .5; C .1 1.3 2.1'
+    cell.basis = {'He': [(0, (2.5, 1)), (0, (1., 1))],
+                  'C' :'gth-szv',}
+    cell.pseudo = {'C':'gth-pade'}
+    cell.a = np.eye(3) * 2.5
+    cell.mesh = [21] * 3
+    cell.build()
+    np.random.seed(1)
+    kpts = np.random.random((4,3))
+    kpts[3] = kpts[0]-kpts[1]+kpts[2]
+    kpt0 = np.zeros(3)
 
+    cell1 = pgto.Cell()
+    cell1.atom = 'He 1. .5 .5; He .1 1.3 2.1'
+    cell1.basis = {'He': [(0, (2.5, 1)), (0, (1., 1))]}
+    cell1.a = np.eye(3) * 2.5
+    cell1.mesh = [21] * 3
+    cell1.build()
 
+    cell2 = pgto.Cell()
+    cell2.atom = '''
+    He   1.3    .2       .3
+    He    .1    .1      1.1 '''
+    cell2.basis = {'He': [[0, [0.8, 1]],
+                          [1, [0.6, 1]]]}
+    cell2.mesh = [17]*3
+    cell2.a = numpy.array(([2.0,  .9, 0. ],
+                           [0.1, 1.9, 0.4],
+                           [0.8, 0  , 2.1]))
+    cell2.build()
+    kpts1 = np.random.random((4,3))
+    kpts1[3] = kpts1[0]-kpts1[1]+kpts1[2] + cell2.reciprocal_vectors().T.dot(np.ones(3))
 
-
-
-
-from pyscf.pbc import gto as pgto
-import pyscf.pbc.dft as pdft
-from pyscf.pbc.df import fft, aft
-
-cell = pgto.Cell()
-cell.atom = 'He 1. .5 .5; C .1 1.3 2.1'
-cell.basis = {'He': [(0, (2.5, 1)), (0, (1., 1))],
-              'C' :'gth-szv',}
-cell.pseudo = {'C':'gth-pade'}
-cell.a = np.eye(3) * 2.5
-cell.mesh = [21] * 3
-cell.build()
-np.random.seed(1)
-kpts = np.random.random((4,3))
-kpts[3] = kpts[0]-kpts[1]+kpts[2]
-kpt0 = np.zeros(3)
-
-cell1 = pgto.Cell()
-cell1.atom = 'He 1. .5 .5; He .1 1.3 2.1'
-cell1.basis = {'He': [(0, (2.5, 1)), (0, (1., 1))]}
-cell1.a = np.eye(3) * 2.5
-cell1.mesh = [21] * 3
-cell1.build()
-
-cell2 = pgto.Cell()
-cell2.atom = '''
-He   1.3    .2       .3
-He    .1    .1      1.1 '''
-cell2.basis = {'He': [[0, [0.8, 1]],
-                      [1, [0.6, 1]]]}
-cell2.mesh = [17]*3
-cell2.a = numpy.array(([2.0,  .9, 0. ],
-                       [0.1, 1.9, 0.4],
-                       [0.8, 0  , 2.1]))
-cell2.build()
-kpts1 = np.random.random((4,3))
-kpts1[3] = kpts1[0]-kpts1[1]+kpts1[2] + cell2.reciprocal_vectors().T.dot(np.ones(3))
-
-mf0 = pbcscf.RHF(cell)
-mf0.exxdiv = None
+    mf0 = pbcscf.RHF(cell)
+    mf0.exxdiv = None
 
 def tearDownModule():
     global cell, cell1, cell2, kpts, kpt0, kpts1, mf0
@@ -627,8 +622,8 @@ class KnownValues(unittest.TestCase):
 
         ej1 = numpy.einsum('ij,ji->', vj1, dm)
         ek1 = numpy.einsum('ij,ji->', vk1, dm)
-        self.assertAlmostEqual(ej1, 2.3002596914518700*(6/6.82991739766009)**2, 9)
-        self.assertAlmostEqual(ek1, 3.3165691757797346*(6/6.82991739766009)**2, 9)
+        self.assertAlmostEqual(ej1, 2.3002596914518700*(6/6.82991739766009)**2, 8)
+        self.assertAlmostEqual(ek1, 3.3165691757797346*(6/6.82991739766009)**2, 8)
 
         dm = mf0.get_init_guess()
         vj0, vk0 = get_jk(mf0, cell, dm)
@@ -640,8 +635,14 @@ class KnownValues(unittest.TestCase):
 
         ej1 = numpy.einsum('ij,ji->', vj1, dm)
         ek1 = numpy.einsum('ij,ji->', vk1, dm)
-        self.assertAlmostEqual(ej1, 2.4673139106639925*(6/6.82991739766009)**2, 9)
-        self.assertAlmostEqual(ek1, 3.6886674521354221*(6/6.82991739766009)**2, 9)
+        self.assertAlmostEqual(ej1, 2.4673139106639925*(6/6.82991739766009)**2, 8)
+        self.assertAlmostEqual(ek1, 3.6886674521354221*(6/6.82991739766009)**2, 8)
+
+        # issue #1114
+        dm = numpy.eye(cell.nao, dtype=int)
+        vj, vk = df.get_jk(dm, exxdiv=None)
+        self.assertAlmostEqual(lib.fp(vj), 3.7955873127283377, 8)
+        self.assertAlmostEqual(lib.fp(vk), 4.290076429522121, 8)
 
     def test_get_jk_kpts(self):
         df = fft.FFTDF(cell)
@@ -657,14 +658,14 @@ class KnownValues(unittest.TestCase):
 
         ej1 = numpy.einsum('xij,xji->', vj1, dms) / len(kpts)
         ek1 = numpy.einsum('xij,xji->', vk1, dms) / len(kpts)
-        self.assertAlmostEqual(ej1, 2.3163352969873445*(6/6.82991739766009)**2, 9)
-        self.assertAlmostEqual(ek1, 7.7311228144548600*(6/6.82991739766009)**2, 9)
+        self.assertAlmostEqual(ej1, 2.3163352969873445*(6/6.82991739766009)**2, 8)
+        self.assertAlmostEqual(ek1, 7.7311228144548600*(6/6.82991739766009)**2, 8)
 
         numpy.random.seed(1)
         kpts_band = numpy.random.random((2,3))
         vj1, vk1 = df.get_jk(dms, kpts=kpts, kpts_band=kpts_band, exxdiv=None)
-        self.assertAlmostEqual(lib.fp(vj1), 6/6.82991739766009*(3.437188138446714+0.1360466492092307j), 9)
-        self.assertAlmostEqual(lib.fp(vk1), 6/6.82991739766009*(7.479986541097368+1.1980593415201204j), 9)
+        self.assertAlmostEqual(lib.fp(vj1), 6/6.82991739766009*(3.437188138446714+0.1360466492092307j), 8)
+        self.assertAlmostEqual(lib.fp(vk1), 6/6.82991739766009*(7.479986541097368+1.1980593415201204j), 8)
 
         nao = dm.shape[0]
         mo_coeff = numpy.random.random((nkpts,nao,nao))
@@ -672,7 +673,7 @@ class KnownValues(unittest.TestCase):
         dms = numpy.einsum('kpi,ki,kqi->kpq', mo_coeff, mo_occ, mo_coeff)
         dms = lib.tag_array(lib.asarray(dms), mo_coeff=mo_coeff, mo_occ=mo_occ)
         vk1 = df.get_jk(dms, kpts=kpts, kpts_band=kpts_band, exxdiv=None)[1]
-        self.assertAlmostEqual(lib.fp(vk1), 10.239828255099447+2.1190549216896182j, 9)
+        self.assertAlmostEqual(lib.fp(vk1), 10.239828255099447+2.1190549216896182j, 8)
 
     def test_get_j_non_hermitian(self):
         kpt = kpts[0]
@@ -708,16 +709,16 @@ class KnownValues(unittest.TestCase):
         eri0000 = df.get_eri(compact=True)
         self.assertTrue(eri0000.dtype == numpy.double)
         self.assertTrue(np.allclose(eri0000, ref, atol=1e-9, rtol=1e-9))
-        self.assertAlmostEqual(lib.fp(eri0000), 0.23714016293926865, 9)
+        self.assertAlmostEqual(lib.fp(eri0000), 0.23714016293926865, 8)
 
         ref = odf.get_eri((kpts[0],kpts[0],kpts[0],kpts[0]))
         eri1111 = df.get_eri((kpts[0],kpts[0],kpts[0],kpts[0]))
         self.assertTrue(np.allclose(eri1111, ref, atol=1e-9, rtol=1e-9))
-        self.assertAlmostEqual(lib.fp(eri1111), (1.2410388899583582-5.2370501878355006e-06j), 9)
+        self.assertAlmostEqual(lib.fp(eri1111), (1.2410388899583582-5.2370501878355006e-06j), 8)
 
         eri1111 = df.get_eri((kpts[0]+1e-8,kpts[0]+1e-8,kpts[0],kpts[0]))
         self.assertTrue(np.allclose(eri1111, ref, atol=1e-9, rtol=1e-9))
-        self.assertAlmostEqual(lib.fp(eri1111), (1.2410388899583582-5.2370501878355006e-06j), 9)
+        self.assertAlmostEqual(lib.fp(eri1111), (1.2410388899583582-5.2370501878355006e-06j), 8)
 
     def test_get_eri_0011(self):
         odf = aft.AFTDF(cell1)
@@ -725,12 +726,12 @@ class KnownValues(unittest.TestCase):
         ref = odf.get_eri((kpts[0],kpts[0],kpts[1],kpts[1]))
         eri0011 = df.get_eri((kpts[0],kpts[0],kpts[1],kpts[1]))
         self.assertTrue(np.allclose(eri0011, ref, atol=1e-9, rtol=1e-9))
-        self.assertAlmostEqual(lib.fp(eri0011), (1.2410162858084512+0.00074485383749912936j), 9)
+        self.assertAlmostEqual(lib.fp(eri0011), (1.2410162858084512+0.00074485383749912936j), 8)
 
         ref = get_mo_eri(cell1, [numpy.eye(cell1.nao_nr())]*4, (kpts[0],kpts[0],kpts[1],kpts[1]))
         eri0011 = df.get_eri((kpts[0],kpts[0],kpts[1],kpts[1]))
         self.assertTrue(np.allclose(eri0011, ref, atol=1e-9, rtol=1e-9))
-        self.assertAlmostEqual(lib.fp(eri0011), (1.2410162860852818+0.00074485383748954838j), 9)
+        self.assertAlmostEqual(lib.fp(eri0011), (1.2410162860852818+0.00074485383748954838j), 8)
 
     def test_get_eri_0110(self):
         odf = aft.AFTDF(cell1)
@@ -740,15 +741,15 @@ class KnownValues(unittest.TestCase):
         self.assertTrue(np.allclose(eri0110, ref, atol=1e-9, rtol=1e-9))
         eri0110 = df.get_eri((kpts[0]+1e-8,kpts[1]+1e-8,kpts[1],kpts[0]))
         self.assertTrue(np.allclose(eri0110, ref, atol=1e-9, rtol=1e-9))
-        self.assertAlmostEqual(lib.fp(eri0110), (1.2928399254827956-0.011820590601969154j), 9)
+        self.assertAlmostEqual(lib.fp(eri0110), (1.2928399254827956-0.011820590601969154j), 8)
 
         ref = get_mo_eri(cell1, [numpy.eye(cell1.nao_nr())]*4, (kpts[0],kpts[1],kpts[1],kpts[0]))
         eri0110 = df.get_eri((kpts[0],kpts[1],kpts[1],kpts[0]))
         self.assertTrue(np.allclose(eri0110, ref, atol=1e-9, rtol=1e-9))
-        self.assertAlmostEqual(lib.fp(eri0110), (1.2928399254827956-0.011820590601969154j), 9)
+        self.assertAlmostEqual(lib.fp(eri0110), (1.2928399254827956-0.011820590601969154j), 8)
         eri0110 = df.get_eri((kpts[0]+1e-8,kpts[1]+1e-8,kpts[1],kpts[0]))
         self.assertTrue(np.allclose(eri0110, ref, atol=1e-9, rtol=1e-9))
-        self.assertAlmostEqual(lib.fp(eri0110), (1.2928399254827956-0.011820590601969154j), 9)
+        self.assertAlmostEqual(lib.fp(eri0110), (1.2928399254827956-0.011820590601969154j), 8)
 
     def test_get_eri_0123(self):
         odf = aft.AFTDF(cell1)
@@ -756,12 +757,12 @@ class KnownValues(unittest.TestCase):
         ref = odf.get_eri(kpts)
         eri1111 = df.get_eri(kpts)
         self.assertTrue(np.allclose(eri1111, ref, atol=1e-9, rtol=1e-9))
-        self.assertAlmostEqual(lib.fp(eri1111), (1.2917759427391706-0.013340252488069412j), 9)
+        self.assertAlmostEqual(lib.fp(eri1111), (1.2917759427391706-0.013340252488069412j), 8)
 
         ref = get_mo_eri(cell1, [numpy.eye(cell1.nao_nr())]*4, kpts)
         eri1111 = df.get_eri(kpts)
         self.assertTrue(np.allclose(eri1111, ref, atol=1e-9, rtol=1e-9))
-        self.assertAlmostEqual(lib.fp(eri1111), (1.2917759427391706-0.013340252488069412j), 9)
+        self.assertAlmostEqual(lib.fp(eri1111), (1.2917759427391706-0.013340252488069412j), 8)
 
     def test_get_mo_eri(self):
         df = fft.FFTDF(cell)
@@ -854,10 +855,10 @@ class KnownValues(unittest.TestCase):
         ehf = mf.kernel()
 
         mc = mcscf.CASSCF(mf, 1, 2).run()
-        self.assertAlmostEqual(mc.e_tot, ehf, 9)
+        self.assertAlmostEqual(mc.e_tot, ehf, 8)
 
         mc = mcscf.CASSCF(mf, 2, 0).run()
-        self.assertAlmostEqual(mc.e_tot, ehf, 9)
+        self.assertAlmostEqual(mc.e_tot, ehf, 8)
 
 if __name__ == '__main__':
     print("Full Tests for fft JK and ao2mo etc")

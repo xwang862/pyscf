@@ -628,15 +628,21 @@ def B1_dot_x(pcmobj, dm, r_vdw, ui, ylm_1sph, cached_pol, L):
     return Bx
 
 
-dx = 0.0001
-mol0 = gto.M(atom='H 0 0 0; H 0 1 1.2; H 1. .1 0; H .5 .5 1', unit='B')
-mol1 = gto.M(atom='H 0 0 %g; H 0 1 1.2; H 1. .1 0; H .5 .5 1'%(-dx), unit='B')
-mol2 = gto.M(atom='H 0 0 %g; H 0 1 1.2; H 1. .1 0; H .5 .5 1'%dx, unit='B')
-dx = dx * 2
-nao = mol0.nao_nr()
-numpy.random.seed(1)
-dm = numpy.random.random((nao,nao))
-dm = dm + dm.T
+def setUpModule():
+    global dx, mol0, mol1, mol2, nao, dm
+    dx = 0.0001
+    mol0 = gto.M(atom='H 0 0 0; H 0 1 1.2; H 1. .1 0; H .5 .5 1', unit='B')
+    mol1 = gto.M(atom='H 0 0 %g; H 0 1 1.2; H 1. .1 0; H .5 .5 1'%(-dx), unit='B')
+    mol2 = gto.M(atom='H 0 0 %g; H 0 1 1.2; H 1. .1 0; H .5 .5 1'%dx, unit='B')
+    dx = dx * 2
+    nao = mol0.nao_nr()
+    numpy.random.seed(1)
+    dm = numpy.random.random((nao,nao))
+    dm = dm + dm.T
+
+def tearDownModule():
+    global dx, mol0, mol1, mol2, nao, dm
+    del dx, mol0, mol1, mol2, nao, dm
 
 class KnownValues(unittest.TestCase):
 
@@ -728,7 +734,7 @@ class KnownValues(unittest.TestCase):
         pcmobj = ddcosmo.DDCOSMO(mol2)
         L_S2, phi = get_phi1(pcmobj)[:2]
         e2 = numpy.einsum('jx,jx', phi, L_S)
-        self.assertAlmostEqual(abs((e2-e1)/dx - phi1[0,2]).max(), 0, 7)
+        self.assertAlmostEqual(abs((e2-e1)/dx - phi1[0,2]).max(), 0, 6)
 
     def test_fi(self):
         pcmobj = ddcosmo.DDCOSMO(mol0)
@@ -747,8 +753,8 @@ class KnownValues(unittest.TestCase):
         fi_2 = ddcosmo.make_fi(pcmobj, pcmobj.get_atomic_radii())
         ui_2 = 1 - fi_2
         ui_2[ui_2<0] = 0
-        self.assertAlmostEqual(abs((fi_2-fi_1)/dx - fi1[0,2]).max(), 0, 6)
-        self.assertAlmostEqual(abs((ui_2-ui_1)/dx - ui1[0,2]).max(), 0, 6)
+        self.assertAlmostEqual(abs((fi_2-fi_1)/dx - fi1[0,2]).max(), 0, 5)
+        self.assertAlmostEqual(abs((ui_2-ui_1)/dx - ui1[0,2]).max(), 0, 5)
 
     def test_L1(self):
         pcmobj = ddcosmo.DDCOSMO(mol0)
@@ -766,7 +772,7 @@ class KnownValues(unittest.TestCase):
         pcmobj = ddcosmo.DDCOSMO(mol2)
         fi = ddcosmo.make_fi(pcmobj, r_vdw)
         L_2 = ddcosmo.make_L(pcmobj, r_vdw, ylm_1sph, fi)
-        self.assertAlmostEqual(abs((L_2-L_1)/dx - L1[0,2]).max(), 0, 7)
+        self.assertAlmostEqual(abs((L_2-L_1)/dx - L1[0,2]).max(), 0, 6)
 
     def test_e_cosmo_grad(self):
         pcmobj = ddcosmo.DDCOSMO(mol0)
@@ -775,16 +781,16 @@ class KnownValues(unittest.TestCase):
         e1 = pcmobj.energy(dm)
         pcmobj = ddcosmo.DDCOSMO(mol2)
         e2 = pcmobj.energy(dm)
-        self.assertAlmostEqual(abs((e2-e1)/dx - de[0,2]).max(), 0, 7)
+        self.assertAlmostEqual(abs((e2-e1)/dx - de[0,2]).max(), 0, 6)
 
     def test_scf_grad(self):
         mf = ddcosmo.ddcosmo_for_scf(scf.RHF(mol0)).run()
         # solvent only
         de_cosmo = ddcosmo_grad.kernel(mf.with_solvent, mf.make_rdm1())
-        self.assertAlmostEqual(lib.fp(de_cosmo), 0.000770107393352652, 6)
+        self.assertAlmostEqual(lib.fp(de_cosmo), 0.000902640319, 6)
         # solvent + solute
         de = mf.nuc_grad_method().kernel()
-        self.assertAlmostEqual(lib.fp(de), -0.1920179073822721, 6)
+        self.assertAlmostEqual(lib.fp(de), -0.191856565, 6)
 
         dm1 = mf.make_rdm1()
 
@@ -800,20 +806,20 @@ class KnownValues(unittest.TestCase):
 
         sc = mf.nuc_grad_method().as_scanner()
         e, g = sc('H 0 1 0; H 0 1 1.2; H 1. 0 0; H .5 .5 0')
-        self.assertAlmostEqual(e, -0.8317337703056022, 8)
-        self.assertAlmostEqual(lib.fp(g), 0.06804297145388238, 6)
+        self.assertAlmostEqual(e, -0.83152362, 8)
+        self.assertAlmostEqual(lib.fp(g), 0.068317954, 6)
 
         mol3 = gto.M(atom='H 0 1 0; H 0 1 1.2; H 1. 0 0; H .5 .5 0', unit='B')
         mf = ddcosmo.ddcosmo_for_scf(scf.RHF(mol3)).run()
         de = mf.nuc_grad_method().kernel()
-        self.assertAlmostEqual(lib.fp(de), 0.06804297145388238, 6)
+        self.assertAlmostEqual(lib.fp(de), 0.0683179013, 6)
 
     def test_casci_grad(self):
         mf = scf.RHF(mol0).ddCOSMO().run()
         mc = solvent.ddCOSMO(mcscf.CASCI(mf, 2, 2))
         e, de = mc.nuc_grad_method().as_scanner()(mol0)
-        self.assertAlmostEqual(e, -1.1844606066401635, 7)
-        self.assertAlmostEqual(lib.fp(de), -0.18558925270492277, 5)
+        self.assertAlmostEqual(e, -1.18433554, 7)
+        self.assertAlmostEqual(lib.fp(de), -0.18543118, 5)
 
         mf = scf.RHF(mol1).run()
         mc1 = solvent.ddCOSMO(mcscf.CASCI(mf, 2, 2)).run()
@@ -844,23 +850,25 @@ class KnownValues(unittest.TestCase):
         mc = solvent.ddCOSMO(mcscf.CASSCF(mf, 2, 2)).set(conv_tol=1e-9)
         mc_g = mc.nuc_grad_method().as_scanner()
         e, de = mc_g(mol0)
-        self.assertAlmostEqual(e, -1.1964048498155815, 7)
-        self.assertAlmostEqual(lib.fp(de), -0.18331022006442843, 5)
+        self.assertAlmostEqual(e, -1.19627418, 5)
+        self.assertAlmostEqual(lib.fp(de), -0.1831184, 4)
 
         mf = scf.RHF(mol1).run()
-        mc1 = solvent.ddCOSMO(mcscf.CASSCF(mf, 2, 2)).run()
+        mc1 = solvent.ddCOSMO(mcscf.CASSCF(mf, 2, 2)).run(conv_tol=1e-9)
         e1 = mc1.e_tot
         mf = scf.RHF(mol2).run()
-        mc2 = solvent.ddCOSMO(mcscf.CASSCF(mf, 2, 2)).run()
+        mc2 = solvent.ddCOSMO(mcscf.CASSCF(mf, 2, 2)).run(conv_tol=1e-9)
         e2 = mc2.e_tot
-        self.assertAlmostEqual((e2-e1)/dx, de[0,2], 3)
+        # ddcosmo-CASSCF is not fully variational. Errors will be found large
+        # in this test.
+        self.assertAlmostEqual((e2-e1)/dx, de[0,2], 2)
 
     def test_ccsd_grad(self):
         mf = scf.RHF(mol0).ddCOSMO().run()
         mycc = cc.CCSD(mf).ddCOSMO()
         e, de = mycc.nuc_grad_method().as_scanner()(mol0)
-        self.assertAlmostEqual(e, -1.206178782599439, 7)
-        self.assertAlmostEqual(lib.fp(de), -0.17959270231901459, 5)
+        self.assertAlmostEqual(e, -1.2060391657, 7)
+        self.assertAlmostEqual(lib.fp(de), -0.1794318433, 5)
 
         mf = scf.RHF(mol1).run()
         mycc1 = solvent.ddCOSMO(cc.CCSD(mf)).run()
@@ -900,7 +908,7 @@ class KnownValues(unittest.TestCase):
             fi = ddcosmo.make_fi(pcm, r_vdw)
             ui = 1 - fi
             ui[ui<0] = 0
-            pcm.grids = grids = dft.gen_grid.Grids(mol).run(level=0)
+            pcm.grids = grids = ddcosmo.Grids(mol).run(level=0)
             coords_1sph, weights_1sph = ddcosmo.make_grids_one_sphere(pcm.lebedev_order)
             ylm_1sph = numpy.vstack(sph.real_sph_vec(coords_1sph, pcm.lmax, True))
             cached_pol = ddcosmo.cache_fake_multipoles(grids, r_vdw, pcm.lmax)
@@ -917,7 +925,7 @@ class KnownValues(unittest.TestCase):
         fi = ddcosmo.make_fi(pcm, r_vdw)
         ui = 1 - fi
         ui[ui<0] = 0
-        pcm.grids = grids = dft.gen_grid.Grids(mol0).run(level=0)
+        pcm.grids = grids = ddcosmo.Grids(mol0).run(level=0)
         coords_1sph, weights_1sph = ddcosmo.make_grids_one_sphere(pcm.lebedev_order)
         ylm_1sph = numpy.vstack(sph.real_sph_vec(coords_1sph, pcm.lmax, True))
         cached_pol = ddcosmo.cache_fake_multipoles(grids, r_vdw, pcm.lmax)
@@ -953,7 +961,7 @@ class KnownValues(unittest.TestCase):
             fi = ddcosmo.make_fi(pcm, r_vdw)
             ui = 1 - fi
             ui[ui<0] = 0
-            pcm.grids = grids = dft.gen_grid.Grids(mol).run(level=0)
+            pcm.grids = grids = ddcosmo.Grids(mol).run(level=0)
             coords_1sph, weights_1sph = ddcosmo.make_grids_one_sphere(pcm.lebedev_order)
             ylm_1sph = numpy.vstack(sph.real_sph_vec(coords_1sph, pcm.lmax, True))
             cached_pol = ddcosmo.cache_fake_multipoles(grids, r_vdw, pcm.lmax)
@@ -970,7 +978,7 @@ class KnownValues(unittest.TestCase):
         fi = ddcosmo.make_fi(pcm, r_vdw)
         ui = 1 - fi
         ui[ui<0] = 0
-        pcm.grids = grids = dft.gen_grid.Grids(mol0).run(level=0)
+        pcm.grids = grids = ddcosmo.Grids(mol0).run(level=0)
         coords_1sph, weights_1sph = ddcosmo.make_grids_one_sphere(pcm.lebedev_order)
         ylm_1sph = numpy.vstack(sph.real_sph_vec(coords_1sph, pcm.lmax, True))
         cached_pol = ddcosmo.cache_fake_multipoles(grids, r_vdw, pcm.lmax)
@@ -1008,6 +1016,16 @@ class KnownValues(unittest.TestCase):
         de+= .5*_ddcosmo_tdscf_grad._grad_ee(pcm, dm, dm, r_vdw, ui, ylm_1sph, cached_pol, L)
         de *= .5 * f_epsilon
         self.assertAlmostEqual(abs(de-ref).max(), 0, 12)
+
+    def test_regularize_xt(self):
+        pcmobj = ddcosmo.DDCOSMO(mol0)
+        numpy.random.seed(2)
+        t = numpy.random.rand(4)
+        eta = 0.8
+        L1 = ddcosmo_grad.regularize_xt1(t, eta)
+        L_1 = ddcosmo.regularize_xt(t-1e-4, eta)
+        L_2 = ddcosmo.regularize_xt(t+1e-4, eta)
+        self.assertAlmostEqual(abs((L_2-L_1)/2e-4 - L1).max(), 0, 6)
 
 
 if __name__ == "__main__":

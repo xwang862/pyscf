@@ -40,7 +40,8 @@ from pyscf.pbc.scf import addons
 from pyscf.pbc.scf import chkfile  # noqa
 from pyscf.pbc import tools
 from pyscf.pbc import df
-from pyscf.pbc.scf.rsjk import RangeSeparationJKBuilder
+from pyscf.pbc.scf.rsjk import RangeSeparatedJKBuilder
+from pyscf.pbc.lib.kpts import KPoints
 from pyscf import __config__
 
 WITH_META_LOWDIN = getattr(__config__, 'pbc_scf_analyze_with_meta_lowdin', True)
@@ -59,28 +60,7 @@ def get_ovlp(mf, cell=None, kpts=None):
     '''
     if cell is None: cell = mf.cell
     if kpts is None: kpts = mf.kpts
-    # Avoid pbcopt's prescreening in the lattice sum, for better accuracy
-    s = cell.pbc_intor('int1e_ovlp', hermi=0, kpts=kpts,
-                       pbcopt=lib.c_null_ptr())
-    s = lib.asarray(s)
-    hermi_error = abs(s - s.conj().transpose(0,2,1)).max()
-    if hermi_error > cell.precision and hermi_error > 1e-12:
-        logger.warn(mf, '%.4g error found in overlap integrals. '
-                    'cell.precision  or  cell.rcut  can be adjusted to '
-                    'improve accuracy.')
-
-    cond = np.max(lib.cond(s))
-    if cond * cell.precision > 1e2:
-        prec = 1e2 / cond
-        rmin = max([cell.bas_rcut(ib, prec) for ib in range(cell.nbas)])
-        if cell.rcut < rmin:
-            logger.warn(mf, 'Singularity detected in overlap matrix.  '
-                        'Integral accuracy may be not enough.\n      '
-                        'You can adjust  cell.precision  or  cell.rcut  to '
-                        'improve accuracy.  Recommended values are\n      '
-                        'cell.precision = %.2g  or smaller.\n      '
-                        'cell.rcut = %.4g  or larger.', prec, rmin)
-    return s
+    return pbchf.get_ovlp(cell, kpts)
 
 
 def get_hcore(mf, cell=None, kpts=None):
@@ -179,8 +159,8 @@ def get_fermi(mf, mo_energy_kpts=None, mo_occ_kpts=None):
     if mo_occ_kpts is None: mo_occ_kpts = mf.mo_occ
 
     # mo_energy_kpts and mo_occ_kpts are k-point RHF quantities
-    assert(mo_energy_kpts[0].ndim == 1)
-    assert(mo_occ_kpts[0].ndim == 1)
+    assert (mo_energy_kpts[0].ndim == 1)
+    assert (mo_occ_kpts[0].ndim == 1)
 
     # occ array in mo_occ_kpts may have different size. See issue #250
     nocc = sum(mo_occ.sum() for mo_occ in mo_occ_kpts) / 2
@@ -226,8 +206,8 @@ def get_occ(mf, mo_energy_kpts=None, mo_coeff_kpts=None):
         for k,kpt in enumerate(mf.cell.get_scaled_kpts(mf.kpts)):
             logger.debug(mf, '  %2d (%6.3f %6.3f %6.3f)   %s %s',
                          k, kpt[0], kpt[1], kpt[2],
-                         mo_energy_kpts[k][mo_occ_kpts[k]> 0],
-                         mo_energy_kpts[k][mo_occ_kpts[k]==0])
+                         np.sort(mo_energy_kpts[k][mo_occ_kpts[k]> 0]),
+                         np.sort(mo_energy_kpts[k][mo_occ_kpts[k]==0]))
         np.set_printoptions(threshold=1000)
 
     return mo_occ_kpts
@@ -252,9 +232,8 @@ def make_rdm1(mo_coeff_kpts, mo_occ_kpts, **kwargs):
         dm_kpts : (nkpts, nao, nao) ndarray
     '''
     nkpts = len(mo_occ_kpts)
-    dm_kpts = [mol_hf.make_rdm1(mo_coeff_kpts[k], mo_occ_kpts[k])
-               for k in range(nkpts)]
-    return lib.asarray(dm_kpts)
+    dm = [mol_hf.make_rdm1(mo_coeff_kpts[k], mo_occ_kpts[k]) for k in range(nkpts)]
+    return lib.tag_array(dm, mo_coeff=mo_coeff_kpts, mo_occ=mo_occ_kpts)
 
 
 def energy_elec(mf, dm_kpts=None, h1e_kpts=None, vhf_kpts=None):
@@ -344,6 +323,35 @@ def canonicalize(mf, mo_coeff_kpts, mo_occ_kpts, fock=None):
         mo_energy.append(mo_e)
     return mo_energy, mo_coeff
 
+def _cast_mol_init_guess(fn):
+    def fn_init_guess(mf, cell=None, kpts=None):
+        if cell is None: cell = mf.cell
+        if kpts is None: kpts = mf.kpts
+        dm = fn(cell)
+        nkpts = len(kpts)
+        dm_kpts = np.asarray([dm] * nkpts)
+        if hasattr(dm, 'mo_coeff'):
+            mo_coeff = [dm.mo_coeff] * nkpts
+            mo_occ = [dm.mo_occ] * nkpts
+            dm_kpts = lib.tag_array(dm_kpts, mo_coeff=mo_coeff, mo_occ=mo_occ)
+        return dm_kpts
+    fn_init_guess.__name__ = fn.__name__
+    fn_init_guess.__doc__ = (
+        'Generates initial guess density matrix and the orbitals of the initial '
+        'guess DM ' + fn.__doc__)
+    return fn_init_guess
+
+def init_guess_by_minao(cell, kpts=None):
+    '''Generates initial guess density matrix and the orbitals of the initial
+    guess DM based on ANO basis.
+    '''
+    return KSCF(cell).init_guess_by_minao(cell, kpts)
+
+def init_guess_by_atom(cell, kpts=None):
+    '''Generates initial guess density matrix and the orbitals of the initial
+    guess DM based on the superposition of atomic HF density matrix.
+    '''
+    return KSCF(cell).init_guess_by_atom(cell, kpts)
 
 def init_guess_by_chkfile(cell, chkfile_name, project=None, kpts=None):
     '''Read the KHF results from checkpoint file, then project it to the
@@ -359,7 +367,7 @@ def init_guess_by_chkfile(cell, chkfile_name, project=None, kpts=None):
 
 def dip_moment(cell, dm_kpts, unit='Debye', verbose=logger.NOTE,
                grids=None, rho=None, kpts=np.zeros((1,3))):
-    ''' Dipole moment in the unit cell (is it well defined)?
+    ''' Dipole moment in the cell (is it well defined)?
 
     Args:
          cell : an instance of :class:`Cell`
@@ -474,7 +482,7 @@ class KSCF(pbchf.SCF):
 
         self.exxdiv = exxdiv
         self.kpts = kpts
-        self.conv_tol = cell.precision * 10
+        self.conv_tol = max(cell.precision * 10, 1e-8)
 
         self.exx_built = False
         self._keys = self._keys.union(['cell', 'exx_built', 'exxdiv', 'with_df', 'rsjk'])
@@ -485,6 +493,7 @@ class KSCF(pbchf.SCF):
             # To handle the attribute kpt loaded from chkfile
             self.kpt = self.__dict__.pop('kpts')
         return self.with_df.kpts
+
     @kpts.setter
     def kpts(self, x):
         self.with_df.kpts = np.reshape(x, (-1,3))
@@ -527,6 +536,8 @@ class KSCF(pbchf.SCF):
             logger.info(self, '    Total energy shift due to Ewald probe charge'
                         ' = -1/2 * Nelec*madelung = %.12g',
                         madelung*nelectron * -.5)
+        if getattr(self, 'smearing_method', None) is not None:
+            logger.info(self, 'Smearing method = %s', self.smearing_method)
         logger.info(self, 'DF object = %s', self.with_df)
         if not getattr(self.with_df, 'build', None):
             # .dump_flags() is called in pbc.df.build function
@@ -535,7 +546,6 @@ class KSCF(pbchf.SCF):
 
     def check_sanity(self):
         mol_hf.SCF.check_sanity(self)
-        self.with_df.check_sanity()
         if (isinstance(self.exxdiv, str) and self.exxdiv.lower() != 'ewald' and
             isinstance(self.with_df, df.df.DF)):
             logger.warn(self, 'exxdiv %s is not supported in DF or MDF',
@@ -555,51 +565,17 @@ class KSCF(pbchf.SCF):
         if self.rsjk:
             if not np.all(self.rsjk.kpts == self.kpts):
                 self.rsjk = self.rsjk.__class__(cell, self.kpts)
-            self.rsjk.build(direct_scf_tol=self.direct_scf_tol)
+
+        # Let df.build() be called by get_jk function later on needs.
+        # DFT objects may need to initiailze df with different paramters.
+        #if self.with_df:
+        #    self.with_df.build()
 
         if self.verbose >= logger.WARN:
             self.check_sanity()
         return self
 
-    def get_init_guess(self, cell=None, key='minao'):
-        if cell is None:
-            cell = self.cell
-        dm_kpts = None
-        key = key.lower()
-        if key == '1e' or key == 'hcore':
-            dm_kpts = self.init_guess_by_1e(cell)
-        elif getattr(cell, 'natm', 0) == 0:
-            logger.info(self, 'No atom found in cell. Use 1e initial guess')
-            dm_kpts = self.init_guess_by_1e(cell)
-        elif key == 'atom':
-            dm = self.init_guess_by_atom(cell)
-        elif key[:3] == 'chk':
-            try:
-                dm_kpts = self.from_chk()
-            except (IOError, KeyError):
-                logger.warn(self, 'Fail to read %s. Use MINAO initial guess',
-                            self.chkfile)
-                dm = self.init_guess_by_minao(cell)
-        else:
-            dm = self.init_guess_by_minao(cell)
-
-        if dm_kpts is None:
-            dm_kpts = lib.asarray([dm]*len(self.kpts))
-
-        ne = np.einsum('kij,kji->', dm_kpts, self.get_ovlp(cell)).real
-        # FIXME: consider the fractional num_electron or not? This maybe
-        # relate to the charged system.
-        nkpts = len(self.kpts)
-        nelectron = float(self.cell.tot_electrons(nkpts))
-        if abs(ne - nelectron) > 1e-7*nkpts:
-            logger.debug(self, 'Big error detected in the electron number '
-                         'of initial guess density matrix (Ne/cell = %g)!\n'
-                         '  This can cause huge error in Fock matrix and '
-                         'lead to instability in SCF for low-dimensional '
-                         'systems.\n  DM is normalized wrt the number '
-                         'of electrons %s', ne/nkpts, nelectron/nkpts)
-            dm_kpts *= (nelectron / ne).reshape(-1,1,1)
-        return dm_kpts
+    get_init_guess = pbchf.SCF.get_init_guess
 
     def init_guess_by_1e(self, cell=None):
         if cell is None: cell = self.cell
@@ -607,6 +583,9 @@ class KSCF(pbchf.SCF):
             logger.warn(self, 'Hcore initial guess is not recommended in '
                         'the SCF of low-dimensional systems.')
         return mol_hf.SCF.init_guess_by_1e(self, cell)
+
+    init_guess_by_minao = _cast_mol_init_guess(mol_hf.init_guess_by_minao)
+    init_guess_by_atom = _cast_mol_init_guess(mol_hf.init_guess_by_atom)
 
     get_hcore = get_hcore
     get_ovlp = get_ovlp
@@ -647,14 +626,8 @@ class KSCF(pbchf.SCF):
         '''
         if dm_kpts is None:
             dm_kpts = self.make_rdm1()
-        if self.rsjk and self.direct_scf:
-            # Enable direct-SCF for real space JK builder
-            ddm = dm_kpts - dm_last
-            vj, vk = self.get_jk(cell, ddm, hermi, kpts, kpts_band)
-            return vhf_last + vj - vk * .5
-        else:
-            vj, vk = self.get_jk(cell, dm_kpts, hermi, kpts, kpts_band)
-            return vj - vk * .5
+        vj, vk = self.get_jk(cell, dm_kpts, hermi, kpts, kpts_band)
+        return vj - vk * .5
 
     def analyze(self, verbose=None, with_meta_lowdin=WITH_META_LOWDIN,
                 **kwargs):
@@ -797,7 +770,7 @@ class KSCF(pbchf.SCF):
                 self.with_df = getattr(df, df_method)(self.cell, self.kpts)
 
         if 'RS' in J or 'RS' in K:
-            self.rsjk = RangeSeparationJKBuilder(self.cell, self.kpts)
+            self.rsjk = RangeSeparatedJKBuilder(self.cell, self.kpts)
             self.rsjk.verbose = self.verbose
 
         # For nuclear attraction
@@ -824,17 +797,20 @@ class KSCF(pbchf.SCF):
         return sfx2c1e.sfx2c1e(self)
     x2c = x2c1e = sfx2c1e
 
-    def to_rhf(self, mf):
+    def to_rhf(self, mf=None):
         '''Convert the input mean-field object to a KRHF/KROHF/KRKS/KROKS object'''
-        return addons.convert_to_rhf(mf)
+        return addons.convert_to_rhf(self, mf)
 
-    def to_uhf(self, mf):
+    def to_uhf(self, mf=None):
         '''Convert the input mean-field object to a KUHF/KUKS object'''
-        return addons.convert_to_uhf(mf)
+        return addons.convert_to_uhf(self, mf)
 
-    def to_ghf(self, mf):
+    def to_ghf(self, mf=None):
         '''Convert the input mean-field object to a KGHF/KGKS object'''
-        return addons.convert_to_ghf(mf)
+        return addons.convert_to_ghf(self, mf)
+
+    def to_khf(self):
+        return self
 
     as_scanner = as_scanner
 
@@ -842,10 +818,35 @@ class KSCF(pbchf.SCF):
 class KRHF(KSCF, pbchf.RHF):
     def check_sanity(self):
         cell = self.cell
-        if cell.spin != 0 and len(self.kpts) % 2 != 0:
+        if isinstance(self.kpts, KPoints):
+            nkpts = self.kpts.nkpts
+        else:
+            nkpts = len(self.kpts)
+        if cell.spin != 0 and nkpts % 2 != 0:
             logger.warn(self, 'Problematic nelec %s and number of k-points %d '
-                        'found in KRHF method.', cell.nelec, len(self.kpts))
+                        'found in KRHF method.', cell.nelec, nkpts)
         return KSCF.check_sanity(self)
+
+    def get_init_guess(self, cell=None, key='minao'):
+        dm_kpts = pbchf.SCF.get_init_guess(self, cell, key)
+        nkpts = len(self.kpts)
+        if dm_kpts.ndim == 2:
+            # dm[nao,nao] at gamma point -> dm_kpts[nkpts,nao,nao]
+            dm_kpts = np.repeat(dm_kpts[None,:,:], nkpts, axis=0)
+
+        ne = np.einsum('kij,kji->', dm_kpts, self.get_ovlp(cell)).real
+        # FIXME: consider the fractional num_electron or not? This maybe
+        # relate to the charged system.
+        nelectron = float(self.cell.tot_electrons(nkpts))
+        if abs(ne - nelectron) > 0.01*nkpts:
+            logger.debug(self, 'Big error detected in the electron number '
+                         'of initial guess density matrix (Ne/cell = %g)!\n'
+                         '  This can cause huge error in Fock matrix and '
+                         'lead to instability in SCF for low-dimensional '
+                         'systems.\n  DM is normalized wrt the number '
+                         'of electrons %s', ne/nkpts, nelectron/nkpts)
+            dm_kpts *= (nelectron / ne).reshape(-1,1,1)
+        return dm_kpts
 
     def convert_from_(self, mf):
         '''Convert given mean-field object to KRHF'''
@@ -856,7 +857,7 @@ class KRHF(KSCF, pbchf.RHF):
         from pyscf.pbc.grad import krhf
         return krhf.Gradients(self)
 
-del(WITH_META_LOWDIN, PRE_ORTH_METHOD)
+del (WITH_META_LOWDIN, PRE_ORTH_METHOD)
 
 
 if __name__ == '__main__':

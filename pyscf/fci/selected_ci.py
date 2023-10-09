@@ -43,7 +43,7 @@ from pyscf.fci import direct_spin1
 from pyscf.fci import rdm
 from pyscf import __config__
 
-libfci = lib.load_library('libfci')
+libfci = direct_spin1.libfci
 
 @lib.with_doc(direct_spin1.contract_2e.__doc__)
 def contract_2e(eri, civec_strs, norb, nelec, link_index=None):
@@ -115,7 +115,7 @@ def select_strs(myci, eri, eri_pq_max, civec_max, strs, norb, nelec):
     strs = numpy.asarray(strs, dtype=numpy.int64)
     nstrs = len(strs)
     nvir = norb - nelec
-    strs_add = numpy.empty((nstrs*(nelec*nvir)**2//4), dtype=numpy.int64)
+    strs_add = numpy.empty((nstrs*((nelec+1)*(nvir+1))**2//4), dtype=numpy.int64)
     libfci.SCIselect_strs.restype = ctypes.c_int
     nadd = libfci.SCIselect_strs(strs_add.ctypes.data_as(ctypes.c_void_p),
                                  strs.ctypes.data_as(ctypes.c_void_p),
@@ -286,7 +286,7 @@ def gen_cre_linkstr(strs, norb, nelec):
     return link_index
 
 
-def make_hdiag(h1e, eri, ci_strs, norb, nelec):
+def make_hdiag(h1e, eri, ci_strs, norb, nelec, compress=False):
     ci_coeff, nelec, ci_strs = _unpack(None, nelec, ci_strs)
     na = len(ci_strs[0])
     nb = len(ci_strs[1])
@@ -332,9 +332,9 @@ def kernel_fixed_space(myci, h1e, eri, norb, nelec, ci_strs, ci0=None,
     h2e = ao2mo.restore(1, h2e, norb)
 
     link_index = _all_linkstr_index(ci_strs, norb, nelec)
-    hdiag = myci.make_hdiag(h1e, eri, ci_strs, norb, nelec)
+    hdiag = myci.make_hdiag(h1e, eri, ci_strs, norb, nelec, compress=True)
 
-    if isinstance(ci0, _SCIvector):
+    if isinstance(ci0, SCIvector):
         if ci0.size == na*nb:
             ci0 = [ci0.ravel()]
         else:
@@ -342,8 +342,10 @@ def kernel_fixed_space(myci, h1e, eri, norb, nelec, ci_strs, ci0=None,
     else:
         ci0 = myci.get_init_guess(ci_strs, norb, nelec, nroots, hdiag)
 
+    cpu0 = [logger.process_clock(), logger.perf_counter()]
     def hop(c):
         hc = myci.contract_2e(h2e, _as_SCIvector(c, ci_strs), norb, nelec, link_index)
+        cpu0[:] = log.timer_debug1('contract_2e', *cpu0)
         return hc.reshape(-1)
     precond = lambda x, e, *args: x/(hdiag-e+1e-4)
 
@@ -376,7 +378,7 @@ def kernel_float_space(myci, h1e, eri, norb, nelec, ci0=None,
     h2e = ao2mo.restore(1, h2e, norb)
 
 # TODO: initial guess from CISD
-    if isinstance(ci0, _SCIvector):
+    if isinstance(ci0, SCIvector):
         if ci0.size == len(ci0._strs[0])*len(ci0._strs[1]):
             ci0 = [ci0.ravel()]
         else:
@@ -400,7 +402,7 @@ def kernel_float_space(myci, h1e, eri, norb, nelec, ci0=None,
         if ci0.size < nroots:
             raise RuntimeError('Not enough selected-CI space for %d states' % nroots)
         ci_strs = ci0._strs
-        hdiag = myci.make_hdiag(h1e, eri, ci_strs, norb, nelec)
+        hdiag = myci.make_hdiag(h1e, eri, ci_strs, norb, nelec, compress=True)
         ci0 = myci.get_init_guess(ci_strs, norb, nelec, nroots, hdiag)
 
     def hop(c):
@@ -422,7 +424,7 @@ def kernel_float_space(myci, h1e, eri, norb, nelec, ci0=None,
 
         ci0 = [c.ravel() for c in ci0]
         link_index = _all_linkstr_index(ci_strs, norb, nelec)
-        hdiag = myci.make_hdiag(h1e, eri, ci_strs, norb, nelec)
+        hdiag = myci.make_hdiag(h1e, eri, ci_strs, norb, nelec, compress=True)
         #e, ci0 = lib.davidson(hop, ci0.reshape(-1), precond, tol=float_tol)
         e, ci0 = myci.eig(hop, ci0, precond, tol=float_tol, lindep=lindep,
                           max_cycle=max_cycle, max_space=max_space, nroots=nroots,
@@ -453,7 +455,7 @@ def kernel_float_space(myci, h1e, eri, norb, nelec, ci0=None,
     log.debug('Extra CI in selected space %s', (len(ci_strs[0]), len(ci_strs[1])))
     ci0 = [c.ravel() for c in ci0]
     link_index = _all_linkstr_index(ci_strs, norb, nelec)
-    hdiag = myci.make_hdiag(h1e, eri, ci_strs, norb, nelec)
+    hdiag = myci.make_hdiag(h1e, eri, ci_strs, norb, nelec, compress=True)
     e, c = myci.eig(hop, ci0, precond, tol=tol, lindep=lindep,
                     max_cycle=max_cycle, max_space=max_space, nroots=nroots,
                     max_memory=max_memory, verbose=log, **kwargs)
@@ -585,7 +587,7 @@ def trans_rdm1s(cibra_strs, ciket_strs, norb, nelec, link_index=None):
     '''
     cibra, nelec, ci_strs = _unpack(cibra_strs, nelec)
     ciket, nelec1, ci_strs1 = _unpack(ciket_strs, nelec)
-    assert(all(ci_strs[0] == ci_strs1[0]) and
+    assert (all(ci_strs[0] == ci_strs1[0]) and
            all(ci_strs[1] == ci_strs1[1]))
     if link_index is None:
         cd_indexa = cre_des_linkstr(ci_strs[0], norb, nelec[0])
@@ -753,7 +755,7 @@ class SelectedCI(direct_spin1.FCISolver):
         if getattr(civec_strs, '_strs', None) is not None:
             self._strs = civec_strs._strs
         else:
-            assert(civec_strs.size == len(self._strs[0])*len(self._strs[1]))
+            assert (civec_strs.size == len(self._strs[0])*len(self._strs[1]))
             civec_strs = _as_SCIvector(civec_strs, self._strs)
         return contract_2e(eri, civec_strs, norb, nelec, link_index)
 
@@ -762,11 +764,10 @@ class SelectedCI(direct_spin1.FCISolver):
         '''
         na = len(ci_strs[0])
         nb = len(ci_strs[1])
-        ci0 = direct_spin1._get_init_guess(na, nb, nroots, hdiag)
+        ci0 = direct_spin1._get_init_guess(na, nb, nroots, hdiag, nelec)
         return [_as_SCIvector(x, ci_strs) for x in ci0]
 
-    def make_hdiag(self, h1e, eri, ci_strs, norb, nelec):
-        return make_hdiag(h1e, eri, ci_strs, norb, nelec)
+    make_hdiag = staticmethod(make_hdiag)
 
     enlarge_space = enlarge_space
     kernel = kernel_float_space
@@ -899,19 +900,24 @@ def _all_linkstr_index(ci_strs, norb, nelec):
     dd_indexb = des_des_linkstr_tril(ci_strs[1], norb, nelec[1])
     return cd_indexa, dd_indexa, cd_indexb, dd_indexb
 
-# numpy.ndarray does not allow to attach attribtues.  Overwrite the
+# numpy.ndarray does not allow to attach attributes.  Overwrite the
 # numpy.ndarray class to tag the ._strs attribute
-class _SCIvector(numpy.ndarray):
+class SCIvector(numpy.ndarray):
+    '''An 2D np array for selected CI coefficients'''
     def __array_finalize__(self, obj):
         self._strs = getattr(obj, '_strs', None)
 
-    # Whenever the contents of the array was modified (through ufunc), the tag
-    # should be expired. Overwrite the output of ufunc to restore ndarray type.
-    def __array_wrap__(self, out, context=None):
-        return numpy.ndarray.__array_wrap__(self, out, context).view(numpy.ndarray)
+    # Special cases for ndarray when the array was modified (through ufunc)
+    def __array_wrap__(self, out):
+        if out.shape == self.shape:
+            return out
+        elif out.shape == ():  # if ufunc returns a scalar
+            return out[()]
+        else:
+            return out.view(numpy.ndarray)
 
 def _as_SCIvector(civec, ci_strs):
-    civec = civec.view(_SCIvector)
+    civec = civec.view(SCIvector)
     civec._strs = ci_strs
     return civec
 

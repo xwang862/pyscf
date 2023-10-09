@@ -18,7 +18,8 @@
 
 import sys
 from functools import reduce
-import numpy, scipy
+import numpy
+import scipy
 from pyscf import lib
 from pyscf import gto
 from pyscf.lib import logger
@@ -376,7 +377,7 @@ def project_init_guess (casscf, mo_init, prev_mol=None, priority=None, use_hf_co
 
     Kwargs:
         prev_mol : an instance of :class:`Mole`
-            If given, the inital guess orbitals are associated to the
+            If given, the initial guess orbitals are associated to the
             basis of prev_mol. Otherwise, the orbitals are presumed to
             be in the basis of casscf.mol. Beware linear dependencies if
             you are projecting from a LARGER basis to a SMALLER one.
@@ -500,7 +501,7 @@ def project_init_guess (casscf, mo_init, prev_mol=None, priority=None, use_hf_co
         # Interpret priority keyword
         nocc = ncore + ncas
         if isinstance (priority, str):
-            ridx = numpy.zeros ((2, nmo_init), dtype=numpy.bool)
+            ridx = numpy.zeros ((2, nmo_init), dtype=bool)
             ridx[0,:ncore] = ridx[1,ncore:nocc] = True
             if priority.lower () == 'active': ridx = ridx[::-1,:]
             elif not priority.lower () == 'core':
@@ -508,13 +509,13 @@ def project_init_guess (casscf, mo_init, prev_mol=None, priority=None, use_hf_co
             # Edge case: ncore == 0 or ncas == 0 -> remove zero rows from ridx
             ridx = ridx[ridx.sum (1).astype (bool)]
         else:
-            ridx = numpy.zeros ((len (priority), nmo), dtype=numpy.bool_)
+            ridx = numpy.zeros ((len (priority), nmo), dtype=bool)
             for row, idx in zip (ridx, priority):
                 try:
                     row[idx] = True
                 except IndexError:
                     raise RuntimeError ("Invalid priority keyword: index array cannot address shape (*,nmo_init)")
-            ridx_counts = ridx.astype (numpy.integer).sum (0)
+            ridx_counts = ridx.astype (int).sum (0)
             if numpy.any (ridx_counts > 1):
                 raise RuntimeError ("Invalid priority keyword: index array has repeated elements")
         incl = numpy.any (ridx, axis=0)
@@ -554,7 +555,7 @@ def project_init_guess_old(casscf, init_mo, prev_mol=None):
 
     Kwargs:
         prev_mol : an instance of :class:`Mole`
-            If given, the inital guess orbitals are associated to the geometry
+            If given, the initial guess orbitals are associated to the geometry
             and basis of prev_mol.  Otherwise, the orbitals are based of
             the geometry and basis of casscf.mol
 
@@ -712,6 +713,22 @@ def make_rdm1s(casscf, mo_coeff=None, ci=None, **kwargs):
     '''
     return casscf.make_rdm1s(mo_coeff, ci, **kwargs)
 
+def get_spin_square(casdm1, casdm2):
+    # DOI:10.1021/acs.jctc.1c00589 Eq (49)
+    spin_square = (0.75*numpy.einsum("ii", casdm1)
+                   - 0.5*numpy.einsum("ijji", casdm2)
+                   - 0.25*numpy.einsum("iijj", casdm2))
+    return spin_square
+
+def make_spin_casdm1(casdm1, casdm2, spin=None, nelec=None):
+    # DOI: 10.1002/qua.22320 Eq (3)
+    if spin is None:
+        spin = numpy.sqrt(get_spin_square(casdm1, casdm2) + 0.25) - 0.5
+    if nelec is None:
+        nelec = numpy.einsum("ii", casdm1)
+    spin_casdm1 = ((2. - nelec/2.)*casdm1 - numpy.einsum('ikkj->ij', casdm2))/(spin + 1)
+    return spin_casdm1
+
 def _is_uhf_mo(mo_coeff):
     return not (isinstance(mo_coeff, numpy.ndarray) and mo_coeff.ndim == 2)
 
@@ -736,7 +753,7 @@ def _make_rdm12_on_mo(casdm1, casdm2, ncore, ncas, nmo):
 def make_rdm12(casscf, mo_coeff=None, ci=None):
     if ci is None: ci = casscf.ci
     if mo_coeff is None: mo_coeff = casscf.mo_coeff
-    assert(not _is_uhf_mo(mo_coeff))
+    assert (not _is_uhf_mo(mo_coeff))
     nelecas = casscf.nelecas
     ncas = casscf.ncas
     ncore = casscf.ncore
@@ -761,11 +778,11 @@ def get_fock(casscf, mo_coeff=None, ci=None):
         return casscf.get_fock(mo_coeff, ci)
 
 def cas_natorb(casscf, mo_coeff=None, ci=None, sort=False):
-    '''Natrual orbitals in CAS space
+    '''Natural orbitals in CAS space
     '''
     if mo_coeff is None: mo_coeff = casscf.mo_coeff
     if _is_uhf_mo(mo_coeff):
-        raise RuntimeError('TODO: UCAS natrual orbitals')
+        raise RuntimeError('TODO: UCAS natural orbitals')
     else:
         return casscf.cas_natorb(mo_coeff, ci, sort=sort)
 
@@ -777,7 +794,7 @@ def map2hf(casscf, mf_mo=None, base=BASE, tol=MAP2HF_TOL):
     s = reduce(numpy.dot, (casscf.mo_coeff.T, s, mf_mo))
     idx = numpy.argwhere(abs(s) > tol)
     for i,j in idx:
-        logger.info(casscf, '<mo_coeff-mcscf|mo_coeff-hf>  %d  %d  %12.8f',
+        logger.info(casscf, '<mo_coeff-mcscf|mo_coeff-hf>  %-5d  %-5d  % 12.8f',
                     i+base, j+base, s[i,j])
     return idx
 
@@ -834,7 +851,7 @@ class StateAverageMCSCFSolver:
     pass
 
 def state_average(casscf, weights=(0.5,0.5), wfnsym=None):
-    ''' State average over the energy.  The energy funcitonal is
+    ''' State average over the energy.  The energy functional is
     E = w1<psi1|H|psi1> + w2<psi2|H|psi2> + ...
 
     Note we may need change the FCI solver to
@@ -855,7 +872,7 @@ def state_average(casscf, weights=(0.5,0.5), wfnsym=None):
     used as intermediates for calculations of the gradient of a single root in the context
     of the SA-CASSCF method; see: Mol. Phys. 99, 103 (2001).
     '''
-    assert(abs(sum(weights)-1) < 1e-3)
+    assert (abs(sum(weights)-1) < 1e-3)
     fcibase_class = casscf.fcisolver.__class__
     has_spin_square = getattr(casscf.fcisolver, 'spin_square', None)
     if wfnsym is None:
@@ -868,6 +885,9 @@ def state_average(casscf, weights=(0.5,0.5), wfnsym=None):
             self.weights = weights
             self.wfnsym = wfnsym
             self.e_states = [None]
+            # MRH 09/09/2022: I turned the _base_class property into an
+            # attribute to prevent conflict with fix_spin_ dynamic class
+            self._base_class = fcibase_class
             keys = set (('weights','e_states','_base_class'))
             self._keys = self._keys.union (keys)
 
@@ -878,11 +898,6 @@ def state_average(casscf, weights=(0.5,0.5), wfnsym=None):
             log.info('State-average over %d states with weights %s',
                      len(self.weights), self.weights)
             return self
-
-        @property
-        def _base_class (self):
-            ''' for convenience; this is equal to fcibase_class '''
-            return self.__class__.__bases__[0]
 
         def kernel(self, h1, h2, norb, nelec, ci0=None, **kwargs):
             if 'nroots' not in kwargs:
@@ -906,19 +921,20 @@ def state_average(casscf, weights=(0.5,0.5), wfnsym=None):
             return numpy.einsum('i,i->', e, self.weights), c
 
         def approx_kernel(self, h1, h2, norb, nelec, ci0=None, **kwargs):
-            try:
+            if hasattr(fcibase_class, 'approx_kernel'):
                 e, c = fcibase_class.approx_kernel(self, h1, h2, norb, nelec,
                                                    ci0=ci0, nroots=self.nroots,
                                                    wfnsym=self.wfnsym,
                                                    **kwargs)
-            except AttributeError:
+            else:
                 e, c = fcibase_class.kernel(self, h1, h2, norb, nelec, ci0=ci0,
                                             nroots=self.nroots,
                                             wfnsym=self.wfnsym, **kwargs)
             return numpy.einsum('i,i->', e, self.weights), c
 
         def states_make_rdm1(self, ci0, norb, nelec, *args, **kwargs):
-            dm1 = [fcibase_class.make_rdm1(self, c, norb, nelec, *args, **kwargs) for c in ci0]
+            fcibase = super()
+            dm1 = [fcibase.make_rdm1(c, norb, nelec, *args, **kwargs) for c in ci0]
             return dm1
 
         def make_rdm1(self, ci0, norb, nelec, *args, **kwargs):
@@ -926,10 +942,11 @@ def state_average(casscf, weights=(0.5,0.5), wfnsym=None):
                                                  self.states_make_rdm1(ci0, norb, nelec, *args, **kwargs))])
 
         def states_make_rdm1s(self, ci0, norb, nelec, *args, **kwargs):
+            fcibase = super()
             dm1a = []
             dm1b = []
             for c in ci0:
-                dm1s = fcibase_class.make_rdm1s(self, c, norb, nelec, *args, **kwargs)
+                dm1s = fcibase.make_rdm1s(c, norb, nelec, *args, **kwargs)
                 dm1a.append (dm1s[0])
                 dm1b.append (dm1s[1])
             return dm1a, dm1b
@@ -940,10 +957,11 @@ def state_average(casscf, weights=(0.5,0.5), wfnsym=None):
             return dm1s[0], dm1s[1]
 
         def states_make_rdm12(self, ci0, norb, nelec, *args, **kwargs):
+            fcibase = super()
             rdm1 = []
             rdm2 = []
             for c in ci0:
-                dm1, dm2 = fcibase_class.make_rdm12(self, c, norb, nelec, *args, **kwargs)
+                dm1, dm2 = fcibase.make_rdm12(c, norb, nelec, *args, **kwargs)
                 rdm1.append (dm1)
                 rdm2.append (dm2)
             return rdm1, rdm2
@@ -954,11 +972,31 @@ def state_average(casscf, weights=(0.5,0.5), wfnsym=None):
             rdm2 = numpy.einsum ('r,rpqst->pqst', self.weights, rdm2)
             return rdm1, rdm2
 
+        def states_make_rdm12s(self, ci0, norb, nelec, *args, **kwargs):
+            fcibase = super()
+            dm1a, dm1b = [], []
+            dm2aa, dm2ab, dm2bb = [], [], []
+            for c in ci0:
+                dm1s, dm2s = fcibase.make_rdm12s(c, norb, nelec, *args, **kwargs)
+                dm1a.append(dm1s[0])
+                dm1b.append(dm1s[1])
+                dm2aa.append(dm2s[0])
+                dm2ab.append(dm2s[1])
+                dm2bb.append(dm2s[2])
+            return (dm1a, dm1b), (dm2aa, dm2ab, dm2bb)
+
+        def make_rdm12s(self, ci0, norb, nelec, *args, **kwargs):
+            rdm1s, rdm2s = self.states_make_rdm12s(ci0, norb, nelec, *args, **kwargs)
+            rdm1s = numpy.einsum ('r,srpq->spq', self.weights, rdm1s)
+            rdm2s = numpy.einsum ('r,srpqtu->spqtu', self.weights, rdm2s)
+            return rdm1s, rdm2s
+
         def states_trans_rdm12 (self, ci1, ci0, norb, nelec, *args, **kwargs):
+            fcibase = super()
             tdm1 = []
             tdm2 = []
             for c1, c0 in zip (ci1, ci0):
-                dm1, dm2 = fcibase_class.trans_rdm12 (self, c1, c0, norb, nelec)
+                dm1, dm2 = fcibase.trans_rdm12 (c1, c0, norb, nelec)
                 tdm1.append (dm1)
                 tdm2.append (dm2)
             return tdm1, tdm2
@@ -976,7 +1014,8 @@ def state_average(casscf, weights=(0.5,0.5), wfnsym=None):
                 return numpy.dot(ss, weights), numpy.dot(multip, weights)
 
             def states_spin_square(self, ci0, norb, nelec, *args, **kwargs):
-                s = [fcibase_class.spin_square(self, ci0[i], norb, nelec, *args, **kwargs)
+                fcibase = super()
+                s = [fcibase.spin_square(ci0[i], norb, nelec, *args, **kwargs)
                      for i, wi in enumerate(self.weights)]
                 return [x[0] for x in s], [x[1] for x in s]
 
@@ -1113,7 +1152,8 @@ def state_specific_(casscf, state=1, wfnsym=None):
             log = logger.new_logger(self, kwargs.get('verbose'))
             if log.verbose >= logger.DEBUG:
                 if getattr(fcibase_class, 'spin_square', None):
-                    ss = fcibase_class.spin_square(self, c[state], norb, nelec)
+                    fcibase = super()
+                    ss = fcibase.spin_square(c[state], norb, nelec)
                     log.debug('state %d  E = %.15g S^2 = %.7f',
                               state, e[state], ss[0])
                 else:
@@ -1123,12 +1163,12 @@ def state_specific_(casscf, state=1, wfnsym=None):
         def approx_kernel(self, h1, h2, norb, nelec, ci0=None, **kwargs):
             if self._civec is not None:
                 ci0 = self._civec
-            try:
+            if hasattr(fcibase_class, 'approx_kernel'):
                 e, c = fcibase_class.approx_kernel(self, h1, h2, norb, nelec,
                                                    ci0=ci0, nroots=self.nroots,
                                                    wfnsym=self.wfnsym,
                                                    **kwargs)
-            except AttributeError:
+            else:
                 e, c = fcibase_class.kernel(self, h1, h2, norb, nelec, ci0=ci0,
                                             nroots=self.nroots,
                                             wfnsym=self.wfnsym, **kwargs)
@@ -1165,7 +1205,7 @@ def state_average_mix(casscf, fcisolvers, weights=(0.5,0.5)):
     '''
     fcibase_class = fcisolvers[0].__class__
     nroots = sum(solver.nroots for solver in fcisolvers)
-    assert(nroots == len(weights))
+    assert (nroots == len(weights))
     has_spin_square = all(getattr(solver, 'spin_square', None)
                           for solver in fcisolvers)
     has_large_ci = all(getattr(solver, 'large_ci', None)
@@ -1289,10 +1329,10 @@ def state_average_mix(casscf, fcisolvers, weights=(0.5,0.5)):
             cs = []
             for ix, (solver, my_args, my_kwargs) in enumerate (self._loop_solver(_state_args (ci0))):
                 c0 = my_args[0]
-                try:
+                if hasattr(solver, 'approx_kernel'):
                     e, c = solver.approx_kernel(h1, h2, norb, self._get_nelec(solver, nelec), ci0=c0,
                                                 orbsym=self.orbsym, **kwargs)
-                except AttributeError:
+                else:
                     e, c = solver.kernel(h1, h2, norb, self._get_nelec(solver, nelec), ci0=c0,
                                          orbsym=self.orbsym, **kwargs)
                 if solver.nroots == 1:
@@ -1345,6 +1385,26 @@ def state_average_mix(casscf, fcisolvers, weights=(0.5,0.5)):
             rdm1 = numpy.einsum ('r,rpq->pq', self.weights, rdm1)
             rdm2 = numpy.einsum ('r,rpqst->pqst', self.weights, rdm2)
             return rdm1, rdm2
+
+        def states_make_rdm12s(self, ci0, norb, nelec, link_index=None, **kwargs):
+            ci0 = _state_args (ci0)
+            link_index = _solver_args (link_index)
+            nelec = _solver_args ([self._get_nelec (solver, nelec) for solver in self.fcisolvers])
+            dm1a, dm1b = [], []
+            dm2aa, dm2ab, dm2bb = [], [], []
+            for dm1s, dm2s in self._collect ('make_rdm12s', ci0, norb, nelec, link_index=link_index, **kwargs):
+                dm1a.append(dm1s[0])
+                dm1b.append(dm1s[1])
+                dm2aa.append(dm2s[0])
+                dm2ab.append(dm2s[1])
+                dm2bb.append(dm2s[2])
+            return (dm1a, dm1b), (dm2aa, dm2ab, dm2bb)
+
+        def make_rdm12s(self, ci0, norb, nelec, link_index=None, **kwargs):
+            rdm1s, rdm2s = self.states_make_rdm12s(ci0, norb, nelec, link_index=link_index, **kwargs)
+            rdm1s = numpy.einsum ('r,srpq->spq', self.weights, rdm1s)
+            rdm2s = numpy.einsum ('r,srpqtu->spqtu', self.weights, rdm2s)
+            return rdm1s, rdm2s
 
         # TODO: linkstr support
         def states_trans_rdm12 (self, ci1, ci0, norb, nelec, link_index=None, **kwargs):
@@ -1411,7 +1471,7 @@ def state_average_mix_(casscf, fcisolvers, weights=(0.5,0.5)):
     return casscf
 
 
-del(BASE, MAP2HF_TOL)
+del (BASE, MAP2HF_TOL)
 
 
 if __name__ == '__main__':

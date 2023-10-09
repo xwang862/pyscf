@@ -41,14 +41,15 @@ def smearing_(*args, **kwargs):
 def frac_occ_(mf, tol=1e-3):
     '''
     Addons for SCF methods to assign fractional occupancy for degenerated
-    occpupied HOMOs.
+    occupied HOMOs.
 
     Examples::
+
         >>> mf = gto.M(atom='O 0 0 0; O 0 0 1', verbose=4).RHF()
         >>> mf = scf.addons.frac_occ(mf)
         >>> mf.run()
     '''
-    from pyscf.scf import uhf, rohf
+    from pyscf.scf import hf, uhf, rohf
     old_get_occ = mf.get_occ
     mol = mf.mol
 
@@ -69,8 +70,6 @@ def frac_occ_(mf, tol=1e-3):
             lumo = 0.0
             frac_occ_lst = numpy.zeros_like(mo_energy, dtype=bool)
         return mo_occ, numpy.where(frac_occ_lst)[0], homo, lumo
-
-    get_grad = None
 
     if isinstance(mf, uhf.UHF):
         def get_occ(mo_energy, mo_coeff=None):
@@ -145,7 +144,7 @@ def frac_occ_(mf, tol=1e-3):
             g[uniq_var_b] += fockb[uniq_var_b]
             return g[uniq_var_a | uniq_var_b]
 
-    else:  # RHF
+    elif isinstance(mf, hf.RHF):
         def get_occ(mo_energy, mo_coeff=None):
             nocc = (mol.nelectron+1) // 2  # n_docc + n_socc
             mo_occ, frac_lst, homo, lumo = guess_occ(mo_energy, nocc)
@@ -162,15 +161,33 @@ def frac_occ_(mf, tol=1e-3):
             else:
                 mo_occ = old_get_occ(mo_energy, mo_coeff)
             return mo_occ
+    else:
+        def get_occ(mo_energy, mo_coeff=None):
+            nocc = mol.nelectron
+            mo_occ, frac_lst, homo, lumo = guess_occ(mo_energy, nocc)
+            if abs(homo - lumo) < tol:
+                logger.warn(mf, 'fraction occ = %6g  for orbitals %s',
+                            mo_occ[frac_lst[0]], frac_lst)
+                logger.info(mf, 'HOMO = %.12g  LUMO = %.12g', homo, lumo)
+                logger.debug(mf, '  mo_energy = %s', mo_energy)
+            else:
+                mo_occ = old_get_occ(mo_energy, mo_coeff)
+            return mo_occ
 
     mf.get_occ = get_occ
-    if get_grad is not None:
+    try:
         mf.get_grad = get_grad
+    except NameError:
+        pass
     return mf
 frac_occ = frac_occ_
 
+
 def dynamic_occ_(mf, tol=1e-3):
-    assert(isinstance(mf, hf.RHF))
+    '''
+    Dynamically adjust the occupancy to avoid degeneracy between HOMO and LUMO
+    '''
+    assert (isinstance(mf, hf.RHF))
     old_get_occ = mf.get_occ
     def get_occ(mo_energy, mo_coeff=None):
         mol = mf.mol
@@ -198,16 +215,18 @@ def dynamic_level_shift_(mf, factor=1.):
     value is set to (HF energy change * factor)
     '''
     old_get_fock = mf.get_fock
-    last_e = [None]
+    mf._last_e = None
     def get_fock(h1e, s1e, vhf, dm, cycle=-1, diis=None,
                  diis_start_cycle=None, level_shift_factor=None, damp_factor=None):
-        if cycle >= 0 or diis is not None:
-            ehf =(numpy.einsum('ij,ji', h1e, dm) +
-                  numpy.einsum('ij,ji', vhf, dm) * .5)
-            if last_e[0] is not None:
-                level_shift_factor = abs(ehf-last_e[0]) * factor
+        if cycle > 0 or diis is not None:
+            if 'exc' in mf.scf_summary:  # DFT
+                e_tot = mf.scf_summary['e1'] + mf.scf_summary['coul'] + mf.scf_summary['exc']
+            else:
+                e_tot = mf.scf_summary['e1'] + mf.scf_summary['e2']
+            if mf._last_e is not None:
+                level_shift_factor = abs(e_tot-mf._last_e) * factor
                 logger.info(mf, 'Set level shift to %g', level_shift_factor)
-            last_e[0] = ehf
+            mf._last_e = e_tot
         return old_get_fock(h1e, s1e, vhf, dm, cycle, diis, diis_start_cycle,
                             level_shift_factor, damp_factor)
     mf.get_fock = get_fock
@@ -220,7 +239,7 @@ def float_occ_(mf):
     Determine occupation of alpha and beta electrons based on energy spectrum
     '''
     from pyscf.scf import uhf
-    assert(isinstance(mf, uhf.UHF))
+    assert (isinstance(mf, uhf.UHF))
     def get_occ(mo_energy, mo_coeff=None):
         mol = mf.mol
         ee = numpy.sort(numpy.hstack(mo_energy))
@@ -263,9 +282,9 @@ follow_state = follow_state_
 
 def mom_occ_(mf, occorb, setocc):
     '''Use maximum overlap method to determine occupation number for each orbital in every
-    iteration. It can be applied to unrestricted HF/KS and restricted open-shell
-    HF/KS.'''
+    iteration.'''
     from pyscf.scf import uhf, rohf
+    log = logger.Logger(mf.stdout, mf.verbose)
     if isinstance(mf, uhf.UHF):
         coef_occ_a = occorb[0][:, setocc[0]>0]
         coef_occ_b = occorb[1][:, setocc[1]>0]
@@ -274,44 +293,59 @@ def mom_occ_(mf, occorb, setocc):
             raise ValueError('Wrong occupation setting for restricted open-shell calculation.')
         coef_occ_a = occorb[:, setocc[0]>0]
         coef_occ_b = occorb[:, setocc[1]>0]
+    else: # GHF, and DHF
+        assert setocc.ndim == 1
+
+    if isinstance(mf, (uhf.UHF, rohf.ROHF)):
+        def get_occ(mo_energy=None, mo_coeff=None):
+            if mo_energy is None: mo_energy = mf.mo_energy
+            if mo_coeff is None: mo_coeff = mf.mo_coeff
+            if isinstance(mf, rohf.ROHF):
+                mo_coeff = numpy.array([mo_coeff, mo_coeff])
+            mo_occ = numpy.zeros_like(setocc)
+            nocc_a = int(numpy.sum(setocc[0]))
+            nocc_b = int(numpy.sum(setocc[1]))
+            s_a = reduce(numpy.dot, (coef_occ_a.conj().T, mf.get_ovlp(), mo_coeff[0]))
+            s_b = reduce(numpy.dot, (coef_occ_b.conj().T, mf.get_ovlp(), mo_coeff[1]))
+            #choose a subset of mo_coeff, which maximizes <old|now>
+            idx_a = numpy.argsort(numpy.einsum('ij,ij->j', s_a, s_a))[::-1]
+            idx_b = numpy.argsort(numpy.einsum('ij,ij->j', s_b, s_b))[::-1]
+            mo_occ[0,idx_a[:nocc_a]] = 1.
+            mo_occ[1,idx_b[:nocc_b]] = 1.
+
+            log.debug(' New alpha occ pattern: %s', mo_occ[0])
+            log.debug(' New beta occ pattern: %s', mo_occ[1])
+            if isinstance(mf.mo_energy, numpy.ndarray) and mf.mo_energy.ndim == 1:
+                log.debug1(' Current mo_energy(sorted) = %s', mo_energy)
+            else:
+                log.debug1(' Current alpha mo_energy(sorted) = %s', mo_energy[0])
+                log.debug1(' Current beta mo_energy(sorted) = %s', mo_energy[1])
+
+            if (int(numpy.sum(mo_occ[0])) != nocc_a):
+                log.error('mom alpha electron occupation numbers do not match: %d, %d',
+                          nocc_a, int(numpy.sum(mo_occ[0])))
+            if (int(numpy.sum(mo_occ[1])) != nocc_b):
+                log.error('mom beta electron occupation numbers do not match: %d, %d',
+                          nocc_b, int(numpy.sum(mo_occ[1])))
+
+            #output 1-dimension occupation number for restricted open-shell
+            if isinstance(mf, rohf.ROHF): mo_occ = mo_occ[0, :] + mo_occ[1, :]
+            return mo_occ
     else:
-        raise RuntimeError('Cannot support this class of instance %s' % mf)
-    log = logger.Logger(mf.stdout, mf.verbose)
-    def get_occ(mo_energy=None, mo_coeff=None):
-        if mo_energy is None: mo_energy = mf.mo_energy
-        if mo_coeff is None: mo_coeff = mf.mo_coeff
-        if isinstance(mf, rohf.ROHF): mo_coeff = numpy.array([mo_coeff, mo_coeff])
-        mo_occ = numpy.zeros_like(setocc)
-        nocc_a = int(numpy.sum(setocc[0]))
-        nocc_b = int(numpy.sum(setocc[1]))
-        s_a = reduce(numpy.dot, (coef_occ_a.T, mf.get_ovlp(), mo_coeff[0]))
-        s_b = reduce(numpy.dot, (coef_occ_b.T, mf.get_ovlp(), mo_coeff[1]))
-        #choose a subset of mo_coeff, which maximizes <old|now>
-        idx_a = numpy.argsort(numpy.einsum('ij,ij->j', s_a, s_a))[::-1]
-        idx_b = numpy.argsort(numpy.einsum('ij,ij->j', s_b, s_b))[::-1]
-        mo_occ[0][idx_a[:nocc_a]] = 1.
-        mo_occ[1][idx_b[:nocc_b]] = 1.
+        def get_occ(mo_energy=None, mo_coeff=None):
+            if mo_energy is None: mo_energy = mf.mo_energy
+            if mo_coeff is None: mo_coeff = mf.mo_coeff
+            mo_occ = numpy.zeros_like(setocc)
+            nocc = int(setocc.sum())
+            s = occorb[:,setocc>0].conj().T.dot(mf.get_ovlp()).dot(mo_coeff)
+            #choose a subset of mo_coeff, which maximizes <old|now>
+            idx = numpy.argsort(numpy.einsum('ij,ij->j', s, s))[::-1]
+            mo_occ[idx[:nocc]] = 1.
+            return mo_occ
 
-        log.debug(' New alpha occ pattern: %s', mo_occ[0])
-        log.debug(' New beta occ pattern: %s', mo_occ[1])
-        if isinstance(mf.mo_energy, numpy.ndarray) and mf.mo_energy.ndim == 1:
-            log.debug1(' Current mo_energy(sorted) = %s', mo_energy)
-        else:
-            log.debug1(' Current alpha mo_energy(sorted) = %s', mo_energy[0])
-            log.debug1(' Current beta mo_energy(sorted) = %s', mo_energy[1])
-
-        if (int(numpy.sum(mo_occ[0])) != nocc_a):
-            log.error('mom alpha electron occupation numbers do not match: %d, %d',
-                      nocc_a, int(numpy.sum(mo_occ[0])))
-        if (int(numpy.sum(mo_occ[1])) != nocc_b):
-            log.error('mom beta electron occupation numbers do not match: %d, %d',
-                      nocc_b, int(numpy.sum(mo_occ[1])))
-
-        #output 1-dimension occupation number for restricted open-shell
-        if isinstance(mf, rohf.ROHF): mo_occ = mo_occ[0, :] + mo_occ[1, :]
-        return mo_occ
     mf.get_occ = get_occ
     return mf
+
 mom_occ = mom_occ_
 
 def project_mo_nr2nr(mol1, mo1, mol2):
@@ -341,7 +375,7 @@ def project_mo_nr2nr(mol1, mo1, mol2):
 
 @lib.with_doc(project_mo_nr2nr.__doc__)
 def project_mo_nr2r(mol1, mo1, mol2):
-    assert(not mol1.cart)
+    assert (not mol1.cart)
     s22 = mol2.intor_symmetric('int1e_ovlp_spinor')
     s21 = mole.intor_cross('int1e_ovlp_sph', mol2, mol1)
 
@@ -401,7 +435,7 @@ def project_dm_nr2nr(mol1, dm1, mol2):
 
 @lib.with_doc(project_dm_nr2nr.__doc__)
 def project_dm_nr2r(mol1, dm1, mol2):
-    assert(not mol1.cart)
+    assert (not mol1.cart)
     s22 = mol2.intor_symmetric('int1e_ovlp_spinor')
     s21 = mole.intor_cross('int1e_ovlp_sph', mol2, mol1)
 
@@ -463,7 +497,7 @@ def partial_cholesky_orth_(S, canthr=1e-7, cholthr=1e-9):
     odS = numpy.abs(Snorm)
     numpy.fill_diagonal(odS, 0.0)
     odSs = numpy.sum(odS, axis=0)
-    sortidx = numpy.argsort(odSs)
+    sortidx = numpy.argsort(odSs, kind='stable')
 
     # Run the pivoted Cholesky decomposition
     Ssort = Snorm[numpy.ix_(sortidx, sortidx)].copy()
@@ -477,7 +511,7 @@ def partial_cholesky_orth_(S, canthr=1e-7, cholthr=1e-9):
     Xsub = canonical_orth_(Ssub, thr=canthr)
 
     # Full X
-    X = numpy.zeros((S.shape[0], Xsub.shape[1]))
+    X = numpy.zeros((S.shape[0], Xsub.shape[1]), dtype=Xsub.dtype)
     X[idx,:] = Xsub
 
     return X
@@ -502,29 +536,36 @@ def remove_linear_dep_(mf, threshold=LINEAR_DEP_THRESHOLD,
 
     logger.info(mf, 'Applying remove_linear_dep_ on SCF object.')
     logger.debug(mf, 'Overlap condition number %g', cond)
-    if(cond < 1./numpy.finfo(s.dtype).eps and not force_pivoted_cholesky):
+    if (cond < 1./numpy.finfo(s.dtype).eps and not force_pivoted_cholesky):
         logger.info(mf, 'Using canonical orthogonalization with threshold {}'.format(threshold))
-        def eigh(h, s):
-            x = canonical_orth_(s, threshold)
-            xhx = reduce(numpy.dot, (x.T.conj(), h, x))
-            e, c = numpy.linalg.eigh(xhx)
-            c = numpy.dot(x, c)
-            return e, c
-        mf._eigh = eigh
+        mf._eigh = _eigh_with_canonical_orth(threshold)
     else:
         logger.info(mf, 'Using partial Cholesky orthogonalization '
                     '(doi:10.1063/1.5139948, doi:10.1103/PhysRevA.101.032504)')
         logger.info(mf, 'Using threshold {} for pivoted Cholesky'.format(cholesky_threshold))
         logger.info(mf, 'Using threshold {} to orthogonalize the subbasis'.format(threshold))
-        def eigh(h, s):
-            x = partial_cholesky_orth_(s, canthr=threshold, cholthr=cholesky_threshold)
-            xhx = reduce(numpy.dot, (x.T.conj(), h, x))
-            e, c = numpy.linalg.eigh(xhx)
-            c = numpy.dot(x, c)
-            return e, c
-        mf._eigh = eigh
+        mf._eigh = _eigh_with_pivot_cholesky(threshold, cholesky_threshold)
     return mf
 remove_linear_dep = remove_linear_dep_
+
+def _eigh_with_canonical_orth(threshold=LINEAR_DEP_THRESHOLD):
+    def eigh(h, s):
+        x = canonical_orth_(s, threshold)
+        xhx = reduce(lib.dot, (x.conj().T, h, x))
+        e, c = scipy.linalg.eigh(xhx)
+        c = numpy.dot(x, c)
+        return e, c
+    return eigh
+
+def _eigh_with_pivot_cholesky(threshold=LINEAR_DEP_THRESHOLD,
+                              cholesky_threshold=CHOLESKY_THRESHOLD):
+    def eigh(h, s):
+        x = partial_cholesky_orth_(s, canthr=threshold, cholthr=cholesky_threshold)
+        xhx = reduce(lib.dot, (x.conj().T, h, x))
+        e, c = scipy.linalg.eigh(xhx)
+        c = numpy.dot(x, c)
+        return e, c
+    return eigh
 
 def convert_to_uhf(mf, out=None, remove_df=False):
     '''Convert the given mean-field object to the unrestricted HF/KS object
@@ -547,7 +588,7 @@ def convert_to_uhf(mf, out=None, remove_df=False):
     '''
     from pyscf import scf
     from pyscf import dft
-    assert(isinstance(mf, hf.SCF))
+    assert (isinstance(mf, hf.SCF))
 
     logger.debug(mf, 'Converting %s to UHF', mf.__class__)
 
@@ -579,14 +620,14 @@ def convert_to_uhf(mf, out=None, remove_df=False):
         raise NotImplementedError
 
     elif out is not None:
-        assert(isinstance(out, scf.uhf.UHF))
+        assert (isinstance(out, scf.uhf.UHF))
         out = _update_mf_without_soscf(mf, out, remove_df)
 
     elif isinstance(mf, scf.uhf.UHF):
         # Remove with_df for SOSCF method because the post-HF code checks the
         # attribute .with_df to identify whether an SCF object is DF-SCF method.
         # with_df in SOSCF is used in orbital hessian approximation only.  For the
-        # returned SCF object, whehter with_df exists in SOSCF has no effects on the
+        # returned SCF object, whether with_df exists in SOSCF has no effects on the
         # mean-field energy and other properties.
         if getattr(mf, '_scf', None):
             return _update_mf_without_soscf(mf, copy.copy(mf._scf), remove_df)
@@ -652,6 +693,7 @@ def _object_without_soscf(mf, known_class, remove_df=False):
 def _update_mf_without_soscf(mf, out, remove_df=False):
     from pyscf.soscf import newton_ah
     mf_dic = dict(mf.__dict__)
+    mf_dic.pop('_keys')
 
     # if mf is SOSCF object, avoid to overwrite the with_df method
     # FIXME: it causes bug when converting pbc-SOSCF.
@@ -685,7 +727,7 @@ def convert_to_rhf(mf, out=None, remove_df=False):
     '''
     from pyscf import scf
     from pyscf import dft
-    assert(isinstance(mf, hf.SCF))
+    assert (isinstance(mf, hf.SCF))
 
     logger.debug(mf, 'Converting %s to RHF', mf.__class__)
 
@@ -716,7 +758,7 @@ def convert_to_rhf(mf, out=None, remove_df=False):
         raise NotImplementedError
 
     elif out is not None:
-        assert(isinstance(out, scf.hf.RHF))
+        assert (isinstance(out, scf.hf.RHF))
         out = _update_mf_without_soscf(mf, out, remove_df)
 
     elif (isinstance(mf, scf.hf.RHF) or
@@ -766,7 +808,7 @@ def convert_to_ghf(mf, out=None, remove_df=False):
     '''
     from pyscf import scf
     from pyscf import dft
-    assert(isinstance(mf, hf.SCF))
+    assert (isinstance(mf, hf.SCF))
 
     logger.debug(mf, 'Converting %s to GHF', mf.__class__)
 
@@ -816,7 +858,7 @@ def convert_to_ghf(mf, out=None, remove_df=False):
         return mf1
 
     if out is not None:
-        assert(isinstance(out, scf.ghf.GHF))
+        assert (isinstance(out, scf.ghf.GHF))
         out = _update_mf_without_soscf(mf, out, remove_df)
 
     elif isinstance(mf, scf.ghf.GHF):
@@ -874,15 +916,15 @@ def get_ghf_orbspin(mo_energy, mo_occ, is_rhf=None):
         # round(6) to avoid numerical uncertainty in degeneracy
         es = numpy.append(mo_energy[0][mo_occ[0] >0],
                           mo_energy[1][mo_occ[1] >0])
-        oidx = numpy.argsort(es.round(6))
+        oidx = numpy.argsort(es.round(6), kind='stable')
         es = numpy.append(mo_energy[0][mo_occ[0]==0],
                           mo_energy[1][mo_occ[1]==0])
-        vidx = numpy.argsort(es.round(6))
+        vidx = numpy.argsort(es.round(6), kind='stable')
         orbspin = numpy.append(numpy.array([0]*nocca+[1]*noccb)[oidx],
                                numpy.array([0]*nvira+[1]*nvirb)[vidx])
     return orbspin
 
-del(LINEAR_DEP_THRESHOLD, LINEAR_DEP_TRIGGER)
+del (LINEAR_DEP_THRESHOLD, LINEAR_DEP_TRIGGER)
 
 def fast_newton(mf, mo_coeff=None, mo_occ=None, dm0=None,
                 auxbasis=None, dual_basis=None, **newton_kwargs):
@@ -890,8 +932,9 @@ def fast_newton(mf, mo_coeff=None, mo_occ=None, dm0=None,
     function first setup the initial guess
     from density fitting calculation then use  for
     Newton solver and call Newton solver.
+
     Newton solver attributes [max_cycle_inner, max_stepsize, ah_start_tol,
-    ah_conv_tol, ah_grad_trust_region, ...] can be passed through **newton_kwargs.
+    ah_conv_tol, ah_grad_trust_region, ...] can be passed through ``**newton_kwargs``.
     '''
     import copy
     from pyscf.lib import logger
@@ -945,7 +988,7 @@ def fast_newton(mf, mo_coeff=None, mo_occ=None, dm0=None,
             mf0._numint = approx_numint
 # Note: by setting small_rho_cutoff, dft.get_veff function may overwrite
 # approx_grids and approx_numint.  It will further changes the corresponding
-# mf1 grids and _numint.  If inital guess dm0 or mo_coeff/mo_occ were given,
+# mf1 grids and _numint.  If initial guess dm0 or mo_coeff/mo_occ were given,
 # dft.get_veff are not executed so that more grid points may be found in
 # approx_grids.
             mf0.small_rho_cutoff = mf.small_rho_cutoff * 10
@@ -977,7 +1020,7 @@ def fast_newton(mf, mo_coeff=None, mo_occ=None, dm0=None,
 #    def mf_kernel(*args, **kwargs):
 #        logger.warn(mf, "fast_newton is a wrap function to quickly setup and call Newton solver. "
 #                    "There's no need to call kernel function again for fast_newton.")
-#        del(mf.kernel)  # warn once and remove circular depdence
+#        del (mf.kernel)  # warn once and remove circular dependence
 #        return mf.e_tot
 #    mf.kernel = mf_kernel
     return mf

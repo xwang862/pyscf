@@ -27,7 +27,7 @@ from pyscf.fci import direct_spin1_symm
 from pyscf.fci import selected_ci
 from pyscf.fci import addons
 
-libfci = lib.load_library('libfci')
+libfci = direct_spin1.libfci
 
 def reorder4irrep(eri, norb, link_index, orbsym, offdiag=0):
     if orbsym is None:
@@ -38,7 +38,7 @@ def reorder4irrep(eri, norb, link_index, orbsym, offdiag=0):
     orbsym = orbsym % 10
     # irrep of (ij| pair
     trilirrep = (orbsym[:,None] ^ orbsym)[numpy.tril_indices(norb, offdiag)]
-    # and the number of occurence for each irrep
+    # and the number of occurrences for each irrep
     dimirrep = numpy.array(numpy.bincount(trilirrep), dtype=numpy.int32)
     # we sort the irreps of (ij| pair, to group the pairs which have same irreps
     # "order" is irrep-id-sorted index. The (ij| paired is ordered that the
@@ -148,7 +148,7 @@ class SelectedCI(selected_ci.SelectedCI):
         if getattr(civec_strs, '_strs', None) is not None:
             self._strs = civec_strs._strs
         else:
-            assert(civec_strs.size == len(self._strs[0])*len(self._strs[1]))
+            assert (civec_strs.size == len(self._strs[0])*len(self._strs[1]))
             civec_strs = selected_ci._as_SCIvector(civec_strs, self._strs)
         return contract_2e(eri, civec_strs, norb, nelec, link_index, orbsym)
 
@@ -159,8 +159,8 @@ class SelectedCI(selected_ci.SelectedCI):
                                               self.wfnsym)
         airreps = direct_spin1_symm._gen_strs_irrep(ci_strs[0], self.orbsym)
         birreps = direct_spin1_symm._gen_strs_irrep(ci_strs[1], self.orbsym)
-        ci0 = direct_spin1_symm._get_init_guess(airreps, birreps,
-                                                nroots, hdiag, self.orbsym, wfnsym)
+        ci0 = direct_spin1_symm._get_init_guess(
+            airreps, birreps, nroots, hdiag, nelec, self.orbsym, wfnsym)
         return [selected_ci._as_SCIvector(x, ci_strs) for x in ci0]
 
     def guess_wfnsym(self, norb, nelec, fcivec=None, orbsym=None, wfnsym=None,
@@ -214,6 +214,9 @@ class SelectedCI(selected_ci.SelectedCI):
         if wfnsym is None: wfnsym = self.wfnsym
         if self.verbose >= logger.WARN:
             self.check_sanity()
+
+        if getattr(self.mol, 'groupname', None) in ('Dooh', 'Coov'):
+            raise NotImplementedError
 
         with lib.temporary_env(self, orbsym=orbsym, wfnsym=wfnsym):
             e, c = selected_ci.kernel_float_space(self, h1e, eri, norb, nelec, ci0,

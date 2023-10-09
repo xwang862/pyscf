@@ -171,13 +171,13 @@ def as_scanner(mcscf_grad):
                 mol = mol_or_geom
             else:
                 mol = self.mol.set_geom_(mol_or_geom, inplace=False)
+            self.reset(mol)
 
             mc_scanner = self.base
             e_tot = mc_scanner(mol)
             if isinstance(mc_scanner, StateAverageMCSCFSolver):
                 e_tot = mc_scanner.e_average
 
-            self.mol = mol
             de = self.kernel(**kwargs)
             return e_tot, de
     return CASSCF_GradScanner(mcscf_grad)
@@ -220,34 +220,3 @@ Grad = Gradients
 
 from pyscf import mcscf
 mcscf.mc1step.CASSCF.Gradients = lib.class_as_method(Gradients)
-
-
-if __name__ == '__main__':
-    from pyscf import gto
-    from pyscf import scf
-    from pyscf import mcscf
-
-    mol = gto.Mole()
-    mol.atom = 'N 0 0 0; N 0 0 1.2; H 1 1 0; H 1 1 1.2'
-    mol.basis = '631g'
-    mol.build()
-    mf = scf.RHF(mol).run()
-    mc = mcscf.CASSCF(mf, 4, 4).run()
-    de = mc.Gradients().kernel()
-    print(lib.finger(de) - 0.019602220578635747)
-
-    mol = gto.Mole()
-    mol.verbose = 0
-    mol.atom = 'N 0 0 0; N 0 0 1.2'
-    mol.basis = 'sto3g'
-    mol.build()
-    mf = scf.RHF(mol).run()
-    mc = mcscf.CASSCF(mf, 4, 4).run()
-    de = mc.Gradients().kernel()
-
-    mcs = mc.as_scanner()
-    mol.set_geom_('N 0 0 0; N 0 0 1.201')
-    e1 = mcs(mol)
-    mol.set_geom_('N 0 0 0; N 0 0 1.199')
-    e2 = mcs(mol)
-    print(de[1,2], (e1-e2)/0.002*lib.param.BOHR)

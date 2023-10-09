@@ -24,6 +24,7 @@
 
 from functools import reduce
 import numpy
+import scipy.linalg
 from pyscf import lib
 from pyscf import gto
 from pyscf import scf
@@ -31,7 +32,7 @@ from pyscf import ao2mo
 from pyscf import symm
 from pyscf.lib import logger
 from pyscf.scf import hf_symm
-from pyscf.scf import _response_functions  # noqa
+from pyscf.scf import _response_functions
 from pyscf.data import nist
 from pyscf import __config__
 
@@ -39,12 +40,9 @@ OUTPUT_THRESHOLD = getattr(__config__, 'tdscf_rhf_get_nto_threshold', 0.3)
 REAL_EIG_THRESHOLD = getattr(__config__, 'tdscf_rhf_TDDFT_pick_eig_threshold', 1e-4)
 MO_BASE = getattr(__config__, 'MO_BASE', 1)
 
-# Low excitation filter to avoid numerical instability
-POSTIVE_EIG_THRESHOLD = getattr(__config__, 'tdscf_rhf_TDDFT_positive_eig_threshold', 1e-3)
-
 
 def gen_tda_operation(mf, fock_ao=None, singlet=True, wfnsym=None):
-    '''Generate function to compute (A+B)x
+    '''Generate function to compute A x
 
     Kwargs:
         wfnsym : int or str
@@ -52,7 +50,7 @@ def gen_tda_operation(mf, fock_ao=None, singlet=True, wfnsym=None):
     '''
     mol = mf.mol
     mo_coeff = mf.mo_coeff
-    assert(mo_coeff.dtype == numpy.double)
+    # assert (mo_coeff.dtype == numpy.double)
     mo_energy = mf.mo_energy
     mo_occ = mf.mo_occ
     nao, nmo = mo_coeff.shape
@@ -96,7 +94,7 @@ def gen_tda_operation(mf, fock_ao=None, singlet=True, wfnsym=None):
             zs[:,sym_forbid] = 0
 
         # *2 for double occupancy
-        dmov = lib.einsum('xov,po,qv->xpq', zs*2, orbo, orbv.conj())
+        dmov = lib.einsum('xov,qv,po->xpq', zs*2, orbv.conj(), orbo)
         v1ao = vresp(dmov)
         v1ov = lib.einsum('xpq,po,qv->xov', v1ao, orbo.conj(), orbv)
         v1ov += lib.einsum('xqs,sp->xqp', zs, fvv)
@@ -117,7 +115,7 @@ def get_ab(mf, mo_energy=None, mo_coeff=None, mo_occ=None):
     if mo_energy is None: mo_energy = mf.mo_energy
     if mo_coeff is None: mo_coeff = mf.mo_coeff
     if mo_occ is None: mo_occ = mf.mo_occ
-    assert(mo_coeff.dtype == numpy.double)
+    # assert (mo_coeff.dtype == numpy.double)
 
     mol = mf.mol
     nao, nmo = mo_coeff.shape
@@ -144,9 +142,10 @@ def get_ab(mf, mo_energy=None, mo_coeff=None, mo_occ=None):
         b -= numpy.einsum('jaib->iajb', eri_mo[:nocc,nocc:,:nocc,nocc:]) * hyb
 
     if isinstance(mf, scf.hf.KohnShamDFT):
+        from pyscf.dft import xc_deriv
         ni = mf._numint
         ni.libxc.test_deriv_order(mf.xc, 2, raise_error=True)
-        if getattr(mf, 'nlc', '') != '':
+        if mf.nlc or ni.libxc.is_nlc(mf.xc):
             logger.warn(mf, 'NLC functional found in DFT object.  Its second '
                         'deriviative is not available. Its contribution is '
                         'not included in the response function.')
@@ -156,7 +155,7 @@ def get_ab(mf, mo_energy=None, mo_coeff=None, mo_occ=None):
 
         xctype = ni._xc_type(mf.xc)
         dm0 = mf.make_rdm1(mo_coeff, mo_occ)
-        make_rho = ni._gen_rho_evaluator(mol, dm0, hermi=1)[0]
+        make_rho = ni._gen_rho_evaluator(mol, dm0, hermi=1, with_lapl=False)[0]
         mem_now = lib.current_memory()[0]
         max_memory = max(2000, mf.max_memory*.8-mem_now)
 
@@ -164,14 +163,14 @@ def get_ab(mf, mo_energy=None, mo_coeff=None, mo_occ=None):
             ao_deriv = 0
             for ao, mask, weight, coords \
                     in ni.block_loop(mol, mf.grids, nao, ao_deriv, max_memory):
-                rho = make_rho(0, ao, mask, 'LDA')
-                fxc = ni.eval_xc(mf.xc, rho, 0, deriv=2)[2]
-                frr = fxc[0]
+                rho = make_rho(0, ao, mask, xctype)
+                fxc = ni.eval_xc_eff(mf.xc, rho, deriv=2, xctype=xctype)[2]
+                wfxc = fxc[0,0] * weight
 
                 rho_o = lib.einsum('rp,pi->ri', ao, orbo)
                 rho_v = lib.einsum('rp,pi->ri', ao, orbv)
                 rho_ov = numpy.einsum('ri,ra->ria', rho_o, rho_v)
-                w_ov = numpy.einsum('ria,r->ria', rho_ov, weight*frr)
+                w_ov = numpy.einsum('ria,r->ria', rho_ov, wfxc)
                 iajb = lib.einsum('ria,rjb->iajb', rho_ov, w_ov) * 2
                 a += iajb
                 b += iajb
@@ -180,34 +179,41 @@ def get_ab(mf, mo_energy=None, mo_coeff=None, mo_occ=None):
             ao_deriv = 1
             for ao, mask, weight, coords \
                     in ni.block_loop(mol, mf.grids, nao, ao_deriv, max_memory):
-                rho = make_rho(0, ao, mask, 'GGA')
-                vxc, fxc = ni.eval_xc(mf.xc, rho, 0, deriv=2)[1:3]
-                vgamma = vxc[1]
-                frho, frhogamma, fgg = fxc[:3]
-
+                rho = make_rho(0, ao, mask, xctype)
+                fxc = ni.eval_xc_eff(mf.xc, rho, deriv=2, xctype=xctype)[2]
+                wfxc = fxc * weight
                 rho_o = lib.einsum('xrp,pi->xri', ao, orbo)
                 rho_v = lib.einsum('xrp,pi->xri', ao, orbv)
                 rho_ov = numpy.einsum('xri,ra->xria', rho_o, rho_v[0])
                 rho_ov[1:4] += numpy.einsum('ri,xra->xria', rho_o[0], rho_v[1:4])
-                # sigma1 ~ \nabla(\rho_\alpha+\rho_\beta) dot \nabla(|b><j|) z_{bj}
-                sigma1 = numpy.einsum('xr,xria->ria', rho[1:4], rho_ov[1:4])
-
-                w_ov = numpy.empty_like(rho_ov)
-                w_ov[0]  = numpy.einsum('r,ria->ria', frho, rho_ov[0])
-                w_ov[0] += numpy.einsum('r,ria->ria', 2*frhogamma, sigma1)
-                f_ov = numpy.einsum('r,ria->ria', 4*fgg, sigma1)
-                f_ov+= numpy.einsum('r,ria->ria', 2*frhogamma, rho_ov[0])
-                w_ov[1:] = numpy.einsum('ria,xr->xria', f_ov, rho[1:4])
-                w_ov[1:]+= numpy.einsum('r,xria->xria', 2*vgamma, rho_ov[1:4])
-                w_ov *= weight[:,None,None]
-                iajb = lib.einsum('xria,xrjb->iajb', rho_ov, w_ov) * 2
+                w_ov = numpy.einsum('xyr,xria->yria', wfxc, rho_ov)
+                iajb = lib.einsum('xria,xrjb->iajb', w_ov, rho_ov) * 2
                 a += iajb
                 b += iajb
 
+        elif xctype == 'HF':
+            pass
+
         elif xctype == 'NLC':
             raise NotImplementedError('NLC')
+
         elif xctype == 'MGGA':
-            raise NotImplementedError('meta-GGA')
+            ao_deriv = 1
+            for ao, mask, weight, coords \
+                    in ni.block_loop(mol, mf.grids, nao, ao_deriv, max_memory):
+                rho = make_rho(0, ao, mask, xctype)
+                fxc = ni.eval_xc_eff(mf.xc, rho, deriv=2, xctype=xctype)[2]
+                wfxc = fxc * weight
+                rho_o = lib.einsum('xrp,pi->xri', ao, orbo)
+                rho_v = lib.einsum('xrp,pi->xri', ao, orbv)
+                rho_ov = numpy.einsum('xri,ra->xria', rho_o, rho_v[0])
+                rho_ov[1:4] += numpy.einsum('ri,xra->xria', rho_o[0], rho_v[1:4])
+                tau_ov = numpy.einsum('xri,xra->ria', rho_o[1:4], rho_v[1:4]) * .5
+                rho_ov = numpy.vstack([rho_ov, tau_ov[numpy.newaxis]])
+                w_ov = numpy.einsum('xyr,xria->yria', wfxc, rho_ov)
+                iajb = lib.einsum('xria,xrjb->iajb', w_ov, rho_ov) * 2
+                a += iajb
+                b += iajb
 
     else:
         add_hf_(a, b)
@@ -599,13 +605,13 @@ def as_scanner(td):
 
     Examples::
 
-    >>> from pyscf import gto, scf, tdscf
-    >>> mol = gto.M(atom='H 0 0 0; F 0 0 1')
-    >>> td_scanner = tdscf.TDHF(scf.RHF(mol)).as_scanner()
-    >>> de = td_scanner(gto.M(atom='H 0 0 0; F 0 0 1.1'))
-    [ 0.34460866  0.34460866  0.7131453 ]
-    >>> de = td_scanner(gto.M(atom='H 0 0 0; F 0 0 1.5'))
-    [ 0.14844013  0.14844013  0.47641829]
+        >>> from pyscf import gto, scf, tdscf
+        >>> mol = gto.M(atom='H 0 0 0; F 0 0 1')
+        >>> td_scanner = tdscf.TDHF(scf.RHF(mol)).as_scanner()
+        >>> de = td_scanner(gto.M(atom='H 0 0 0; F 0 0 1.1'))
+        [ 0.34460866  0.34460866  0.7131453 ]
+        >>> de = td_scanner(gto.M(atom='H 0 0 0; F 0 0 1.5'))
+        [ 0.14844013  0.14844013  0.47641829]
     '''
     if isinstance(td, lib.SinglePointScanner):
         return td
@@ -639,6 +645,10 @@ class TDMixin(lib.StreamObject):
     level_shift = getattr(__config__, 'tdscf_rhf_TDA_level_shift', 0)
     max_space = getattr(__config__, 'tdscf_rhf_TDA_max_space', 50)
     max_cycle = getattr(__config__, 'tdscf_rhf_TDA_max_cycle', 100)
+    # Low excitation filter to avoid numerical instability
+    positive_eig_threshold = getattr(__config__, 'tdscf_rhf_TDDFT_positive_eig_threshold', 1e-3)
+    # Threshold to handle degeneracy in init guess
+    deg_eia_thresh = getattr(__config__, 'tdscf_rhf_TDDFT_deg_eia_thresh', 1e-3)
 
     def __init__(self, mf):
         self.verbose = mf.verbose
@@ -677,10 +687,13 @@ class TDMixin(lib.StreamObject):
         log.info('\n')
         log.info('******** %s for %s ********',
                  self.__class__, self._scf.__class__)
-        if self.singlet:
+        if self.singlet is None:
+            log.info('nstates = %d', self.nstates)
+        elif self.singlet:
             log.info('nstates = %d singlet', self.nstates)
         else:
             log.info('nstates = %d triplet', self.nstates)
+        log.info('deg_eia_thresh = %.3e', self.deg_eia_thresh)
         log.info('wfnsym = %s', self.wfnsym)
         log.info('conv_tol = %g', self.conv_tol)
         log.info('eigh lindep = %g', self.lindep)
@@ -705,7 +718,7 @@ class TDMixin(lib.StreamObject):
         self._scf.reset(mol)
         return self
 
-    def gen_vind(self, mf):
+    def gen_vind(self, mf=None):
         raise NotImplementedError
 
     @lib.with_doc(get_ab.__doc__)
@@ -719,6 +732,26 @@ class TDMixin(lib.StreamObject):
             diagd[abs(diagd)<1e-8] = 1e-8
             return x/diagd
         return precond
+
+    def trunc_workspace(self, vind, x0, nstates=None, pick=None):
+        log = logger.new_logger(self)
+        if nstates is None: nstates = self.nstates
+        if x0.shape[0] <= nstates:
+            return None, x0
+        else:
+            heff = lib.einsum('xa,ya->xy', x0.conj(), vind(x0))
+            e, u = scipy.linalg.eig(heff)   # heff not necessarily Hermitian
+            e = e.real
+            order = numpy.argsort(e)
+            e = e[order]
+            u = u[:,order]
+            if callable(pick):
+                e, u = pick(e, u, None, None)[:2]
+            e = e[:nstates]
+            log.debug('truncating %d states to %d states with excitation energy (eV): %s',
+                      x0.shape[0], e.size, e*27.211399)
+            x1 = numpy.dot(x0.T, u[:,:nstates]).T
+            return e, x1
 
     analyze = analyze
     get_nto = get_nto
@@ -769,8 +802,10 @@ class TDA(TDMixin):
             excited state.  (X,Y) are normalized to 1/2 in RHF/RKS methods and
             normalized to 1 for UHF/UKS methods. In the TDA calculation, Y = 0.
     '''
-    def gen_vind(self, mf):
-        '''Compute Ax'''
+    def gen_vind(self, mf=None):
+        '''Generate function to compute Ax'''
+        if mf is None:
+            mf = self._scf
         return gen_tda_hop(mf, singlet=self.singlet, wfnsym=self.wfnsym)
 
     def init_guess(self, mf, nstates=None, wfnsym=None):
@@ -782,6 +817,8 @@ class TDA(TDMixin):
         occidx = numpy.where(mo_occ==2)[0]
         viridx = numpy.where(mo_occ==0)[0]
         e_ia = mo_energy[viridx] - mo_energy[occidx,None]
+        # make degenerate excitations equal for later selection by energy
+        e_ia = numpy.ceil(e_ia / self.deg_eia_thresh) * self.deg_eia_thresh
         e_ia_max = e_ia.max()
 
         if wfnsym is not None and mf.mol.symmetry:
@@ -792,12 +829,14 @@ class TDA(TDMixin):
             orbsym_in_d2h = numpy.asarray(orbsym) % 10  # convert to D2h irreps
             e_ia[(orbsym_in_d2h[occidx,None] ^ orbsym_in_d2h[viridx]) != wfnsym] = 1e99
 
+        e_ia_uniq = numpy.unique(e_ia)
+
         nov = e_ia.size
         nstates = min(nstates, nov)
+        nstates_thresh = min(nstates, e_ia_uniq.size)
         e_ia = e_ia.ravel()
-        e_threshold = min(e_ia_max, e_ia[numpy.argsort(e_ia)[nstates-1]])
-        # Handle degeneracy, include all degenerated states in initial guess
-        e_threshold += 1e-6
+        e_threshold = min(e_ia_max, e_ia_uniq[numpy.argsort(e_ia_uniq)[nstates_thresh-1]])
+        e_threshold += self.deg_eia_thresh
 
         idx = numpy.where(e_ia <= e_threshold)[0]
         x0 = numpy.zeros((idx.size, nov))
@@ -821,12 +860,13 @@ class TDA(TDMixin):
         vind, hdiag = self.gen_vind(self._scf)
         precond = self.get_precond(hdiag)
 
+        def pickeig(w, v, nroots, envs):
+            idx = numpy.where(w > self.positive_eig_threshold)[0]
+            return w[idx], v[:,idx], idx
+
         if x0 is None:
             x0 = self.init_guess(self._scf, self.nstates)
-
-        def pickeig(w, v, nroots, envs):
-            idx = numpy.where(w > POSTIVE_EIG_THRESHOLD**2)[0]
-            return w[idx], v[:,idx], idx
+            x0 = self.trunc_workspace(vind, x0, nstates=self.nstates, pick=pickeig)[1]
 
         self.converged, self.e, x1 = \
                 lib.davidson1(vind, x0, precond,
@@ -861,7 +901,7 @@ def gen_tdhf_operation(mf, fock_ao=None, singlet=True, wfnsym=None):
     '''
     mol = mf.mol
     mo_coeff = mf.mo_coeff
-    assert(mo_coeff.dtype == numpy.double)
+    # assert (mo_coeff.dtype == numpy.double)
     mo_energy = mf.mo_energy
     mo_occ = mf.mo_occ
     nao, nmo = mo_coeff.shape
@@ -906,12 +946,12 @@ def gen_tdhf_operation(mf, fock_ao=None, singlet=True, wfnsym=None):
         xs, ys = xys.transpose(1,0,2,3)
         # dms = AX + BY
         # *2 for double occupancy
-        dms  = lib.einsum('xov,po,qv->xpq', xs*2, orbo, orbv.conj())
+        dms  = lib.einsum('xov,qv,po->xpq', xs*2, orbv.conj(), orbo)
         dms += lib.einsum('xov,pv,qo->xpq', ys*2, orbv, orbo.conj())
 
         v1ao = vresp(dms)
         v1ov = lib.einsum('xpq,po,qv->xov', v1ao, orbo.conj(), orbv)
-        v1vo = lib.einsum('xpq,pv,qo->xov', v1ao, orbv.conj(), orbo)
+        v1vo = lib.einsum('xpq,qo,pv->xov', v1ao, orbo, orbv.conj())
         v1ov += lib.einsum('xqs,sp->xqp', xs, fvv)  # AX
         v1ov -= lib.einsum('xpr,sp->xsr', xs, foo)  # AX
         v1vo += lib.einsum('xqs,sp->xqp', ys, fvv)  # AY
@@ -951,13 +991,15 @@ class TDHF(TDA):
             normalized to 1 for UHF/UKS methods. In the TDA calculation, Y = 0.
     '''
     @lib.with_doc(gen_tdhf_operation.__doc__)
-    def gen_vind(self, mf):
+    def gen_vind(self, mf=None):
+        if mf is None:
+            mf = self._scf
         return gen_tdhf_operation(mf, singlet=self.singlet, wfnsym=self.wfnsym)
 
     def init_guess(self, mf, nstates=None, wfnsym=None):
         x0 = TDA.init_guess(self, mf, nstates, wfnsym)
         y0 = numpy.zeros_like(x0)
-        return numpy.hstack((x0,y0))
+        return numpy.asarray(numpy.block([[x0, y0], [y0, x0.conj()]]))
 
     def kernel(self, x0=None, nstates=None):
         '''TDHF diagonalization with non-Hermitian eigenvalue solver
@@ -974,18 +1016,27 @@ class TDHF(TDA):
 
         vind, hdiag = self.gen_vind(self._scf)
         precond = self.get_precond(hdiag)
-        if x0 is None:
-            x0 = self.init_guess(self._scf, self.nstates)
+
+        # handle single kpt PBC SCF
+        if getattr(self._scf, 'kpt', None) is not None:
+            from pyscf.pbc.lib.kpts_helper import gamma_point
+            real_system = (gamma_point(self._scf.kpt) and
+                           self._scf.mo_coeff[0].dtype == numpy.double)
+        else:
+            real_system = True
 
         # We only need positive eigenvalues
         def pickeig(w, v, nroots, envs):
             realidx = numpy.where((abs(w.imag) < REAL_EIG_THRESHOLD) &
-                                  (w.real > POSTIVE_EIG_THRESHOLD))[0]
+                                  (w.real > self.positive_eig_threshold))[0]
             # If the complex eigenvalue has small imaginary part, both the
             # real part and the imaginary part of the eigenvector can
             # approximately be used as the "real" eigen solutions.
-            return lib.linalg_helper._eigs_cmplx2real(w, v, realidx,
-                                                      real_eigenvectors=True)
+            return lib.linalg_helper._eigs_cmplx2real(w, v, realidx, real_system)
+
+        if x0 is None:
+            x0 = self.init_guess(self._scf, self.nstates)
+            x0 = self.trunc_workspace(vind, x0, nstates=self.nstates, pick=pickeig)[1]
 
         self.converged, w, x1 = \
                 lib.davidson_nosym1(vind, x0, precond,
@@ -1027,4 +1078,4 @@ scf.rohf.ROHF.TDHF = None
 scf.hf_symm.ROHF.TDA = None
 scf.hf_symm.ROHF.TDHF = None
 
-del(OUTPUT_THRESHOLD)
+del (OUTPUT_THRESHOLD)

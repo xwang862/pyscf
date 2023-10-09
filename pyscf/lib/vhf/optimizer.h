@@ -16,13 +16,15 @@
  * Author: Qiming Sun <osirpt.sun@gmail.com>
  */
 
+#include <stdint.h>
+
 #if !defined(HAVE_DEFINED_CVHFOPT_H)
 #define HAVE_DEFINED_CVHFOPT_H
 typedef struct CVHFOpt_struct {
     int nbas;
     int ngrids;
-    double direct_scf_cutoff;
-    double *q_cond;
+    union {double direct_scf_cutoff; double log_cutoff;};
+    union {double *q_cond; float *logq_cond;};
     double *dm_cond;
     int (*fprescreen)(int *shls, struct CVHFOpt_struct *opt,
                       int *atm, int *bas, double *env);
@@ -37,12 +39,14 @@ void CVHFinit_optimizer(CVHFOpt **opt, int *atm, int natm,
 
 void CVHFdel_optimizer(CVHFOpt **opt);
 
-int CVHFnoscreen(int *shls, CVHFOpt *opt,
-                  int *atm, int *bas, double *env);
-int CVHFnr_schwarz_cond(int *shls, CVHFOpt *opt,
-                        int *atm, int *bas, double *env);
-int CVHFnrs8_prescreen(int *shls, CVHFOpt *opt,
-                       int *atm, int *bas, double *env);
+int CVHFnoscreen(int *shls, CVHFOpt *opt, int *atm, int *bas, double *env);
+int CVHFnr_schwarz_cond(int *shls, CVHFOpt *opt, int *atm, int *bas, double *env);
+int CVHFnrs8_prescreen(int *shls, CVHFOpt *opt, int *atm, int *bas, double *env);
+int CVHFnrs8_vj_prescreen(int *shls, CVHFOpt *opt, int *atm, int *bas, double *env);
+int CVHFnrs8_vk_prescreen(int *shls, CVHFOpt *opt, int *atm, int *bas, double *env);
+int CVHFnrs8_prescreen_block(CVHFOpt *opt, int *ishls, int *jshls, int *kshls, int *lshls);
+int CVHFnrs8_vj_prescreen_block(CVHFOpt *opt, int *ishls, int *jshls, int *kshls, int *lshls);
+int CVHFnrs8_vk_prescreen_block(CVHFOpt *opt, int *ishls, int *jshls, int *kshls, int *lshls);
 
 int CVHFr_vknoscreen(int *shls, CVHFOpt *opt,
                      double **dms_cond, int n_dm, double *dm_atleast,
@@ -61,3 +65,11 @@ void CVHFnr_optimizer(CVHFOpt **vhfopt, int (*intor)(), CINTOpt *cintopt,
 void CVHFset_int2e_q_cond(int (*intor)(), CINTOpt *cintopt, double *q_cond,
                           int *ao_loc, int *atm, int natm,
                           int *bas, int nbas, double *env);
+
+void CVHFnr_int2e_q_cond(int (*intor)(), CINTOpt *cintopt, double *q_cond,
+                         int *ao_loc, int *atm, int natm,
+                         int *bas, int nbas, double *env);
+void CVHFnr_dm_cond1(double *dm_cond, double *dm, int nset, int *ao_loc,
+                     int *atm, int natm, int *bas, int nbas, double *env);
+void CVHFnr_dm_cond(double *dm_cond, double *dm, int nset, int *ao_loc,
+                    int *atm, int natm, int *bas, int nbas, double *env);
