@@ -17,8 +17,8 @@
 #
 
 '''
-Auxiliary second-order Green's function perturbation therory
-============================================================
+Auxiliary second-order Green's function perturbation theory
+===========================================================
 
 The AGF2 method permits the computation of quasiparticle excitations and 
 ground-state properties at the AGF2(None,0) level. 
@@ -102,7 +102,7 @@ def AGF2(mf, nmom=(None,0), frozen=None, mo_energy=None, mo_coeff=None, mo_occ=N
     elif isinstance(mf, scf.rohf.ROHF):
         lib.logger.warn(mf, 'RAGF2 method does not support ROHF reference. '
                             'Converting to UHF and using UAGF2.')
-        mf = scf.addons.convert_to_uhf(mf)
+        mf = mf.to_uhf()
         return UAGF2(mf, nmom, frozen, mo_energy, mo_coeff, mo_occ)
 
     elif isinstance(mf, scf.rhf.RHF):

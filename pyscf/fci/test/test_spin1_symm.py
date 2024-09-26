@@ -13,9 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import math
 import unittest
 import numpy
-from pyscf import gto
+from pyscf import gto, lib
 from pyscf import scf
 from pyscf import ao2mo
 from pyscf import fci
@@ -196,6 +197,44 @@ Li    P
         self.assertAlmostEqual(abs(ci1.ravel().dot(ci_x.ravel())), 1, 9)
         ci1 = fci.addons.transform_ci(ci_y, (3,3), u.T)
         self.assertAlmostEqual(abs(ci1.ravel().dot(ci_y.ravel())), 1, 9)
+
+    def test_incomplete_orbsym(self):
+        mol = gto.Mole()
+        mol.groupname = 'Dooh'
+        sol = direct_spin1_symm.FCI(mol)
+        no, ne = 2, 2
+        h1 = numpy.ones((no,no))
+        h2 = numpy.ones((no,no,no,no))
+        orbsym = lib.tag_array(numpy.array([0,3]), degen_mapping=[0,2])
+        with self.assertRaises(lib.exceptions.PointGroupSymmetryError):
+            sol.kernel(h1, h2, no, ne, orbsym=orbsym)
+
+    def test_many_roots(self):
+        norb = 4
+        nelec = (2, 2)
+        nroots = 36
+        h1 = numpy.eye(norb) * -.5
+        h2 = numpy.zeros((norb, norb, norb, norb))
+        orbsym = numpy.array([0, 5, 3, 2])
+        for i in range(norb):
+            h2[i,i,i,i] = .1
+        obj = direct_spin1_symm.FCI()
+        e, fcivec = obj.kernel(h1, h2, norb, nelec, nroots=nroots,
+                               davidson_only=True, orbsym=orbsym)
+        self.assertAlmostEqual(e[0], -1.8, 9)
+
+    def test_guess_wfnsym_cyl_sym(self):
+        mol = gto.M(atom='C 0 0 0; C 0 0 1.5', basis='6-31g', symmetry=True)
+        mf = mol.RHF().run()
+        mc = mcscf.CASCI(mf, 8, 4)
+        mc.fcisolver.wfnsym = 'A1g'
+        ncas = {'A1g':2, 'A1u':2, 'E1gx':1, 'E1gy':1, 'E1ux':1, 'E1uy':1}
+        mo = mcscf.sort_mo_by_irrep(mc, mf.mo_coeff, ncas)
+        na = math.comb(8, 2)
+        ci0 = numpy.zeros((na, na))
+        ci0[1,1] = ci0[2,2] = .5**.5 # corresponding to (E+)(E-') + (E-)(E+') => A1
+        mc.kernel(mo, ci0=ci0)
+        self.assertAlmostEqual(mc.e_cas, -4.205889578214524, 9)
 
 if __name__ == "__main__":
     print("Full Tests for spin1-symm")

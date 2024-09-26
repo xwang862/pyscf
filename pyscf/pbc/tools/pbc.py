@@ -14,8 +14,9 @@
 # limitations under the License.
 
 import warnings
-import copy
+import ctypes
 import numpy as np
+import scipy
 import scipy.linalg
 from pyscf import lib
 from pyscf.lib import logger
@@ -23,87 +24,131 @@ from pyscf.gto import ATM_SLOTS, BAS_SLOTS, ATOM_OF, PTR_COORD
 from pyscf.pbc.lib.kpts_helper import get_kconserv, get_kconserv3  # noqa
 from pyscf import __config__
 
-FFT_ENGINE = getattr(__config__, 'pbc_tools_pbc_fft_engine', 'BLAS')
+FFT_ENGINE = getattr(__config__, 'pbc_tools_pbc_fft_engine', 'NUMPY+BLAS')
 
 def _fftn_blas(f, mesh):
-    Gx = np.fft.fftfreq(mesh[0])
-    Gy = np.fft.fftfreq(mesh[1])
-    Gz = np.fft.fftfreq(mesh[2])
-    expRGx = np.exp(np.einsum('x,k->xk', -2j*np.pi*np.arange(mesh[0]), Gx))
-    expRGy = np.exp(np.einsum('x,k->xk', -2j*np.pi*np.arange(mesh[1]), Gy))
-    expRGz = np.exp(np.einsum('x,k->xk', -2j*np.pi*np.arange(mesh[2]), Gz))
-    out = np.empty(f.shape, dtype=np.complex128)
-    buf = np.empty(mesh, dtype=np.complex128)
-    for i, fi in enumerate(f):
-        buf[:] = fi.reshape(mesh)
-        g = lib.dot(buf.reshape(mesh[0],-1).T, expRGx, c=out[i].reshape(-1,mesh[0]))
-        g = lib.dot(g.reshape(mesh[1],-1).T, expRGy, c=buf.reshape(-1,mesh[1]))
-        g = lib.dot(g.reshape(mesh[2],-1).T, expRGz, c=out[i].reshape(-1,mesh[2]))
-    return out.reshape(-1, *mesh)
+    assert f.ndim == 4
+    mx, my, mz = mesh
+    expRGx = np.exp(-2j*np.pi*np.arange(mx)[:,None] * np.fft.fftfreq(mx))
+    expRGy = np.exp(-2j*np.pi*np.arange(my)[:,None] * np.fft.fftfreq(my))
+    expRGz = np.exp(-2j*np.pi*np.arange(mz)[:,None] * np.fft.fftfreq(mz))
+    blksize = max(int(1e5 / (mx * my * mz)), 8) * 4
+    n = f.shape[0]
+    out = np.empty((n, mx*my*mz), dtype=np.complex128)
+    buf = np.empty((blksize, mx*my*mz), dtype=np.complex128)
+    for i0, i1 in lib.prange(0, n, blksize):
+        ni = i1 - i0
+        buf1 = buf[:ni]
+        out1 = out[i0:i1]
+        g = lib.transpose(f[i0:i1].reshape(ni,-1), out=buf1.reshape(-1,ni))
+        g = lib.dot(g.reshape(mx,-1).T, expRGx, c=out1.reshape(-1,mx))
+        g = lib.dot(g.reshape(my,-1).T, expRGy, c=buf1.reshape(-1,my))
+        g = lib.dot(g.reshape(mz,-1).T, expRGz, c=out1.reshape(-1,mz))
+    return out.reshape(n, *mesh)
 
 def _ifftn_blas(g, mesh):
-    Gx = np.fft.fftfreq(mesh[0])
-    Gy = np.fft.fftfreq(mesh[1])
-    Gz = np.fft.fftfreq(mesh[2])
-    expRGx = np.exp(np.einsum('x,k->xk', 2j*np.pi*np.arange(mesh[0]), Gx))
-    expRGy = np.exp(np.einsum('x,k->xk', 2j*np.pi*np.arange(mesh[1]), Gy))
-    expRGz = np.exp(np.einsum('x,k->xk', 2j*np.pi*np.arange(mesh[2]), Gz))
-    out = np.empty(g.shape, dtype=np.complex128)
-    buf = np.empty(mesh, dtype=np.complex128)
-    for i, gi in enumerate(g):
-        buf[:] = gi.reshape(mesh)
-        f = lib.dot(buf.reshape(mesh[0],-1).T, expRGx, 1./mesh[0], c=out[i].reshape(-1,mesh[0]))
-        f = lib.dot(f.reshape(mesh[1],-1).T, expRGy, 1./mesh[1], c=buf.reshape(-1,mesh[1]))
-        f = lib.dot(f.reshape(mesh[2],-1).T, expRGz, 1./mesh[2], c=out[i].reshape(-1,mesh[2]))
-    return out.reshape(-1, *mesh)
+    assert g.ndim == 4
+    mx, my, mz = mesh
+    expRGx = np.exp(2j*np.pi*np.fft.fftfreq(mx)[:,None] * np.arange(mx))
+    expRGy = np.exp(2j*np.pi*np.fft.fftfreq(my)[:,None] * np.arange(my))
+    expRGz = np.exp(2j*np.pi*np.fft.fftfreq(mz)[:,None] * np.arange(mz))
+    blksize = max(int(1e5 / (mx * my * mz)), 8) * 4
+    n = g.shape[0]
+    out = np.empty((n, mx*my*mz), dtype=np.complex128)
+    buf = np.empty((blksize, mx*my*mz), dtype=np.complex128)
+    for i0, i1 in lib.prange(0, n, blksize):
+        ni = i1 - i0
+        buf1 = buf[:ni]
+        out1 = out[i0:i1]
+        f = lib.transpose(g[i0:i1].reshape(ni,-1), out=buf1.reshape(-1,ni))
+        f = lib.dot(f.reshape(mx,-1).T, expRGx, 1./mx, c=out1.reshape(-1,mx))
+        f = lib.dot(f.reshape(my,-1).T, expRGy, 1./my, c=buf1.reshape(-1,my))
+        f = lib.dot(f.reshape(mz,-1).T, expRGz, 1./mz, c=out1.reshape(-1,mz))
+    return out.reshape(n, *mesh)
+
+nproc = lib.num_threads()
+
+def _fftn_wrapper(a):  # noqa
+    return scipy.fft.fftn(a, axes=(1,2,3), workers=nproc)
+
+def _ifftn_wrapper(a):  # noqa
+    return scipy.fft.ifftn(a, axes=(1,2,3), workers=nproc)
 
 if FFT_ENGINE == 'FFTW':
-    # pyfftw is slower than np.fft in most cases
+    try:
+        libfft = lib.load_library('libfft')
+    except OSError:
+        raise RuntimeError("Failed to load libfft")
+
+    def _copy_d2z(a):
+        fn = libfft._copy_d2z
+        out = np.empty(a.shape, dtype=np.complex128)
+        fn(out.ctypes.data_as(ctypes.c_void_p),
+           a.ctypes.data_as(ctypes.c_void_p),
+           ctypes.c_size_t(a.size))
+        return out
+
+    def _complex_fftn_fftw(f, mesh, func):
+        if f.dtype == np.double and f.flags.c_contiguous:
+            # np.asarray or np.astype is too slow
+            f = _copy_d2z(f)
+        else:
+            f = np.asarray(f, order='C', dtype=np.complex128)
+        mesh = np.asarray(mesh, order='C', dtype=np.int32)
+        rank = len(mesh)
+        out = np.empty_like(f)
+        fn = getattr(libfft, func)
+        for i, fi in enumerate(f):
+            fn(fi.ctypes.data_as(ctypes.c_void_p),
+               out[i].ctypes.data_as(ctypes.c_void_p),
+               mesh.ctypes.data_as(ctypes.c_void_p),
+               ctypes.c_int(rank))
+        return out
+
+    def _fftn_wrapper(a):  # noqa
+        mesh = a.shape[1:]
+        return _complex_fftn_fftw(a, mesh, 'fft')
+    def _ifftn_wrapper(a):  # noqa
+        mesh = a.shape[1:]
+        return _complex_fftn_fftw(a, mesh, 'ifft')
+
+elif FFT_ENGINE == 'PYFFTW':
+    # Note: pyfftw is likely slower than scipy.fft in multi-threading environments
     try:
         import pyfftw
+        pyfftw.config.PLANNER_EFFORT = 'FFTW_MEASURE'
         pyfftw.interfaces.cache.enable()
-        nproc = lib.num_threads()
-        def _fftn_wrapper(a):
+        def _fftn_wrapper(a):  # noqa
             return pyfftw.interfaces.numpy_fft.fftn(a, axes=(1,2,3), threads=nproc)
-        def _ifftn_wrapper(a):
+        def _ifftn_wrapper(a):  # noqa
             return pyfftw.interfaces.numpy_fft.ifftn(a, axes=(1,2,3), threads=nproc)
     except ImportError:
-        def _fftn_wrapper(a):
-            return np.fft.fftn(a, axes=(1,2,3))
-        def _ifftn_wrapper(a):
-            return np.fft.ifftn(a, axes=(1,2,3))
-
-elif FFT_ENGINE == 'NUMPY':
-    def _fftn_wrapper(a):
-        return np.fft.fftn(a, axes=(1,2,3))
-    def _ifftn_wrapper(a):
-        return np.fft.ifftn(a, axes=(1,2,3))
+        print('PyFFTW not installed. SciPy fft module will be used.')
 
 elif FFT_ENGINE == 'NUMPY+BLAS':
     _EXCLUDE = [17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79,
                 83, 89, 97,101,103,107,109,113,127,131,137,139,149,151,157,163,
                 167,173,179,181,191,193,197,199,211,223,227,229,233,239,241,251,
                 257,263,269,271,277,281,283,293]
-    _EXCLUDE = set(_EXCLUDE + [n*2 for n in _EXCLUDE] + [n*3 for n in _EXCLUDE])
-    def _fftn_wrapper(a):
+    _EXCLUDE = set(_EXCLUDE + [n*2 for n in _EXCLUDE[:30]] + [n*3 for n in _EXCLUDE[:20]])
+    def _fftn_wrapper(a):  # noqa
         mesh = a.shape[1:]
         if mesh[0] in _EXCLUDE and mesh[1] in _EXCLUDE and mesh[2] in _EXCLUDE:
             return _fftn_blas(a, mesh)
         else:
-            return np.fft.fftn(a, axes=(1,2,3))
-    def _ifftn_wrapper(a):
+            return scipy.fft.fftn(a, axes=(1,2,3), workers=nproc)
+    def _ifftn_wrapper(a):  # noqa
         mesh = a.shape[1:]
         if mesh[0] in _EXCLUDE and mesh[1] in _EXCLUDE and mesh[2] in _EXCLUDE:
             return _ifftn_blas(a, mesh)
         else:
-            return np.fft.ifftn(a, axes=(1,2,3))
+            return scipy.fft.ifftn(a, axes=(1,2,3), workers=nproc)
 
-#?elif:  # 'FFTW+BLAS'
-else:  # 'BLAS'
-    def _fftn_wrapper(a):
+elif FFT_ENGINE == 'BLAS':
+    def _fftn_wrapper(a):  # noqa
         mesh = a.shape[1:]
         return _fftn_blas(a, mesh)
-    def _ifftn_wrapper(a):
+    def _ifftn_wrapper(a):  # noqa
         mesh = a.shape[1:]
         return _ifftn_blas(a, mesh)
 
@@ -236,8 +281,9 @@ def get_coulG(cell, k=np.zeros(3), exx=False, mf=None, mesh=None, Gv=None,
     else:
         kG = Gv
 
-    equal2boundary = np.zeros(Gv.shape[0], dtype=bool)
+    equal2boundary = None
     if wrap_around and abs(k).sum() > 1e-9:
+        equal2boundary = np.zeros(Gv.shape[0], dtype=bool)
         # Here we 'wrap around' the high frequency k+G vectors into their lower
         # frequency counterparts.  Important if you want the gamma point and k-point
         # answers to agree
@@ -345,7 +391,7 @@ def get_coulG(cell, k=np.zeros(3), exx=False, mf=None, mesh=None, Gv=None,
                 weights = 1 + Gp*Rc * scipy.special.j1(Gp*Rc) * scipy.special.k0(Gx*Rc)
                 weights -= Gx*Rc * scipy.special.j0(Gp*Rc) * scipy.special.k1(Gx*Rc)
                 coulG = 4*np.pi/absG2 * weights
-                # TODO: numerical integation
+                # TODO: numerical integration
                 # coulG[Gx==0] = -4*np.pi * (dr * r * scipy.special.j0(Gp*r) * np.log(r)).sum()
             if len(G0_idx) > 0:
                 coulG[G0_idx] = -np.pi*Rc**2 * (2*np.log(Rc) - 1)
@@ -358,7 +404,8 @@ def get_coulG(cell, k=np.zeros(3), exx=False, mf=None, mesh=None, Gv=None,
         if cell.dimension > 0 and exxdiv == 'ewald' and len(G0_idx) > 0:
             coulG[G0_idx] += Nk*cell.vol*madelung(cell, kpts)
 
-    coulG[equal2boundary] = 0
+    if equal2boundary is not None:
+        coulG[equal2boundary] = 0
 
     # Scale the coulG kernel for attenuated Coulomb integrals.
     # * omega is used by RangeSeparatedJKBuilder which requires ewald probe charge
@@ -442,7 +489,7 @@ def precompute_exx(cell, kpts):
 
 def madelung(cell, kpts):
     Nk = get_monkhorst_pack_size(cell, kpts)
-    ecell = copy.copy(cell)
+    ecell = cell.copy(deep=False)
     ecell._atm = np.array([[1, cell._env.size, 0, 0, 0, 0]])
     ecell._env = np.append(cell._env, [0., 0., 0.])
     ecell.unit = 'B'
@@ -508,7 +555,7 @@ def get_lattice_Ls(cell, nimgs=None, rcut=None, dimension=None, discard=True):
 
     a = cell.lattice_vectors()
 
-    scaled_atom_coords = np.linalg.solve(a.T, cell.atom_coords().T).T
+    scaled_atom_coords = cell.get_scaled_atom_coords()
     atom_boundary_max = scaled_atom_coords[:,:dimension].max(axis=0)
     atom_boundary_min = scaled_atom_coords[:,:dimension].min(axis=0)
     if (np.any(atom_boundary_max > 1) or np.any(atom_boundary_min < -1)):
@@ -543,11 +590,12 @@ def get_lattice_Ls(cell, nimgs=None, rcut=None, dimension=None, discard=True):
                              np.arange(-bounds[2], bounds[2]+1)))
     Ls = np.dot(Ts[:,:dimension], a[:dimension])
 
-    ovlp_penalty += 1e-200  # avoid /0
-    Ts_scaled = (Ts[:,:dimension] + 1e-200) / ovlp_penalty
-    ovlp_penalty_fac = 1. / abs(Ts_scaled).min(axis=1)
-    Ls_mask = np.linalg.norm(Ls, axis=1) * (1-ovlp_penalty_fac) < rcut
-    Ls = Ls[Ls_mask]
+    if discard:
+        ovlp_penalty += 1e-200  # avoid /0
+        Ts_scaled = (Ts[:,:dimension] + 1e-200) / ovlp_penalty
+        ovlp_penalty_fac = 1. / abs(Ts_scaled).min(axis=1)
+        Ls_mask = np.linalg.norm(Ls, axis=1) * (1-ovlp_penalty_fac) < rcut
+        Ls = Ls[Ls_mask]
     return np.asarray(Ls, order='C')
 
 
@@ -587,12 +635,14 @@ def super_cell(cell, ncopy, wrap_around=False):
         zs[(ncopy[2]+1)//2:] -= ncopy[2]
     Ts = lib.cartesian_prod((xs, ys, zs))
     Ls = np.dot(Ts, a)
-    supcell = copy.copy(cell)
+    supcell = cell.copy(deep=False)
     supcell.a = np.einsum('i,ij->ij', ncopy, a)
     mesh = np.asarray(ncopy) * np.asarray(cell.mesh)
     supcell.mesh = (mesh // 2) * 2 + 1
-    supcell.magmom = np.repeat(np.asarray(cell.magmom).reshape(1,-1),
-                               np.prod(ncopy), axis=0).ravel()
+    if isinstance(cell.magmom, np.ndarray):
+        supcell.magmom = cell.magmom.tolist() * np.prod(ncopy)
+    else:
+        supcell.magmom = cell.magmom * np.prod(ncopy)
     return _build_supcell_(supcell, cell, Ls)
 
 
@@ -613,7 +663,7 @@ def cell_plus_imgs(cell, nimgs):
                              np.arange(-nimgs[1], nimgs[1]+1),
                              np.arange(-nimgs[2], nimgs[2]+1)))
     Ls = np.dot(Ts, a)
-    supcell = copy.copy(cell)
+    supcell = cell.copy(deep=False)
     supcell.a = np.einsum('i,ij->ij', nimgs, a)
     supcell.mesh = np.array([(nimgs[0]*2+1)*cell.mesh[0],
                              (nimgs[1]*2+1)*cell.mesh[1],
@@ -633,6 +683,7 @@ def _build_supcell_(supcell, cell, Ls):
     x, y, z = coords.T
     supcell.atom = supcell._atom = list(zip(symbs, zip(x, y, z)))
     supcell.unit = 'B'
+    supcell.enuc = None # reset nuclear energy
 
     # Do not call supcell.build() to initialize supcell since it may normalize
     # the basis contraction coefficients
@@ -641,7 +692,7 @@ def _build_supcell_(supcell, cell, Ls):
     _env = np.append(cell._env, coords.ravel())
     _atm = np.repeat(cell._atm[None,:,:], nimgs, axis=0)
     _atm = _atm.reshape(-1, ATM_SLOTS)
-    # Point to the corrdinates appended to _env
+    # Point to the coordinates appended to _env
     _atm[:,PTR_COORD] = cell._env.size + np.arange(nimgs * cell.natm) * 3
 
     _bas = np.repeat(cell._bas[None,:,:], nimgs, axis=0)
@@ -652,7 +703,7 @@ def _build_supcell_(supcell, cell, Ls):
     supcell._bas = np.asarray(_bas.reshape(-1, BAS_SLOTS), dtype=np.int32)
     supcell._env = _env
 
-    if isinstance(supcell, pbcgto.Cell) and supcell.space_group_symmetry:
+    if isinstance(supcell, pbcgto.Cell) and getattr(supcell, 'space_group_symmetry', False):
         supcell.build_lattice_symmetry(not cell._mesh_from_build)
     return supcell
 

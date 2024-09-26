@@ -241,35 +241,42 @@ def as_scanner(mf_grad):
         return mf_grad
 
     logger.info(mf_grad, 'Create scanner for %s', mf_grad.__class__)
+    name = mf_grad.__class__.__name__ + SCF_GradScanner.__name_mixin__
+    return lib.set_class(SCF_GradScanner(mf_grad),
+                         (SCF_GradScanner, mf_grad.__class__), name)
 
-    class SCF_GradScanner(mf_grad.__class__, lib.GradScanner):
-        def __init__(self, g):
-            lib.GradScanner.__init__(self, g)
-        def __call__(self, mol_or_geom, **kwargs):
-            if isinstance(mol_or_geom, gto.Mole):
-                mol = mol_or_geom
-            else:
-                mol = self.mol.set_geom_(mol_or_geom, inplace=False)
+class SCF_GradScanner(lib.GradScanner):
+    def __init__(self, g):
+        lib.GradScanner.__init__(self, g)
 
-            self.reset(mol)
-            mf_scanner = self.base
-            e_tot = mf_scanner(mol)
+    def __call__(self, mol_or_geom, **kwargs):
+        if isinstance(mol_or_geom, gto.MoleBase):
+            assert mol_or_geom.__class__ == gto.Mole
+            mol = mol_or_geom
+        else:
+            mol = self.mol.set_geom_(mol_or_geom, inplace=False)
 
-            if isinstance(mf_scanner, hf.KohnShamDFT):
-                if getattr(self, 'grids', None):
-                    self.grids.reset(mol)
-                if getattr(self, 'nlcgrids', None):
-                    self.nlcgrids.reset(mol)
+        self.reset(mol)
+        mf_scanner = self.base
+        e_tot = mf_scanner(mol)
 
-            de = self.kernel(**kwargs)
-            return e_tot, de
-    return SCF_GradScanner(mf_grad)
+        if isinstance(mf_scanner, hf.KohnShamDFT):
+            if getattr(self, 'grids', None):
+                self.grids.reset(mol)
+            if getattr(self, 'nlcgrids', None):
+                self.nlcgrids.reset(mol)
+
+        de = self.kernel(**kwargs)
+        return e_tot, de
 
 
-class GradientsMixin(lib.StreamObject):
+class GradientsBase(lib.StreamObject):
     '''
     Basic nuclear gradient functions for non-relativistic methods
     '''
+
+    _keys = {'mol', 'base', 'unit', 'atmlst', 'de'}
+
     def __init__(self, method):
         self.verbose = method.verbose
         self.stdout = method.stdout
@@ -280,7 +287,6 @@ class GradientsMixin(lib.StreamObject):
 
         self.atmlst = None
         self.de = None
-        self._keys = set(self.__dict__.keys())
 
     def dump_flags(self, verbose=None):
         log = logger.new_logger(self, verbose)
@@ -410,6 +416,8 @@ class GradientsMixin(lib.StreamObject):
         self.de = de + self.grad_nuc(atmlst=atmlst)
         if self.mol.symmetry:
             self.de = self.symmetrize(self.de, atmlst)
+        if self.base.do_disp():
+            self.de += self.get_dispersion()
         logger.timer(self, 'SCF gradients', *cput0)
         self._finalize()
         return self.de
@@ -432,7 +440,20 @@ class GradientsMixin(lib.StreamObject):
         to be split into alpha,beta in DF-ROHF subclass'''
         return lib.tag_array (dm, mo_coeff=mo_coeff, mo_occ=mo_occ)
 
-class Gradients(GradientsMixin):
+    # to_gpu can be reused only when __init__ still takes mf
+    def to_gpu(self):
+        mf = self.base.to_gpu()
+        from importlib import import_module
+        mod = import_module(self.__module__.replace('pyscf', 'gpu4pyscf'))
+        cls = getattr(mod, self.__class__.__name__)
+        obj = cls(mf)
+        return obj
+
+# export the symbol GradientsMixin for backward compatibility.
+# GradientsMixin should be dropped in the future.
+GradientsMixin = GradientsBase
+
+class Gradients(GradientsBase):
     '''Non-relativistic restricted Hartree-Fock gradients'''
 
     def get_veff(self, mol=None, dm=None):
@@ -453,3 +474,4 @@ Grad = Gradients
 from pyscf import scf
 # Inject to RHF class
 scf.hf.RHF.Gradients = lib.class_as_method(Gradients)
+scf.rohf.ROHF.Gradients = lib.invalid_method('Gradients')

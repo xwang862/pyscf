@@ -29,7 +29,7 @@ from pyscf import __config__
 from pyscf.lib.parameters import LARGE_DENOM
 
 
-class AuxiliarySpace(object):
+class AuxiliarySpace:
     ''' Simple container to hold the energies, couplings and chemical
         potential associated with an auxiliary space.
 
@@ -446,7 +446,7 @@ def combine(*auxspcs):
     '''
 
     nphys = [auxspc.nphys for auxspc in auxspcs]
-    if not all([x == nphys[0] for x in nphys]):
+    if not all(x == nphys[0] for x in nphys):
         raise ValueError('Size of physical space must be the same to '
                          'combine AuxiliarySpace objects.')
     nphys = nphys[0]

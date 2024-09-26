@@ -21,7 +21,6 @@ J-metric density fitting
 '''
 
 
-import copy
 import tempfile
 import contextlib
 import numpy
@@ -80,6 +79,8 @@ class DF(lib.StreamObject):
     _compatible_format = getattr(__config__, 'df_df_DF_compatible_format', False)
     _dataname = 'j3c'
 
+    _keys = {'mol', 'auxmol'}
+
     def __init__(self, mol, auxbasis=None):
         self.mol = mol
         self.stdout = mol.stdout
@@ -96,7 +97,10 @@ class DF(lib.StreamObject):
         self._cderi = None
         self._vjopt = None
         self._rsh_df = {}  # Range separated Coulomb DF objects
-        self._keys = set(self.__dict__.keys())
+
+    __getstate__, __setstate__ = lib.generate_pickle_methods(
+            excludes=('_cderi_to_save', '_cderi', '_vjopt', '_rsh_df'),
+            reset_state=True)
 
     @property
     def auxbasis(self):
@@ -166,7 +170,7 @@ class DF(lib.StreamObject):
                                      max_memory=max_memory, verbose=log)
             else:
                 # Store DF tensor in blocks. This is to reduce the
-                # initiailzation overhead
+                # initialization overhead
                 outcore.cholesky_eri_b(mol, cderi, dataname=self._dataname,
                                        int3c=int3c, int2c=int2c, auxmol=auxmol,
                                        max_memory=max_memory, verbose=log)
@@ -181,7 +185,7 @@ class DF(lib.StreamObject):
         '''Reset mol and clean up relevant attributes for scanner mode'''
         if mol is not None:
             self.mol = mol
-        self.auxmol = None
+            self.auxmol = None
         self._cderi = None
         self._vjopt = None
         self._rsh_df = {}
@@ -282,9 +286,9 @@ class DF(lib.StreamObject):
         if key in self._rsh_df:
             rsh_df = self._rsh_df[key]
         else:
-            rsh_df = self._rsh_df[key] = copy.copy(self).reset()
+            rsh_df = self._rsh_df[key] = self.copy().reset()
             if hasattr(self, '_dataname'):
-                rsh_df._dataname = f'{self._dataname}/lr/{key}'
+                rsh_df._dataname = f'{self._dataname}-lr/{key}'
             logger.info(self, 'Create RSH-DF object %s for omega=%s', rsh_df, omega)
 
         mol = self.mol
@@ -307,6 +311,8 @@ class DF(lib.StreamObject):
             mol.omega = mol_omega
             if auxmol_omega is not None:
                 auxmol.omega = auxmol_omega
+
+    to_gpu = lib.to_gpu
 
 GDF = DF
 
@@ -353,7 +359,12 @@ class DF4C(DF):
         with self.range_coulomb(omega) as rsh_df:
             return df_jk.r_get_jk(rsh_df, dm, hermi, with_j, with_k)
 
+    def get_eri(self):
+        raise NotImplementedError
+    get_ao_eri = get_eri
+
     def ao2mo(self, mo_coeffs):
         raise NotImplementedError
+    get_mo_eri = ao2mo
 
 GDF4C = DF4C

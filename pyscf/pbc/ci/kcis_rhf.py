@@ -275,7 +275,7 @@ class gmres_counter(object):
 
 
 def cis_matvec_singlet(cis, vector, kshift, eris=None, dielec=1.0):
-    """Compute matrix-vector product of the Hamiltonion matrix and a CIS c
+    """Compute matrix-vector product of the Hamiltonian matrix and a CIS c
     oefficient vector, in the space of single excitation.
 
     Arguments:
@@ -294,7 +294,7 @@ def cis_matvec_singlet(cis, vector, kshift, eris=None, dielec=1.0):
             electron repulsion integrals (default: {None})
 
     Returns:
-        1D array -- matrix-vector product of the Hamiltonion matrix and the
+        1D array -- matrix-vector product of the Hamiltonian matrix and the
             input vector.
     """
     cput0 = (logger.process_clock(), logger.perf_counter())
@@ -864,4 +864,3 @@ if __name__ == "__main__":
     mycis = ci.KCIS(kmf)
     e_cis, v_cis = mycis.kernel(nroots=1, kptlist=[0])
     print(e_cis[0] - 0.2239201285373249)
-

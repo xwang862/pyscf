@@ -146,7 +146,7 @@ class Symmetry():
         nop : int
             Length of `ops`.
         Dmats : list of 2d arrays
-            Wigner D-matries
+            Wigner D-matrices
         l_max : int
             Maximum angular momentum considered in `Dmats`
     '''
@@ -193,7 +193,7 @@ class Symmetry():
                 self.ops = ops
 
         self.nop = len(self.ops)
-        self.has_inversion = any([op.rot_is_inversion for op in self.ops])
+        self.has_inversion = any(op.rot_is_inversion for op in self.ops)
 
         l_max = None
         if 'auxcell' in kwargs:
@@ -219,7 +219,7 @@ class Symmetry():
 
 def _get_phase(cell, op, kpt_scaled, ignore_phase=False, tol=SYMPREC):
     kpt_scaled = op.a2b(cell).dot_rot(kpt_scaled)
-    coords_scaled = cell.get_scaled_positions().reshape(-1,3)
+    coords_scaled = cell.get_scaled_atom_coords().reshape(-1,3)
     natm = coords_scaled.shape[0]
     phase = np.ones((natm,), dtype=np.complex128)
     atm_map = np.arange(natm)

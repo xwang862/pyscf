@@ -23,13 +23,11 @@ J. Chem. Phys. 147, 164119 (2017)
 '''
 
 
-import copy
 from functools import reduce
 import numpy
 from pyscf import lib
 from pyscf.lib import logger, zdotNN, zdotCN, zdotNC
 from pyscf.pbc import tools
-from pyscf.pbc.lib.kpts import KPoints
 from pyscf.pbc.lib.kpts_helper import is_zero, gamma_point, member, get_kconserv_ria
 from pyscf import __config__
 
@@ -54,8 +52,6 @@ def density_fit(mf, auxbasis=None, mesh=None, with_df=None):
         else:
             kpts = numpy.reshape(mf.kpt, (1,3))
 
-        if isinstance(kpts, KPoints):
-            kpts = kpts.kpts
         with_df = df.DF(mf.cell, kpts)
         with_df.max_memory = mf.max_memory
         with_df.stdout = mf.stdout
@@ -64,7 +60,7 @@ def density_fit(mf, auxbasis=None, mesh=None, with_df=None):
         if mesh is not None:
             with_df.mesh = mesh
 
-    mf = copy.copy(mf)
+    mf = mf.copy()
     mf.with_df = with_df
     mf._eri = None
     return mf
@@ -197,7 +193,8 @@ def get_j_kpts_kshift(mydf, dm_kpts, kshift, hermi=0, kpts=numpy.zeros((1,3)), k
 
     kpts_band, input_band = _format_kpts_band(kpts_band, kpts), kpts_band
     nband = len(kpts_band)
-    j_real = gamma_point(kpts_band) and not numpy.iscomplexobj(dms)
+    j_real = (gamma_point(kpts_band) and gamma_point(kpts[kshift]) and
+              not numpy.iscomplexobj(dms))
 
     kconserv = get_kconserv_ria(mydf.cell, kpts)[kshift]
 
@@ -297,13 +294,15 @@ def get_k_kpts(mydf, dm_kpts, hermi=1, kpts=numpy.zeros((1,3)), kpts_band=None,
     skmoR = skmo2R = None
     if not mydf.force_dm_kbuild:
         if mo_coeff is not None:
-            if isinstance(mo_coeff[0], (list, tuple)):
+            if isinstance(mo_coeff[0], (list, tuple)) or (isinstance(mo_coeff[0], numpy.ndarray)
+                                                          and mo_coeff[0].ndim == 3):
                 mo_coeff = [mo for mo1 in mo_coeff for mo in mo1]
             if len(mo_coeff) != nset*nkpts: # wrong shape
                 log.warn('mo_coeff from dm tag has wrong shape. '
                          'Calculating mo from dm instead.')
                 mo_coeff = None
-            elif isinstance(mo_occ[0], (list, tuple)):
+            elif isinstance(mo_occ[0], (list, tuple)) or (isinstance(mo_occ[0], numpy.ndarray)
+                                                          and mo_occ[0].ndim == 2):
                 mo_occ = [mo for mo1 in mo_occ for mo in mo1]
         if mo_coeff is not None:
             skmoR, skmoI = _format_mo(mo_coeff, mo_occ, shape=(nset,nkpts), order='F',
@@ -705,13 +704,15 @@ def get_k_kpts_kshift(mydf, dm_kpts, kshift, hermi=0, kpts=numpy.zeros((1,3)), k
     skmoR = skmo2R = None
     if not mydf.force_dm_kbuild:
         if mo_coeff is not None:
-            if isinstance(mo_coeff[0], (list, tuple)):
+            if isinstance(mo_coeff[0], (list, tuple)) or (isinstance(mo_coeff[0], numpy.ndarray)
+                                                          and mo_coeff[0].ndim == 3):
                 mo_coeff = [mo for mo1 in mo_coeff for mo in mo1]
             if len(mo_coeff) != nset*nkpts: # wrong shape
                 log.warn('mo_coeff from dm tag has wrong shape. '
                          'Calculating mo from dm instead.')
                 mo_coeff = None
-            elif isinstance(mo_occ[0], (list, tuple)):
+            elif isinstance(mo_occ[0], (list, tuple)) or (isinstance(mo_occ[0], numpy.ndarray)
+                                                          and mo_occ[0].ndim == 2):
                 mo_occ = [mo for mo1 in mo_occ for mo in mo1]
         if mo_coeff is not None:
             skmoR, skmoI = _format_mo(mo_coeff, mo_occ, shape=(nset,nkpts), order='F',
@@ -1261,12 +1262,12 @@ def get_jk(mydf, dm, hermi=1, kpt=numpy.zeros(3),
         if with_j:
             #:rho_coeff = numpy.einsum('Lpq,xqp->xL', Lpq, dms)
             #:vj += numpy.dot(rho_coeff, Lpq.reshape(-1,nao**2))
-            rhoR  = numpy.einsum('Lpq,xpq->xL', LpqR, dmsR)
+            rhoR  = numpy.einsum('Lpq,xqp->xL', LpqR, dmsR)
             if not j_real:
                 LpqI = LpqI.reshape(-1,nao,nao)
-                rhoR -= numpy.einsum('Lpq,xpq->xL', LpqI, dmsI)
-                rhoI  = numpy.einsum('Lpq,xpq->xL', LpqR, dmsI)
-                rhoI += numpy.einsum('Lpq,xpq->xL', LpqI, dmsR)
+                rhoR -= numpy.einsum('Lpq,xqp->xL', LpqI, dmsI)
+                rhoI  = numpy.einsum('Lpq,xqp->xL', LpqR, dmsI)
+                rhoI += numpy.einsum('Lpq,xqp->xL', LpqI, dmsR)
             vjR += sign * numpy.einsum('xL,Lpq->xpq', rhoR, LpqR)
             if not j_real:
                 vjR -= sign * numpy.einsum('xL,Lpq->xpq', rhoI, LpqI)

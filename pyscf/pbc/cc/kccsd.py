@@ -333,7 +333,7 @@ class GCCSD(gccsd.GCCSD):
     def __init__(self, mf, frozen=None, mo_coeff=None, mo_occ=None):
         assert (isinstance(mf, scf.khf.KSCF))
         if not isinstance(mf, scf.kghf.KGHF):
-            mf = scf.addons.convert_to_ghf(mf)
+            mf = mf.to_ghf()
         self.kpts = mf.kpts
         self.khelper = kpts_helper.KptsHelper(mf.cell, mf.kpts)
         gccsd.GCCSD.__init__(self, mf, frozen, mo_coeff, mo_occ)
@@ -481,6 +481,7 @@ class GCCSD(gccsd.GCCSD):
                                 verbose=self.verbose)
         return self.l1, self.l2
 
+    to_gpu = lib.to_gpu
 
 CCSD = KCCSD = KGCCSD = GCCSD
 

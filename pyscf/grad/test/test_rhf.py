@@ -18,6 +18,11 @@ import numpy
 from pyscf import gto, scf, lib
 from pyscf import grad
 
+try:
+    from pyscf.dispersion import dftd3, dftd4
+except ImportError:
+    dftd3 = dftd4 = None
+
 def setUpModule():
     global mol
     mol = gto.Mole()
@@ -52,6 +57,10 @@ class KnownValues(unittest.TestCase):
         g = g_scan(mol)[1]
         self.assertAlmostEqual(lib.fp(g), 0.0055116240804341972, 7)
 
+        gobj = g_scan.undo_scanner()
+        g = gobj.kernel()
+        self.assertAlmostEqual(lib.fp(g), 0.0055116240804341972, 7)
+
         mfs = g_scan.base.as_scanner()
         e1 = mfs('O  0.  0. -0.001; H  0.  -0.757  0.587; H  0.  0.757   0.587')
         e2 = mfs('O  0.  0.  0.001; H  0.  -0.757  0.587; H  0.  0.757   0.587')
@@ -66,6 +75,30 @@ class KnownValues(unittest.TestCase):
         e1 = mfs('O  0.  0. -0.001; H  0.  -0.757  0.587; H  0.  0.757   0.587')
         e2 = mfs('O  0.  0.  0.001; H  0.  -0.757  0.587; H  0.  0.757   0.587')
         self.assertAlmostEqual(g[0,2], (e2-e1)/0.002*lib.param.BOHR, 5)
+
+    @unittest.skipIf(dftd3 is None, "requires the dftd3 library")
+    def test_rhf_d3_grad(self):
+        mf = scf.RHF(mol)
+        mf.disp = 'd3bj'
+        g_scan = mf.nuc_grad_method().as_scanner()
+        g = g_scan(mol)[1]
+
+        mf_scan = mf.as_scanner()
+        e1 = mf_scan('O  0.  0. -0.001; H  0.  -0.757  0.587; H  0.  0.757   0.587')
+        e2 = mf_scan('O  0.  0.  0.001; H  0.  -0.757  0.587; H  0.  0.757   0.587')
+        self.assertAlmostEqual((e2-e1)/0.002*lib.param.BOHR, g[0,2], 5)
+
+    @unittest.skipIf(dftd4 is None, "requires the dftd4 library")
+    def test_rhf_d4_grad(self):
+        mf = scf.RHF(mol)
+        mf.disp = 'd4'
+        g_scan = mf.nuc_grad_method().as_scanner()
+        g = g_scan(mol)[1]
+
+        mf_scan = mf.as_scanner()
+        e1 = mf_scan('O  0.  0. -0.001; H  0.  -0.757  0.587; H  0.  0.757   0.587')
+        e2 = mf_scan('O  0.  0.  0.001; H  0.  -0.757  0.587; H  0.  0.757   0.587')
+        self.assertAlmostEqual((e2-e1)/0.002*lib.param.BOHR, g[0,2], 5)
 
     def test_x2c_rhf_grad(self):
         h2o = gto.Mole()
