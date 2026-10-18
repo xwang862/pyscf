@@ -914,12 +914,12 @@ def optical_absorption_singlet_approx1(eom, scan, eta, kshift=0, tol=1e-5, maxit
 
     for i, omega in enumerate(omega_list):
         matvec = lambda vec: eeccsd_matvec_singlet(eom, vec, kshift, imds=imds) * (-1.) + (omega + ieta) * vec
-        A = scipy.sparse.linalg.LinearOperator((b_size, b_size), matvec=matvec, dtype=diag.dtype)
+        A = scipy.sparse.linalg.LinearOperator((b_size, b_size), matvec=matvec, dtype=np.complex128)
 
         # preconditioner
         # M is the inverse of P, where P should be close to A, but easy to solve.
         # We choose P = H_diags shifted by omega + ieta.
-        M = scipy.sparse.diags(np.reciprocal(diag * (-1.) + omega + ieta), format='csc', dtype=diag.dtype)
+        M = scipy.sparse.diags(np.reciprocal(diag * (-1.) + omega + ieta), format='csc', dtype=np.complex128)
 
         for x in range(3):
 
@@ -1002,12 +1002,12 @@ def optical_absorption_singlet_approx2(eom, scan, eta, kshift=0, tol=1e-5, maxit
 
     for i, omega in enumerate(omega_list):
         matvec = lambda vec: eeccsd_matvec_singlet(eom, vec, kshift, imds=imds) * (-1.) + (omega + ieta) * vec
-        A = scipy.sparse.linalg.LinearOperator((b_size, b_size), matvec=matvec, dtype=diag.dtype)
+        A = scipy.sparse.linalg.LinearOperator((b_size, b_size), matvec=matvec, dtype=np.complex128)
 
         # preconditioner
         # M is the inverse of P, where P should be close to A, but easy to solve.
         # We choose P = H_diags shifted by omega + ieta.
-        M = scipy.sparse.diags(np.reciprocal(diag * (-1.) + omega + ieta), format='csc', dtype=diag.dtype)
+        M = scipy.sparse.diags(np.reciprocal(diag * (-1.) + omega + ieta), format='csc', dtype=np.complex128)
 
         for x in range(3):
 
@@ -1091,12 +1091,12 @@ def optical_absorption_singlet(eom, scan, eta, kshift=0, tol=1e-5, maxiter=500, 
 
     for i, omega in enumerate(omega_list):
         matvec = lambda vec: eeccsd_matvec_singlet(eom, vec, kshift, imds=imds) * (-1.) + (omega + ieta) * vec
-        A = scipy.sparse.linalg.LinearOperator((b_size, b_size), matvec=matvec, dtype=diag.dtype)
+        A = scipy.sparse.linalg.LinearOperator((b_size, b_size), matvec=matvec, dtype=np.complex128)
 
         # preconditioner
         # M is the inverse of P, where P should be close to A, but easy to solve.
         # We choose P = H_diags shifted by omega + ieta.
-        M = scipy.sparse.diags(np.reciprocal(diag * (-1.) + omega + ieta), format='csc', dtype=diag.dtype)
+        M = scipy.sparse.diags(np.reciprocal(diag * (-1.) + omega + ieta), format='csc', dtype=np.complex128)
 
         for x in range(3):
 
@@ -1172,7 +1172,7 @@ def get_dipole_mo(eom, pblock="occ", qblock="vir"):
     plen = pend - pstart
     qlen = qend - qstart
 
-    ip_mo = np.empty((3, nkpts, plen, qlen), dtype=mo_coeff[0].dtype)
+    ip_mo = np.empty((3, nkpts, plen, qlen), dtype=np.result_type(mo_coeff[0], ip_ao))
     for k in range(nkpts):
         pmo = mo_coeff[k][:, pstart:pend]
         qmo = mo_coeff[k][:, qstart:qend]
