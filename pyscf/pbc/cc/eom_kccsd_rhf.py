@@ -850,6 +850,31 @@ def eomee_ccsd_singlet(eom, nroots=1, koopmans=False, guess=None, left=False,
     return eom.e, eom.v
 
 
+def _singlet_metric_weights(eom, vector, kconserv2):
+    '''Weights (w1, w2) of a packed singlet vector L such that
+
+        <L|R> = w1 . r1 + w2 . r2 = 2 l_ia r_ia + (2 l_ijab - l_ijba) r_ijab
+
+    for any singlet R with unpacked amplitudes r1, r2. This is the singlet metric
+    of spin-adapted EOM-EE (cf. pyscf.cc.eom_rccsd._ee_singlet_dot). A plain dot
+    product of two packed singlet vectors is not <L|R>: singles miss the factor
+    of 2 from the two spin cases, and r2 is stored only for unique (ia) >= (jb).
+    '''
+    l1, l2 = vector_to_amplitudes_singlet(vector, eom.nkpts, eom.nmo, eom.nocc, kconserv2)
+    w2 = 2. * l2
+    for ki, kj, ka in kpts_helper.loop_kkk(eom.nkpts):
+        kb = kconserv2[ki, ka, kj]
+        w2[ki, kj, ka] -= l2[ki, kj, kb].transpose(0, 1, 3, 2)
+    return 2. * l1, w2
+
+
+def _singlet_dot(eom, weights, vector, kconserv2):
+    '''<L|R> for the metric weights of L (see _singlet_metric_weights) and a
+    packed singlet vector R.'''
+    r1, r2 = vector_to_amplitudes_singlet(vector, eom.nkpts, eom.nmo, eom.nocc, kconserv2)
+    return np.dot(weights[0].ravel(), r1.ravel()) + np.dot(weights[1].ravel(), r2.ravel())
+
+
 def optical_absorption_singlet_approx1(eom, scan, eta, kshift=0, tol=1e-5, maxiter=500, imds=None, x0=None,
                                        partition=None, **kwargs):
     """ Compute approximate spectra assuming:
@@ -912,6 +937,9 @@ def optical_absorption_singlet_approx1(eom, scan, eta, kshift=0, tol=1e-5, maxit
     counter = kcis_rhf.gmres_counter(rel=True)
     LinearSolver = scipy.sparse.linalg.gcrotmk
 
+    # <b| in the singlet metric
+    b_weights = [_singlet_metric_weights(eom, b_vector[x].conj(), kconserv2) for x in range(3)]
+
     for i, omega in enumerate(omega_list):
         matvec = lambda vec: eeccsd_matvec_singlet(eom, vec, kshift, imds=imds) * (-1.) + (omega + ieta) * vec
         A = scipy.sparse.linalg.LinearOperator((b_size, b_size), matvec=matvec, dtype=np.complex128)
@@ -931,10 +959,12 @@ def optical_absorption_singlet_approx1(eom, scan, eta, kshift=0, tol=1e-5, maxit
             counter.reset()
 
             x0[x] = sol
-            spectrum[x,i] = np.dot(b_vector[x].conj(), sol)
+            spectrum[x,i] = _singlet_dot(eom, b_weights[x], sol, kconserv2)
 
-            # Uncomment next 3 lines if b0 is non-negligible
-            # sol0 = b0[x] + np.dot(sol, amplitudes_to_vector_singlet(imds.Fov, imds.woOvV, kconserv2))
+            # Uncomment next 4 lines if b0 is non-negligible
+            # h0_weights = _singlet_metric_weights(
+            #     eom, amplitudes_to_vector_singlet(imds.Fov, imds.woOvV, kconserv2), kconserv2)
+            # sol0 = b0[x] + _singlet_dot(eom, h0_weights, sol, kconserv2)
             # sol0 /= omega + ieta
             # spectrum[x, i] += b0[x].conj()*sol0
 
@@ -1000,6 +1030,11 @@ def optical_absorption_singlet_approx2(eom, scan, eta, kshift=0, tol=1e-5, maxit
     counter = kcis_rhf.gmres_counter(rel=True)
     LinearSolver = scipy.sparse.linalg.gcrotmk
 
+    # <b| and <Phi_0|Hbar in the singlet metric
+    b_weights = [_singlet_metric_weights(eom, b_vector[x].conj(), kconserv2) for x in range(3)]
+    h0_weights = _singlet_metric_weights(
+        eom, amplitudes_to_vector_singlet(imds.Fov, imds.woOvV, kconserv2), kconserv2)
+
     for i, omega in enumerate(omega_list):
         matvec = lambda vec: eeccsd_matvec_singlet(eom, vec, kshift, imds=imds) * (-1.) + (omega + ieta) * vec
         A = scipy.sparse.linalg.LinearOperator((b_size, b_size), matvec=matvec, dtype=np.complex128)
@@ -1019,9 +1054,9 @@ def optical_absorption_singlet_approx2(eom, scan, eta, kshift=0, tol=1e-5, maxit
             counter.reset()
 
             x0[x] = sol
-            spectrum[x,i] = np.dot(b_vector[x].conj(), sol)
+            spectrum[x,i] = _singlet_dot(eom, b_weights[x], sol, kconserv2)
 
-            sol0 = b0[x] + np.dot(sol, amplitudes_to_vector_singlet(imds.Fov, imds.woOvV, kconserv2))
+            sol0 = b0[x] + _singlet_dot(eom, h0_weights, sol, kconserv2)
             sol0 /= omega + ieta
             spec0 = b0[x].conj()*sol0
             logger.debug(eom, 'b0.conj * x0 contribution to spectrum = %.15g', spec0)
@@ -1089,6 +1124,11 @@ def optical_absorption_singlet(eom, scan, eta, kshift=0, tol=1e-5, maxiter=500, 
     counter = kcis_rhf.gmres_counter(rel=True)
     LinearSolver = scipy.sparse.linalg.gcrotmk
 
+    # <e| and <Phi_0|Hbar in the singlet metric
+    e_weights = [_singlet_metric_weights(eom, e_vector[x], kconserv2) for x in range(3)]
+    h0_weights = _singlet_metric_weights(
+        eom, amplitudes_to_vector_singlet(imds.Fov, imds.woOvV, kconserv2), kconserv2)
+
     for i, omega in enumerate(omega_list):
         matvec = lambda vec: eeccsd_matvec_singlet(eom, vec, kshift, imds=imds) * (-1.) + (omega + ieta) * vec
         A = scipy.sparse.linalg.LinearOperator((b_size, b_size), matvec=matvec, dtype=np.complex128)
@@ -1109,9 +1149,9 @@ def optical_absorption_singlet(eom, scan, eta, kshift=0, tol=1e-5, maxiter=500, 
             counter.reset()
 
             x0[x] = sol
-            spectrum[x,i] = np.dot(e_vector[x], sol)
+            spectrum[x,i] = _singlet_dot(eom, e_weights[x], sol, kconserv2)
 
-            sol0 = b0[x] + np.dot(sol, amplitudes_to_vector_singlet(imds.Fov, imds.woOvV, kconserv2))
+            sol0 = b0[x] + _singlet_dot(eom, h0_weights, sol, kconserv2)
             sol0 /= omega + ieta
             spec0 = e0[x] * sol0
             logger.debug(eom, 'b0.conj * x0 contribution to spectrum = %.15g', spec0)
