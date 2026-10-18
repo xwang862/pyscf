@@ -208,19 +208,19 @@ def optical_absorption_singlet(cis, scan, eta, kshift=0, tol=1e-5, maxiter=500, 
     # solve linear equations A.x = b
     ieta = 1j*eta
     omega_list = scan
-    spectrum = np.zeros((3, len(omega_list)), dtype=np.complex)
+    spectrum = np.zeros((3, len(omega_list)), dtype=np.complex128)
     b_vector = dipole.reshape(3, nkpts*nocc*nvir)
     b_size = nkpts * nocc * nvir
 
     diag = cis.get_diag(kshift, eris)
-    x0 = np.zeros((3, b_size), dtype=np.complex)
+    x0 = np.zeros((3, b_size), dtype=np.complex128)
     counter = gmres_counter(rel=True)
     # LinearSolver = scipy.sparse.linalg.gmres
     LinearSolver = scipy.sparse.linalg.gcrotmk
 
     for i, omega in enumerate(omega_list):
         matvec = lambda vec: cis.matvec(vec, kshift, eris, **kwargs)*(-1.) + (omega + ieta) * vec
-        A = scipy.sparse.linalg.LinearOperator((b_size, b_size), matvec=matvec, dtype=np.complex)
+        A = scipy.sparse.linalg.LinearOperator((b_size, b_size), matvec=matvec, dtype=np.complex128)
 
         # preconditioner
         # P should be close to A, but easy to solve. We choose P = H diags shifted by omega + ieta.
@@ -231,7 +231,7 @@ def optical_absorption_singlet(cis, scan, eta, kshift=0, tol=1e-5, maxiter=500, 
 
         for x in range(3):
 
-            sol, info = LinearSolver(A, b_vector[x], x0=x0[x], tol=tol, maxiter=maxiter, M=M, callback=counter)
+            sol, info = LinearSolver(A, b_vector[x], x0=x0[x], rtol=tol, maxiter=maxiter, M=M, callback=counter)
             if info == 0:
                 print('Frequency', np.round(omega,3), 'converged in', counter.niter, 'iterations')
             else:

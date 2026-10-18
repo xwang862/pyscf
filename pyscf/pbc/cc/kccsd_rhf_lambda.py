@@ -19,7 +19,6 @@
 '''
 Lambda equations for spin-restricted KCCSD.
 '''
-import time
 import numpy
 from pyscf import lib
 from pyscf.cc import ccsd_lambda
@@ -53,7 +52,7 @@ def update_lambda(cc, t1, t2, l1, l2, eris, imds):
     Spin adapted version of the following equations:
         Gauss and Stanton, J. Chem. Phys. 103, 3561 (1995) Table II. Unperturbed lambda equations (a) and (b)
     """
-    time0 = time.clock(), time.time()
+    time0 = logger.process_clock(), logger.perf_counter()
     log = logger.Logger(cc.stdout, cc.verbose)
 
     nkpts, nocc, nvir = t1.shape

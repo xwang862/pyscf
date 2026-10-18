@@ -887,7 +887,7 @@ def optical_absorption_singlet_approx1(eom, scan, eta, kshift=0, tol=1e-5, maxit
     # solve linear equations A.x = b
     ieta = 1j*eta
     omega_list = scan
-    spectrum = np.zeros((3, len(omega_list)), dtype=np.complex)
+    spectrum = np.zeros((3, len(omega_list)), dtype=np.complex128)
 
     # initialize b vector as zeros
     t1, t2 = eom._cc.t1, eom._cc.t2
@@ -906,7 +906,7 @@ def optical_absorption_singlet_approx1(eom, scan, eta, kshift=0, tol=1e-5, maxit
 
     diag = eom.get_diag(kshift, imds)
     if x0 is None:
-        x0 = np.zeros((3, b_size), dtype=np.complex)
+        x0 = np.zeros((3, b_size), dtype=np.complex128)
 
     from pyscf.pbc.ci import kcis_rhf
     counter = kcis_rhf.gmres_counter(rel=True)
@@ -923,7 +923,7 @@ def optical_absorption_singlet_approx1(eom, scan, eta, kshift=0, tol=1e-5, maxit
 
         for x in range(3):
 
-            sol, info = LinearSolver(A, b_vector[x], x0=x0[x], tol=tol, maxiter=maxiter, M=M, callback=counter)
+            sol, info = LinearSolver(A, b_vector[x], x0=x0[x], rtol=tol, maxiter=maxiter, M=M, callback=counter)
             if info == 0:
                 print('Frequency', np.round(omega,3), 'converged in', counter.niter, 'iterations')
             else:
@@ -990,7 +990,7 @@ def optical_absorption_singlet_approx2(eom, scan, eta, kshift=0, tol=1e-5, maxit
     # solve linear equations A.x = b
     ieta = 1j*eta
     omega_list = scan
-    spectrum = np.zeros((3, len(omega_list)), dtype=np.complex)
+    spectrum = np.zeros((3, len(omega_list)), dtype=np.complex128)
 
     diag = eom.get_diag(kshift, imds)
     if x0 is None:
@@ -1011,7 +1011,7 @@ def optical_absorption_singlet_approx2(eom, scan, eta, kshift=0, tol=1e-5, maxit
 
         for x in range(3):
 
-            sol, info = LinearSolver(A, b_vector[x], x0=x0[x], tol=tol, maxiter=maxiter, M=M, callback=counter)
+            sol, info = LinearSolver(A, b_vector[x], x0=x0[x], rtol=tol, maxiter=maxiter, M=M, callback=counter)
             if info == 0:
                 print('Frequency', np.round(omega,3), 'converged in', counter.niter, 'iterations')
             else:
@@ -1079,7 +1079,7 @@ def optical_absorption_singlet(eom, scan, eta, kshift=0, tol=1e-5, maxiter=500, 
     # solve linear equations A.x = b
     ieta = 1j*eta
     omega_list = scan
-    spectrum = np.zeros((3, len(omega_list)), dtype=np.complex)
+    spectrum = np.zeros((3, len(omega_list)), dtype=np.complex128)
 
     diag = eom.get_diag(kshift, imds)
     if x0 is None:
@@ -1100,7 +1100,7 @@ def optical_absorption_singlet(eom, scan, eta, kshift=0, tol=1e-5, maxiter=500, 
 
         for x in range(3):
 
-            sol, info = LinearSolver(A, b_vector[x], x0=x0[x], tol=tol, maxiter=maxiter, M=M, callback=counter,
+            sol, info = LinearSolver(A, b_vector[x], x0=x0[x], rtol=tol, maxiter=maxiter, M=M, callback=counter,
                                      **kwargs)
             if info == 0:
                 print('Frequency', np.round(omega,3), 'converged in', counter.niter, 'iterations')
@@ -1142,7 +1142,7 @@ def get_dipole_mo(eom, pblock="occ", qblock="vir"):
     nkpts = len(kpts)
     nocc = eom.nocc
     nmo = eom.nmo
-    dtype = np.complex
+    dtype = np.complex128
     scf = eom._cc._scf
 
     # int1e_ipovlp gives overlap gradients, i.e. d/dr
