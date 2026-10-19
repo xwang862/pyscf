@@ -22,7 +22,6 @@ Lambda equations for spin orbital KCCSD.
 Ref: Gauss and Stanton, J. Chem. Phys. 103, 3561 (1995)
 '''
 
-import time
 import numpy
 from pyscf import lib
 from pyscf.cc import ccsd_lambda
@@ -52,11 +51,10 @@ def update_lambda(cc, t1, t2, l1, l2, eris, imds):
     """
     Ref: Gauss and Stanton, J. Chem. Phys. 103, 3561 (1995) Table II. Unperturbed lambda equations (a) and (b)
     """
-    time0 = time.clock(), time.time()
+    time0 = logger.process_clock(), logger.perf_counter()
     log = logger.Logger(cc.stdout, cc.verbose)
     nkpts, nocc, nvir = t1.shape
     kconserv = imds.kconserv
-    fock = eris.fock
 
     mo_e_o = [e[:nocc] for e in eris.mo_energy]
     mo_e_v = [e[nocc:] + cc.level_shift for e in eris.mo_energy]
@@ -65,10 +63,12 @@ def update_lambda(cc, t1, t2, l1, l2, eris, imds):
     nonzero_opadding, nonzero_vpadding = padding_k_idx(cc, kind="split")
 
     # Make some intermediates first
-    # Ftmp_im = F_im - f_im
-    Ftmp_oo = imds.Foo - fock[:, :nocc, :nocc]
-    # Ftmp_ea = F_ea - f_ea
-    Ftmp_vv = imds.Fvv - fock[:, nocc:, nocc:]
+    Ftmp_oo = numpy.array(imds.Foo, copy=True)
+    Ftmp_vv = numpy.array(imds.Fvv, copy=True)
+    # Subtract mo_energy instead of bare Fock to match the denominator (eia and eijab)
+    for k in range(nkpts):
+        Ftmp_oo[k][numpy.diag_indices(nocc)] -= mo_e_o[k]
+        Ftmp_vv[k][numpy.diag_indices(nvir)] -= mo_e_v[k]
 
     # G_ae = -0.5 * l_mnaf t_mnef
     Gvv = numpy.zeros_like(Ftmp_vv)
