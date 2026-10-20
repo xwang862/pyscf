@@ -892,6 +892,9 @@ def optical_absorption_singlet_approx1(eom, scan, eta, kshift=0, tol=1e-5, maxit
     Returns:
         [type]: [description]
     """
+    if kshift != 0:
+        raise ValueError('Optical absorption (momentum operator) only couples to kshift = 0 excitations')
+
     cpu0 = (logger.process_clock(), logger.perf_counter())
     log = logger.Logger(eom.stdout, eom.verbose)
 
@@ -987,6 +990,9 @@ def optical_absorption_singlet_approx2(eom, scan, eta, kshift=0, tol=1e-5, maxit
         maxiter (int, optional): [description]. Defaults to 500.
         imds ([type], optional): [description]. Defaults to None.
     """
+    if kshift != 0:
+        raise ValueError('Optical absorption (momentum operator) only couples to kshift = 0 excitations')
+
     cpu0 = (logger.process_clock(), logger.perf_counter())
     log = logger.Logger(eom.stdout, eom.verbose)
 
@@ -1081,6 +1087,9 @@ def optical_absorption_singlet(eom, scan, eta, kshift=0, tol=1e-5, maxiter=500, 
         maxiter (int, optional): [description]. Defaults to 500.
         imds ([type], optional): [description]. Defaults to None.
     """
+    if kshift != 0:
+        raise ValueError('Optical absorption (momentum operator) only couples to kshift = 0 excitations')
+
     cpu0 = (logger.process_clock(), logger.perf_counter())
     log = logger.Logger(eom.stdout, eom.verbose)
 
@@ -1449,7 +1458,7 @@ def get_effective_onebody(eom, onebody, kshift=0, ov_oovv=None):
     for ki, ka, kk in kpts_helper.loop_kkk(nkpts):
         # ki + ka - kk - kj = kshift
         kj = kconserv2[ki, kk, ka]
-        Dovoo[:, ki, ka, kk] += einsum('xie,jkae->iakj', dov[:, ki], t2[kj, kk, ka])
+        Dovoo[:, ki, ka, kk] += einsum('xie,jkae->xiakj', dov[:, ki], t2[kj, kk, ka])
 
     log.timer("effective one-body operator", *cput0)
 
@@ -1573,9 +1582,19 @@ def get_effective_dipole_right(eom, dipole, kshift=0, ov_oovv=None):
     for x in range(3):
         vector = amplitudes_to_vector_singlet(mu1[x], mu2[x], kconserv2)
         result.append(vector)
+    result = np.asarray(result)
+
+    # Disconnected term <Phi_0|Lambda|Phi_mu> <Phi_0| exp(-T) d^+ exp(T) |Phi_0>
+    #   <Phi_0| exp(-T) d^+ exp(T) |Phi_0> = 2 d^+_ii + 2 d^+_ia t_ia
+    d0 = np.zeros(3, dtype=dtype)
+    for k in range(nkpts):
+        d0 += 2. * einsum('xii->x', d_adj[:, k, :nocc, :nocc])
+        d0 += 2. * einsum('xia,ia->x', dov[:, k], t1[k])
+    l_vector = amplitudes_to_vector_singlet(l1, l2, kconserv2)
+    result += d0[:, None] * l_vector[None, :]
 
     log.timer("right effective dipole components", *cput0)
-    return mu0, np.asarray(result)
+    return mu0, result
 
 
 def vector_to_amplitudes_singlet(vector, nkpts, nmo, nocc, kconserv):
