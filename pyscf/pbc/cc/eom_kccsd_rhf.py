@@ -926,8 +926,9 @@ def optical_absorption_singlet_approx1(eom, scan, eta, kshift=0, tol=1e-5, maxit
         b_vector[x][:nkov] = dipole[x].reshape(nkov)
     b_vector = np.asarray(b_vector)
     b_size = b_vector.shape[1]
-    # get the \phi_0 component of b vector
-    b0 = einsum('xkpp->x', get_dipole_mo(eom, "all", "all"))
+    # get the \phi_0 component of b vector, b0 = <Phi_0|dipole|Phi_0> = 2 d_ii
+    # This approximation neglects the reference-state term b0.conj() * x0 (commented out below)
+    b0 = 2. * einsum('xkii->x', get_dipole_mo(eom, "occ", "occ"))
     if any(abs(b0) > 1e-6):
         logger.warn(eom, 'Large b0 detected! b0 (x,y,z) = {}). Consider adding b0.conj() * x0 contribution \
                     to spectra'.format(b0))
@@ -1017,11 +1018,7 @@ def optical_absorption_singlet_approx2(eom, scan, eta, kshift=0, tol=1e-5, maxit
     # b is needed to solve a.x=b linear equations
     b0, b_vector = get_effective_dipole_left(eom, dipole, kshift)
     b_size = b_vector.shape[1]
-    # check the \phi_0 component of b vector
-    print(f"b0 = {b0}")
-    if any(abs(b0) > 1e-6):
-        logger.warn(eom, 'Large b0 detected! b0 (x,y,z) = {}). Consider adding b0.conj() * x0 contribution \
-                    to spectra'.format(b0))
+    log.debug('b0 = %s', b0)
 
     # solve linear equations A.x = b
     ieta = 1j*eta
@@ -1111,11 +1108,6 @@ def optical_absorption_singlet(eom, scan, eta, kshift=0, tol=1e-5, maxiter=500, 
     # b is needed to solve a.x=b linear equations
     b0, b_vector = get_effective_dipole_left(eom, dipole, kshift)
     b_size = b_vector.shape[1]
-    # check the \phi_0 component of b vector
-    print(f"b0 = {b0}")
-    if any(abs(b0) > 1e-6):
-        logger.warn(eom, 'Large b0 detected! b0 (x,y,z) = {}). Consider adding b0.conj() * x0 contribution \
-                    to spectra'.format(b0))
 
     # e = <\Phi_0 | (1+\Lambda) \bar{\dipole^{\dagger}} | \Phi_{\alpha}>
     e0, e_vector = get_effective_dipole_right(eom, dipole, kshift, ov_oovv=b_vector)
@@ -1138,6 +1130,16 @@ def optical_absorption_singlet(eom, scan, eta, kshift=0, tol=1e-5, maxiter=500, 
     h0_weights = _singlet_metric_weights(
         eom, amplitudes_to_vector_singlet(imds.Fov, imds.woOvV, kconserv2), kconserv2)
 
+    # The spectrum contains the elastic (omega = 0) pole: -1/pi Im[w / (omega + i eta)],
+    # where the weight w = e0 <Phi_0|(1+Lambda) dipole-bar|Phi_0> = e0 (b0 + <Lambda|b>).
+    # For exact states, w = |<Psi_0|p|Psi_0>|^2 = 0; in CCSD, it is nonzero through the
+    # non-Hermitian response density.
+    lam_weights = _singlet_metric_weights(
+        eom, amplitudes_to_vector_singlet(eom._cc.l1, eom._cc.l2, kconserv2), kconserv2)
+    w_elastic = np.array([e0[x] * (b0[x] + _singlet_dot(eom, lam_weights, b_vector[x], kconserv2))
+                          for x in range(3)])
+    log.debug('Elastic weight w = e0 <Phi_0|(1+Lambda) dipole-bar|Phi_0> (x,y,z) = %s', w_elastic)
+
     for i, omega in enumerate(omega_list):
         matvec = lambda vec: eeccsd_matvec_singlet(eom, vec, kshift, imds=imds) * (-1.) + (omega + ieta) * vec
         A = scipy.sparse.linalg.LinearOperator((b_size, b_size), matvec=matvec, dtype=np.complex128)
@@ -1146,6 +1148,9 @@ def optical_absorption_singlet(eom, scan, eta, kshift=0, tol=1e-5, maxiter=500, 
         # M is the inverse of P, where P should be close to A, but easy to solve.
         # We choose P = H_diags shifted by omega + ieta.
         M = scipy.sparse.diags(np.reciprocal(diag * (-1.) + omega + ieta), format='csc', dtype=np.complex128)
+
+        log.debug('omega = %.6f: elastic pole -1/pi Im[w/(omega + i eta)] (x,y,z) = %s',
+                  omega, -1. / np.pi * (w_elastic / (omega + ieta)).imag)
 
         for x in range(3):
 
@@ -1163,9 +1168,11 @@ def optical_absorption_singlet(eom, scan, eta, kshift=0, tol=1e-5, maxiter=500, 
             sol0 = b0[x] + _singlet_dot(eom, h0_weights, sol, kconserv2)
             sol0 /= omega + ieta
             spec0 = e0[x] * sol0
-            logger.debug(eom, 'b0.conj * x0 contribution to spectrum = %.15g', spec0)
 
             spectrum[x, i] += spec0
+
+        S_i = -1. / np.pi * spectrum[:, i].imag
+        log.info('omega = %.6f  S(x,y,z) = %s  sum = %.10g', omega, S_i, S_i.sum())
 
     log.timer('EOM-CCSD Spectrum', *cpu0)
 
@@ -1173,20 +1180,27 @@ def optical_absorption_singlet(eom, scan, eta, kshift=0, tol=1e-5, maxiter=500, 
 
 
 def get_dipole_mo(eom, pblock="occ", qblock="vir"):
-    """[summary]
+    """Momentum matrix <p|-i nabla|q> in the MO basis at each k-point, used as the "dipole" of the
+    optical spectrum.
 
-    TODO add kshift argument.
+    Under periodic boundary conditions the position operator r is not lattice periodic, so the
+    length-gauge dipole is not well defined. The momentum operator p = -i nabla is lattice periodic
+    and k-diagonal (zero momentum transfer), so the spectrum is computed in the velocity gauge.
+
+    For exact eigenstates of a Hamiltonian with only local potentials, i[H, r] = p, hence
+    <n|p|0> = i w_n <n|r|0> and the length-gauge spectrum is S_r(w) = S_p(w) / w^2.
+    With nonlocal pseudopotentials (GTH, ccECP) the velocity operator is v = i[H, r] = p + i[V_NL, r];
+    only p is returned here, so S_p(w) / w^2 differs from S_r(w) by the omitted commutator term.
+    Finite basis sets and approximate states (e.g. EOM-CCSD) also break the equality.
 
     Args:
-        eom ([type]): [description]
+        eom: EOM object.
         pblock (str, optional): 'occ', 'vir', 'all'. Defaults to "occ".
         qblock (str, optional): 'occ', 'vir', 'all'. Defaults to "vir".
 
     Returns:
         np.ndarray: shape (naxis, nkpts, pblock_length, qblock_length)
     """
-    # TODO figure out why 'cint1e_ipovlp_cart' causes shape mismatch for `ip_ao` and `mo_coeff` when basis='gth-dzvp'.
-    # Meanwhile, let's use 'cint1e_ipovlp_sph' or 'int1e_ipovlp' because they seems to be fine.
     kpts = eom.kpts
     nkpts = len(kpts)
     nocc = eom.nocc
@@ -1194,20 +1208,19 @@ def get_dipole_mo(eom, pblock="occ", qblock="vir"):
     dtype = np.complex128
     scf = eom._cc._scf
 
-    # int1e_ipovlp gives overlap gradients, i.e. d/dr
-    # To get momentum operator, use (-i) * int1e_ipovlp
-    ip_ao = scf.cell.pbc_intor('cint1e_ipovlp_sph', kpts=kpts, comp=3)
+    # int1e_ipovlp = <d/dr mu|nu>  = -<mu|d/dr|nu>, so the momentum operator
+    # p = -i d/dr is <mu|p|nu> = i * int1e_ipovlp.
+    # Note: Use int1e_ipovlp, as it follows cell.cart. Do not use cint1e_ipovlp_cart
+    # or cint1e_ipovlp_sph in general; you may use cint1e_ipovlp_cart if cell.cart = True,
+    # or use cint1e_ipovlp_sph if cell.cart = False (default).
+    ip_ao = scf.cell.pbc_intor('int1e_ipovlp', kpts=kpts, comp=3)
     ip_ao = np.asarray(ip_ao, dtype=dtype).transpose(1,0,2,3)  # with shape (naxis, nkpts, nmo, nmo)
-    ip_ao *= -1j
+    ip_ao *= 1j
 
-    # padding mo_coeff and mo_energy
+    # padding mo_coeff
     mo_coeff = padded_mo_coeff(eom._cc, scf.mo_coeff)
-    mo_energy = padded_mo_energy(eom._cc, scf.mo_energy)
-    # for x in range(3):
-    #     for k in range(nkpts):
-    #         print(f"\naxis:{x}, kpt:{k}, dipole AO diagonals:{ip_ao[x,k].diagonal()}")
 
-    # I.p matrix in MO basis (only the occ-vir block)
+    # momentum matrix in MO basis, block (pblock, qblock)
     def get_range(key):
         if key in ["occ", "all"]:
             start = 0
@@ -1228,24 +1241,7 @@ def get_dipole_mo(eom, pblock="occ", qblock="vir"):
         for x in range(3):
             ip_mo[x, k] = reduce(np.dot, (pmo.T.conj(), ip_ao[x, k], qmo))
 
-    # eia = \epsilon_a - \epsilon_i
-    p_mo_e = [mo_energy[k][pstart:pend] for k in range(nkpts)]
-    q_mo_e = [mo_energy[k][qstart:qend] for k in range(nkpts)]
-
-    epq = np.empty((nkpts, plen, qlen), dtype=mo_energy[0].dtype)
-    for k in range(nkpts):
-        epq[k] = p_mo_e[k][:,None] - q_mo_e[k]
-
-    # dipole in MO basis = -I p(p,q) / (\epsilon_p - \epsison_q)
-    dipole = np.empty((3, nkpts, plen, qlen), dtype=ip_mo.dtype)
-    for x in range(3):
-        #TODO check: should be 1 or -1 * (\epsilon_p - \epsison_q)
-        # dipole[x] = -1. * ip_mo[x] / epq
-
-        # switch to pure momentum operator (is it the velocity gauge in dipole approximation?)
-        dipole[x] = ip_mo[x]
-
-    return dipole
+    return ip_mo
 
 
 def get_effective_dipole_left(eom, dipole, kshift=0):
@@ -1290,7 +1286,6 @@ def get_effective_dipole_left(eom, dipole, kshift=0):
 
     for ki in range(nkpts):
         # ki - ka = kshift
-        # TODO confirm if (ki - ka) equals kshift or -kshift
         ka = kconserv1[ki]
         # mu_ia <- - d_mi t_ma
         #  km = ka
@@ -1506,14 +1501,13 @@ def get_effective_dipole_right(eom, dipole, kshift=0, ov_oovv=None):
     mu0 += d0
     for ki in range(nkpts):
         # mu0 <- 2 D_ai l_ia
-        #  ki - ka = 0 assuming true for now
+        #  ki - ka = kshift = 0
         ka = ki
         mu0[:] += 2. * einsum('xai,ia->x', Dvo[:, ka], l1[ki])
 
     for ki, kj, ka in kpts_helper.loop_kkk(nkpts):
         # mu0 <- 2 D_abij l_ijab
-        # TODO Figure this out: ki + kj - ka - kb = 0 or kshift?
-        # ki + kj - ka - kb = 0 assuming true for now
+        #  ki + kj - ka - kb = kshift = 0
         kb = kconserv2[ki, ka, kj]
         mu0[:] += 2. * einsum('xabij,ijab->x', Dvvoo[:, ka, kb, ki], l2[ki, kj, ka])
         # mu0 <- - D_abij l_jiab
