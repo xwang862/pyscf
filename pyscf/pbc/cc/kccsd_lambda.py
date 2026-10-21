@@ -168,11 +168,13 @@ def update_lambda(cc, t1, t2, l1, l2, eris, imds):
         l2new[kj, ki, ka] -= tmp.transpose(1, 0, 2, 3)
 
         # l_ijab <- P(ij) P(ab) F_jb l_ia
-        tmp = einsum('jb,ia->ijab', imds.Fov[kj], l1[ki])
-        l2new[ki, kj, ka] += tmp
-        l2new[kj, ki, ka] -= tmp.transpose(1, 0, 2, 3)
-        l2new[ki, kj, kb] -= tmp.transpose(0, 1, 3, 2)
-        l2new[kj, ki, kb] += tmp.transpose(1, 0, 3, 2)
+        #  F and l1 are k-diagonal: F_jb l_ia only exists for (ka, kb) = (ki, kj)
+        if ka == ki:
+            tmp = einsum('jb,ia->ijab', imds.Fov[kj], l1[ki])
+            l2new[ki, kj, ka] += tmp
+            l2new[kj, ki, ka] -= tmp.transpose(1, 0, 2, 3)
+            l2new[ki, kj, kb] -= tmp.transpose(0, 1, 3, 2)
+            l2new[kj, ki, kb] += tmp.transpose(1, 0, 3, 2)
 
         for km in range(nkpts):
             # l_ijab <- 0.5 l_mnab W_ijmn
