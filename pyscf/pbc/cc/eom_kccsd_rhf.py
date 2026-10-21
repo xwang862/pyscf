@@ -1279,8 +1279,8 @@ def get_effective_dipole_left(eom, dipole, kshift=0):
     mu1 = np.zeros((3, *(t1.shape)), dtype=dtype)
     mu2 = np.zeros((3, *(t2.shape)), dtype=dtype)
 
-    # mu0 <- d_ii
-    mu0 += einsum('xkpp->x', doo)
+    # mu0 <- 2 d_ii
+    mu0 += 2. * einsum('xkpp->x', doo)
     # mu0 <- 2 d_ia t_ia
     for ki in range(nkpts):
         mu0 += 2. * einsum('xia,ia->x', dov[:,ki], t1[ki])
@@ -1496,24 +1496,28 @@ def get_effective_dipole_right(eom, dipole, kshift=0, ov_oovv=None):
     mu1 = np.zeros((3, *(l1.shape)), dtype=dtype)
     mu2 = np.zeros((3, *(l2.shape)), dtype=dtype)
 
-    # mu0
+    # mu0 = <Phi_0|(1+Lambda) exp(-T) d^+ exp(T)|Phi_0> = d0 + <Lambda|b>
+    #   d0 = <Phi_0| exp(-T) d^+ exp(T) |Phi_0> = 2 d^+_ii + 2 d^+_ia t_ia
+    #   <Lambda|b> = 2 D_ai l_ia + (2 l_ijab - l_jiab) D_abij   (singlet metric)
+    d0 = np.zeros(3, dtype=dtype)
+    for k in range(nkpts):
+        d0 += 2. * einsum('xii->x', d_adj[:, k, :nocc, :nocc])
+        d0 += 2. * einsum('xia,ia->x', dov[:, k], t1[k])
+    mu0 += d0
     for ki in range(nkpts):
-        # mu0 <- 2 d_ia t_ia
-        # TODO Figure this out: ki - ka = 0 orkshift?
-        mu0[:] += 2. * einsum('xia,ia->x', dov[:, ki], t1[ki])
         # mu0 <- 2 D_ai l_ia
         #  ki - ka = 0 assuming true for now
         ka = ki
         mu0[:] += 2. * einsum('xai,ia->x', Dvo[:, ka], l1[ki])
 
     for ki, kj, ka in kpts_helper.loop_kkk(nkpts):
-        # mu0 <- 4 D_abij l_ijab
+        # mu0 <- 2 D_abij l_ijab
         # TODO Figure this out: ki + kj - ka - kb = 0 or kshift?
         # ki + kj - ka - kb = 0 assuming true for now
         kb = kconserv2[ki, ka, kj]
-        mu0[:] += 4. * einsum('xabij,ijab->x', Dvvoo[:, ka, kb, ki], l2[ki, kj, ka])
-        # mu0 <- -2 D_abij l_jiab
-        mu0[:] -= 2. * einsum('xabij,jiab->x', Dvvoo[:, ka, kb, ki], l2[kj, ki, ka])
+        mu0[:] += 2. * einsum('xabij,ijab->x', Dvvoo[:, ka, kb, ki], l2[ki, kj, ka])
+        # mu0 <- - D_abij l_jiab
+        mu0[:] -= einsum('xabij,jiab->x', Dvvoo[:, ka, kb, ki], l2[kj, ki, ka])
 
     # mu_ia <- D_ia
     mu1 += Dov
@@ -1587,12 +1591,7 @@ def get_effective_dipole_right(eom, dipole, kshift=0, ov_oovv=None):
         result.append(vector)
     result = np.asarray(result)
 
-    # Disconnected term <Phi_0|Lambda|Phi_mu> <Phi_0| exp(-T) d^+ exp(T) |Phi_0>
-    #   <Phi_0| exp(-T) d^+ exp(T) |Phi_0> = 2 d^+_ii + 2 d^+_ia t_ia
-    d0 = np.zeros(3, dtype=dtype)
-    for k in range(nkpts):
-        d0 += 2. * einsum('xii->x', d_adj[:, k, :nocc, :nocc])
-        d0 += 2. * einsum('xia,ia->x', dov[:, k], t1[k])
+    # Disconnected term <Phi_0|Lambda|Phi_mu> <Phi_0| exp(-T) d^+ exp(T) |Phi_0> = l_mu d0
     l_vector = amplitudes_to_vector_singlet(l1, l2, kconserv2)
     result += d0[:, None] * l_vector[None, :]
 
