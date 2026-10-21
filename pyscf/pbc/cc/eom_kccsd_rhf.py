@@ -1301,8 +1301,9 @@ def get_effective_dipole_left(eom, dipole, kshift=0):
             # mu_ia <- d_me (2 t_imae - t_miae)
             mu1[:,ki] += 2. * einsum('xme,imae->xia', dov[:,km], t2[ki,km,ka])
             mu1[:,ki] -= einsum('xme,miae->xia', dov[:,km], t2[km,ki,ka])
-            # mu_ia <- - d_me t_ie t_ma
-            mu1[:,ki] -= einsum('xme,ie,ma->xia', dov[:,km], t1[ki], t1[km])
+        # mu_ia <- - d_me t_ie t_ma
+        #  km = ka
+        mu1[:,ki] -= einsum('xme,ie,ma->xia', dov[:,ka], t1[ki], t1[ka])
 
     # Build imds to avoid Nk^4 step
     imd_oo = np.zeros_like(doo)
@@ -1556,10 +1557,12 @@ def get_effective_dipole_right(eom, dipole, kshift=0, ov_oovv=None):
     for ki, kj, ka in kpts_helper.loop_kkk(nkpts):
         # ki + kj - ka - kb = kshift
         kb = kconserv2[ki, ka, kj]
-        # mu_ijab <- D_ia l_jb
-        mu2[:, ki, kj, ka] += einsum('xia,jb->xijab', Dov[:, ki], l1[kj])
-        # mu_ijab <- D_jb l_ia
-        mu2[:, ki, kj, ka] += einsum('xjb,ia->xijab', Dov[:, kj], l1[ki])
+        if ka == ki:
+            # D_ia and l_jb are k-diagonal: only the (ka, kb) = (ki, kj) block
+            # mu_ijab <- D_ia l_jb
+            mu2[:, ki, kj, ka] += einsum('xia,jb->xijab', Dov[:, ki], l1[kj])
+            # mu_ijab <- D_jb l_ia
+            mu2[:, ki, kj, ka] += einsum('xjb,ia->xijab', Dov[:, kj], l1[ki])
 
         # mu_ijab <- D_eb l_ijae
         #  ki + kj - ka - ke = 0
