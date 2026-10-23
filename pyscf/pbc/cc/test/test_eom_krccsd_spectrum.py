@@ -19,7 +19,8 @@ k-meshes: the momentum operator (optical absorption, qvec=None) and the density 
 transfer), and the wrappers get_absorption_spectrum, get_dynamic_structure_factor and get_energy_loss_function.
 A k-mesh calculation equals the Gamma-point calculation of the equivalent supercell, where every Q of the mesh is
 a reciprocal vector (zero momentum transfer): the two use different code paths (kshift != 0 vs kshift = 0 with the
-elastic Bragg pole removed). The 3x1x1 mesh has no self-inverse kshift, so Q and -Q, and k + Q and k - Q, differ.
+elastic Bragg pole removed). At Q = b1 both take the zero-momentum path, so the Bragg-pole removal is checked against
+an exact supercell sum over states. The 3x1x1 mesh has no self-inverse kshift, so Q and -Q, and k + Q and k - Q, differ.
 H2O in a small cubic box has no inversion center.
 '''
 
@@ -102,9 +103,20 @@ class KnownValues(unittest.TestCase):
         self.assertGreater(abs(s_m).max(), 0.1)
         self.assertAlmostEqual(abs(s_m + s_p).max() / abs(s_m).max(), 0, 6)
 
+    def test_density_bragg_pole_removed(self):
+        # At Q = G the full-space resolvent also has the elastic (Bragg) pole |<rho_G>|^2 / (w + i eta), which the
+        # spectrum leaves out (k-mesh and supercell alike, so test_density_kmesh_vs_supercell cannot see it; here it
+        # would add up to 2.6). Reference: -1/pi Im sum_n S_n / (w + i eta - w_n) over all 2700 excited singlet states
+        # of the supercell (molecular RCCSD on super_cell(cell, [3, 1, 1]), dense EOM-EE diagonalization).
+        b = cell.reciprocal_vectors()
+        ref = np.array([0.02617427, 0.43127652, 0.19880990, 0.02677264])
+        s_k = spectrum(eom_k, b[0])[0][0]
+        self.assertAlmostEqual(abs(s_k - ref).max() / abs(ref).max(), 0, 5)
+
     def test_named_wrappers(self):
         # get_absorption_spectrum: the momentum spectrum as is (old positional call kept working);
-        # get_dynamic_structure_factor: per electron, S / (N_k N_e); get_energy_loss_function: 4 pi^2 S / (|Q|^2 N_k V_cell)
+        # get_dynamic_structure_factor: per electron, S / (N_k N_e);
+        # get_energy_loss_function: 4 pi^2 S / (|Q|^2 N_k V_cell)
         scan = w[1:2]
         s_p = spectrum(eom_k, scan=scan)[0]
         s_abs = eom_k.get_absorption_spectrum(scan, eta, None, 1e-9, 500)[0]
