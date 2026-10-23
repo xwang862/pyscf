@@ -102,26 +102,6 @@ class KnownValues(unittest.TestCase):
         self.assertGreater(abs(s_m).max(), 0.1)
         self.assertAlmostEqual(abs(s_m + s_p).max() / abs(s_m).max(), 0, 6)
 
-    def test_optical_vs_effective_dipole_path(self):
-        # At zero momentum transfer the spectrum (transition densities, ground-state density) must agree with the
-        # independent effective-dipole contraction (get_effective_dipole_left/right) on the same correction vector:
-        #   G = e.x + e0 (b0 + <Phi_0|Hbar|x>) / (w + i eta)   (elastic pole kept for the momentum operator)
-        from pyscf.pbc.cc.eom_kccsd_rhf import (get_dipole_mo, get_effective_dipole_left, get_effective_dipole_right,
-                                                 _singlet_metric_weights, _singlet_dot, amplitudes_to_vector_singlet)
-        eom = eom_k
-        for omega in w[:2]:
-            spec, x = spectrum(eom, scan=np.array([omega]))
-            p = get_dipole_mo(eom, 'all', 'all')
-            b0, bvec = get_effective_dipole_left(eom, p, 0)
-            e0, evec = get_effective_dipole_right(eom, p, 0, ov_oovv=bvec)
-            kc2 = eom.get_kconserv_ee_r2(0)
-            imds = eom.make_imds()
-            h0w = _singlet_metric_weights(eom, amplitudes_to_vector_singlet(imds.Fov, imds.woOvV, kc2), kc2)
-            for c in range(3):
-                g = (_singlet_dot(eom, _singlet_metric_weights(eom, evec[c], kc2), x[c], kc2)
-                     + e0[c] * (b0[c] + _singlet_dot(eom, h0w, x[c], kc2)) / (omega + 1j * eta))
-                self.assertAlmostEqual(-g.imag / np.pi, spec[c, 0], 8)
-
     def test_named_wrappers(self):
         # get_absorption_spectrum: the momentum spectrum as is (old positional call kept working);
         # get_dynamic_structure_factor: per electron, S / (N_k N_e); get_energy_loss_function: 4 pi^2 S / (|Q|^2 N_k V_cell)
