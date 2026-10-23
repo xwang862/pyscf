@@ -16,6 +16,7 @@
 import itertools
 from functools import reduce
 import sys
+import warnings
 import numpy as np
 import scipy
 
@@ -875,22 +876,44 @@ def _singlet_dot(eom, weights, vector, kconserv2):
     return np.dot(weights[0].ravel(), r1.ravel()) + np.dot(weights[1].ravel(), r2.ravel())
 
 
-def optical_absorption_singlet(eom, scan, eta, kshift=0, tol=1e-5, maxiter=500, eris=None, imds=None, x0=None,
-                               partition=None, **kwargs):
-    """Compute full CCSD spectra.
+def eeccsd_spectrum_singlet(eom, scan, eta, kshift=None, tol=1e-5, maxiter=500, eris=None, imds=None, x0=None,
+                            partition=None, qvec=None, **kwargs):
+    """EOM-EE-CCSD (singlet) spectrum of a one-body operator O by the correction-vector method,
+
+        S_x(w) = -1/pi Im <Phi_0|(1+Lambda) O_x^dagger-bar (w + i eta - Hbar)^-1 O_x-bar|Phi_0>
+               = sum_n <0|O_x^dagger|n><n|O_x|0> eta/pi / ((w - w_n)^2 + eta^2)   (n != 0; see below for n = 0)
+
+    O = p (qvec=None): optical absorption, eps_2(w) = 4 pi^2 S(w) / (w^2 N_k V_cell) (UV-Vis absorption,
+    ellipsometry). At kshift 0 the long-range Coulomb term (q + G = 0) is absent, so this is the macroscopic
+    (excitonic) absorption, not the q -> 0 energy-loss function.
+    O = exp(iQ.r) (qvec=Q): density response with the full Coulomb interaction, i.e. the dynamic structure factor
+    (inelastic X-ray scattering) and the energy-loss function -Im eps^-1 = 4 pi^2 n S / Q^2 (EELS).
+    EOMEESinglet.get_absorption_spectrum, get_dynamic_structure_factor and get_energy_loss_function wrap this function
+    with these normalizations.
 
     Args:
-        eom ([type]): [description]
-        scan ([type]): [description]
-        eta ([type]): [description]
-        kshift (int, optional): [description]. Defaults to 0.
-        tol ([type], optional): [description]. Defaults to 1e-5.
-        maxiter (int, optional): [description]. Defaults to 500.
-        imds ([type], optional): [description]. Defaults to None.
-    """
-    if kshift != 0:
-        raise ValueError('Optical absorption (momentum operator) only couples to kshift = 0 excitations')
+        eom : EOMEESinglet
+        scan : frequencies (Hartree)
+        eta : Lorentzian half width (Hartree)
+        kshift (int, optional): EOM k-shift. Default: 0 for the momentum operator, or the
+            k-shift implied by qvec.
+        tol, maxiter : GCROT(m,k) relative tolerance and maximum iterations per solve.
+        qvec (array of 3, optional): momentum transfer Q (Cartesian, 1/Bohr). If None (default),
+            O_x is the momentum operator p_x (velocity gauge, optical absorption; 3 components;
+            zero momentum transfer only). Otherwise O = exp(iQ.r) (1 component): Q may include a
+            reciprocal lattice vector but must be commensurate with the k-point mesh. The
+            result is then sum_n |<n|rho_Q|0>|^2 L(w - w_n) for the whole Born-von Karman crystal
+            (proportional to nkpts); the dynamic structure factor per electron per cell is
+            S / (nkpts * nelectron), and -Im eps^-1(Q, w) = 4 pi^2 n S(Q, w) / Q^2.
 
+    Returns:
+        spectrum of shape (ncomp, len(scan)), and the last correction vectors x0.
+
+    At zero momentum transfer the full-space resolvent also has the elastic (w = 0) pole
+    w / (w + i eta) with w = <O^dagger><O>. It is kept for the momentum operator (w = 0 for exact
+    states; nonzero in CCSD only through the non-Hermitian response density) and removed for
+    exp(iQ.r) with Q = G, where w = |<rho_G>|^2 is the Bragg (elastic scattering) term.
+    """
     cpu0 = (logger.process_clock(), logger.perf_counter())
     log = logger.Logger(eom.stdout, eom.verbose)
 
@@ -904,45 +927,56 @@ def optical_absorption_singlet(eom, scan, eta, kshift=0, tol=1e-5, maxiter=500, 
         eom.partition = partition.lower()
         assert eom.partition in ['mp','full']
 
+    if qvec is None:
+        if kshift not in (None, 0):
+            raise ValueError('The momentum operator is only available at kshift = 0; '
+                             'use qvec for a finite momentum transfer.')
+        kshift = 0
+        op = get_dipole_mo(eom, "all", "all")
+    else:
+        op, kshift_q = get_density_mo(eom, qvec)
+        if kshift is not None and kshift != kshift_q:
+            raise ValueError('qvec %s corresponds to kshift %d, not %d' % (qvec, kshift_q, kshift))
+        kshift = kshift_q
+        log.info('Momentum transfer Q = %s (1/Bohr), kshift = %d', qvec, kshift)
+    ncomp = op.shape[0]
+    nkpts = eom.nkpts
     kconserv2 = eom.get_kconserv_ee_r2(kshift)
+    kbra = _kshift_maps(eom, kshift)[0]
+    zero_q = bool((kbra == np.arange(nkpts)).all())
 
-    dipole = get_dipole_mo(eom, "all", "all")
-
-    # b = <\Phi_{\alpha} | \bar{\dipole} | \Phi_0>
-    # b is needed to solve a.x=b linear equations
-    b0, b_vector = get_effective_dipole_left(eom, dipole, kshift)
+    # b = <Phi_mu| exp(-T) O exp(T) |Phi_0>, the right-hand side of (w + i eta - Hbar) x = b
+    b0, b_vector = get_effective_onebody_left(eom, op, kshift)
     b_size = b_vector.shape[1]
+    dm_imds = make_trans_rdm1_imds(eom, kshift)
 
-    # e = <\Phi_0 | (1+\Lambda) \bar{\dipole^{\dagger}} | \Phi_{\alpha}>
-    e0, e_vector = get_effective_dipole_right(eom, dipole, kshift, ov_oovv=b_vector)
+    if zero_q:
+        # Reference-state component of the full-space solve, e0 x0 with x0 = (b0 + <Phi_0|Hbar|x>) / (w + i eta)
+        # and e0 = <Phi_0|(1+Lambda) O^dagger-bar|Phi_0>. Its elastic (w = 0) pole has the weight
+        # w = e0 <Phi_0|(1+Lambda) O-bar|Phi_0> = e0 (b0 + <Lambda|b>).
+        dm_gs = ground_rdm1_blocks(eom)
+        e0 = [_contract_dagger(op[x], dm_gs) for x in range(ncomp)]
+        lam_b = [_singlet_dot(eom, dm_imds['lambda_weights'], b_vector[x], kconserv2) for x in range(ncomp)]
+        h0_weights = _singlet_metric_weights(
+            eom, amplitudes_to_vector_singlet(imds.Fov, imds.woOvV, kconserv2), kconserv2)
+        keep_elastic = qvec is None
+        w_elastic = np.array([e0[x] * (b0[x] + lam_b[x]) for x in range(ncomp)])
+        log.debug('b0 = %s, e0 = %s, <Lambda|b> = %s', b0, e0, lam_b)
+        log.debug('Elastic weight w = e0 <Phi_0|(1+Lambda) O-bar|Phi_0> = %s (%s)', w_elastic,
+                  'kept' if keep_elastic else 'removed')
 
     # solve linear equations A.x = b
     ieta = 1j*eta
     omega_list = scan
-    spectrum = np.zeros((3, len(omega_list)), dtype=np.complex128)
+    spectrum = np.zeros((ncomp, len(omega_list)), dtype=np.complex128)
 
     diag = eom.get_diag(kshift, imds)
     if x0 is None:
-        x0 = np.zeros((3, b_size), dtype=b_vector.dtype)
+        x0 = np.zeros((ncomp, b_size), dtype=np.complex128)
 
     from pyscf.pbc.ci import kcis_rhf
     counter = kcis_rhf.gmres_counter(rel=True)
     LinearSolver = scipy.sparse.linalg.gcrotmk
-
-    # <e| and <Phi_0|Hbar in the singlet metric
-    e_weights = [_singlet_metric_weights(eom, e_vector[x], kconserv2) for x in range(3)]
-    h0_weights = _singlet_metric_weights(
-        eom, amplitudes_to_vector_singlet(imds.Fov, imds.woOvV, kconserv2), kconserv2)
-
-    # The spectrum contains the elastic (omega = 0) pole: -1/pi Im[w / (omega + i eta)],
-    # where the weight w = e0 <Phi_0|(1+Lambda) dipole-bar|Phi_0> = e0 (b0 + <Lambda|b>).
-    # For exact states, w = |<Psi_0|p|Psi_0>|^2 = 0; in CCSD, it is nonzero through the
-    # non-Hermitian response density.
-    lam_weights = _singlet_metric_weights(
-        eom, amplitudes_to_vector_singlet(eom._cc.l1, eom._cc.l2, kconserv2), kconserv2)
-    w_elastic = np.array([e0[x] * (b0[x] + _singlet_dot(eom, lam_weights, b_vector[x], kconserv2))
-                          for x in range(3)])
-    log.debug('Elastic weight w = e0 <Phi_0|(1+Lambda) dipole-bar|Phi_0> (x,y,z) = %s', w_elastic)
 
     for i, omega in enumerate(omega_list):
         matvec = lambda vec: eeccsd_matvec_singlet(eom, vec, kshift, imds=imds) * (-1.) + (omega + ieta) * vec
@@ -953,10 +987,11 @@ def optical_absorption_singlet(eom, scan, eta, kshift=0, tol=1e-5, maxiter=500, 
         # We choose P = H_diags shifted by omega + ieta.
         M = scipy.sparse.diags(np.reciprocal(diag * (-1.) + omega + ieta), format='csc', dtype=np.complex128)
 
-        log.debug('omega = %.6f: elastic pole -1/pi Im[w/(omega + i eta)] (x,y,z) = %s',
-                  omega, -1. / np.pi * (w_elastic / (omega + ieta)).imag)
+        if zero_q:
+            log.debug('omega = %.6f: elastic pole -1/pi Im[w/(omega + i eta)] = %s (%s)', omega,
+                      -1. / np.pi * (w_elastic / (omega + ieta)).imag, 'kept' if keep_elastic else 'removed')
 
-        for x in range(3):
+        for x in range(ncomp):
 
             sol, info = LinearSolver(A, b_vector[x], x0=x0[x], rtol=tol, maxiter=maxiter, M=M, callback=counter,
                                      **kwargs)
@@ -967,20 +1002,27 @@ def optical_absorption_singlet(eom, scan, eta, kshift=0, tol=1e-5, maxiter=500, 
             counter.reset()
 
             x0[x] = sol
-            spectrum[x,i] = _singlet_dot(eom, e_weights[x], sol, kconserv2)
-
-            sol0 = b0[x] + _singlet_dot(eom, h0_weights, sol, kconserv2)
-            sol0 /= omega + ieta
-            spec0 = e0[x] * sol0
-
-            spectrum[x, i] += spec0
+            r1, r2 = vector_to_amplitudes_singlet(sol, nkpts, eom.nmo, eom.nocc, kconserv2)
+            # e.x = <Phi_0|(1+Lambda) exp(-T) O^dagger exp(T) X|Phi_0>
+            spectrum[x, i] = _contract_dagger(op[x], trans_rdm1_right(eom, r1, r2, kshift, dm_imds))
+            if zero_q:
+                # e0 x0; without the elastic pole the numerator b0 + h0.x becomes h0.x - <Lambda|b>
+                h0x = _singlet_dot(eom, h0_weights, sol, kconserv2)
+                spectrum[x, i] += e0[x] * ((b0[x] if keep_elastic else -lam_b[x]) + h0x) / (omega + ieta)
 
         S_i = -1. / np.pi * spectrum[:, i].imag
-        log.info('omega = %.6f  S(x,y,z) = %s  sum = %.10g', omega, S_i, S_i.sum())
+        log.info('omega = %.6f  S%s = %s  sum = %.10g', omega, '(x,y,z)' if ncomp == 3 else '', S_i, S_i.sum())
 
     log.timer('EOM-CCSD Spectrum', *cpu0)
 
     return -1./np.pi*spectrum.imag, x0
+
+
+def optical_absorption_singlet(eom, scan, eta, *args, **kwargs):
+    '''Deprecated alias of eeccsd_spectrum_singlet.'''
+    warnings.warn('optical_absorption_singlet is deprecated; use eeccsd_spectrum_singlet '
+                  '(or EOMEESinglet.get_spectrum)', DeprecationWarning, stacklevel=2)
+    return eeccsd_spectrum_singlet(eom, scan, eta, *args, **kwargs)
 
 
 def get_dipole_mo(eom, pblock="occ", qblock="vir"):
@@ -1395,6 +1437,328 @@ def get_effective_dipole_right(eom, dipole, kshift=0, ov_oovv=None):
 
     log.timer("right effective dipole components", *cput0)
     return mu0, result
+
+
+def _kshift_maps(eom, kshift):
+    '''(kbra, kket) k-point maps for the crystal momentum carried by excitations at `kshift`.
+
+    A singlet excitation vector at `kshift` stores r1[ki] with k_a = kconserv_r1[ki] = k_i - (kpts[kshift] - kpts[0]),
+    i.e. it carries crystal momentum Q = k_a - k_i = -(kpts[kshift] - kpts[0]) (mod G). kbra[k] is the index of
+    k + Q (the bra k-point of a one-body operator that creates such an excitation from a ket at k, as in
+    <p, k+Q| O | q, k>) and kket is its inverse. Both are the identity for kshift = 0.
+    '''
+    kbra = np.asarray(eom.get_kconserv_ee_r1(kshift))
+    kket = np.empty_like(kbra)
+    kket[kbra] = np.arange(len(kbra))
+    return kbra, kket
+
+
+def find_kshift(eom, qvec):
+    '''Index of the kshift whose excitations carry momentum qvec (mod G), or None.'''
+    cell = eom._cc._scf.cell
+    kpts = eom.kpts
+    binv = np.linalg.inv(cell.reciprocal_vectors().T)
+    for ks in range(len(kpts)):
+        frac = binv.dot(kpts[ks] - kpts[0] + np.asarray(qvec, dtype=float))
+        if np.allclose(frac, np.round(frac), atol=1e-6):
+            return ks
+    return None
+
+
+def get_density_mo(eom, qvec):
+    '''Density operator rho_Q = exp(iQ.r) in the MO basis, Q = qvec (Cartesian, 1/Bohr).
+
+    Q may lie outside the first Brillouin zone (Q = q + G0) but must be commensurate with the
+    k-point mesh. Returns (op, kshift) where op has shape (1, nkpts, nmo, nmo) and
+        op[0, k][p, q] = <p, k+Q| exp(iQ.r) |q, k> = <p, kbra[k]| exp(iQ.r) |q, k>
+    with per-cell normalized Bloch orbitals, and kshift is the EOM k-shift whose excitations
+    carry momentum Q (kbra from _kshift_maps). One-body operators are stored ket-indexed in this way
+    throughout; for Q = 0 it is the usual k-diagonal storage, as in get_dipole_mo.
+    '''
+    from pyscf.pbc.df import ft_ao
+    cc = eom._cc
+    cell = cc._scf.cell
+    kpts = eom.kpts
+    nkpts = len(kpts)
+    nmo = eom.nmo
+    qvec = np.asarray(qvec, dtype=float).reshape(3)
+    kshift = find_kshift(eom, qvec)
+    if kshift is None:
+        raise ValueError('Momentum transfer %s is not commensurate with the k-point mesh' % qvec)
+    kbra = _kshift_maps(eom, kshift)[0]
+    mo_coeff = padded_mo_coeff(cc, cc._scf.mo_coeff)
+    # \sum_T exp(-i k.T) \int exp(iQ.r) i(r) j(r-T) = <i, k+Q| exp(iQ.r) |j, k> for Gv = -Q
+    aoQ = ft_ao.ft_aopair_kpts(cell, -qvec[None], kptjs=kpts)[:, 0]
+    op = np.empty((1, nkpts, nmo, nmo), dtype=np.complex128)
+    for k in range(nkpts):
+        op[0, k] = reduce(np.dot, (mo_coeff[kbra[k]].conj().T, aoQ[k], mo_coeff[k]))
+    return op, kshift
+
+
+def get_effective_onebody_left(eom, op, kshift=0, t1=None, t2=None):
+    '''b[x] = <mu| exp(-T) O_x exp(T) |Phi_0> as packed singlet ket vectors at `kshift`, and
+    b0[x] = <Phi_0| exp(-T) O_x exp(T) |Phi_0> (nonzero only for zero momentum transfer).
+    op: ket-indexed one-body operator, shape (ncomp, nkpts, nmo, nmo), op[x, k][p, q] = <p, kbra[k]| O_x |q, k>
+    (see _kshift_maps and get_density_mo).
+    '''
+    if t1 is None: t1 = eom._cc.t1
+    if t2 is None: t2 = eom._cc.t2
+    nkpts, nocc, nvir = t1.shape
+    kbra, kket = _kshift_maps(eom, kshift)
+    kconserv_r2 = eom.get_kconserv_ee_r2(kshift)
+    ncomp = op.shape[0]
+    dtype = np.result_type(op, t1, t2)
+    doo = op[:, :, :nocc, :nocc]
+    dov = op[:, :, :nocc, nocc:]
+    dvo = op[:, :, nocc:, :nocc]
+    dvv = op[:, :, nocc:, nocc:]
+
+    b0 = np.zeros(ncomp, dtype=dtype)
+    if (kbra == np.arange(nkpts)).all():
+        # Zero momentum transfer only
+        for k in range(nkpts):
+            # b0 <- 2 O_ii + 2 O_ia t_ia                (all indices at k)
+            b0 += 2. * einsum('xii->x', doo[:, k]) + 2. * einsum('xia,ia->x', dov[:, k], t1[k])
+
+    b1 = np.zeros((ncomp, nkpts, nocc, nvir), dtype=dtype)
+    for ki in range(nkpts):
+        # i at ki, a at ka = kbra[ki]
+        ka = kbra[ki]
+        # b_ia <- O_ai
+        b1[:, ki] += dvo[:, ki].transpose(0, 2, 1)
+        # b_ia <- O_ac t_ic                         (c at ki)
+        b1[:, ki] += einsum('xac,ic->xia', dvv[:, ki], t1[ki])
+        # b_ia <- - O_ki t_ka                       (k at ka)
+        b1[:, ki] -= einsum('xki,ka->xia', doo[:, ki], t1[ka])
+        # b_ia <- - O_kc t_ic t_ka                  (c at ki, k at ka)
+        b1[:, ki] -= einsum('xkc,ic,ka->xia', dov[:, ki], t1[ki], t1[ka])
+        for kc in range(nkpts):
+            # b_ia <- O_kc (2 t_ikac - t_ikca)       (c at kc, k at kk = kbra[kc])
+            kk = kbra[kc]
+            b1[:, ki] += 2. * einsum('xkc,ikac->xia', dov[:, kc], t2[ki, kk, ka])
+            b1[:, ki] -= einsum('xkc,ikca->xia', dov[:, kc], t2[ki, kk, kc])
+
+    # Intermediates for the O_ov t1 t2 terms of b2, built once outside the k-point triple loop.
+    # Both are stored by the ket k-point of O:
+    #   M_ki = O_kc t_ic                            (i, c at k; k at kbra[k])
+    #   N_ca = O_kc t_ka                            (c at k; k, a at kbra[k])
+    Moo = np.zeros((ncomp, nkpts, nocc, nocc), dtype=dtype)
+    Nvv = np.zeros((ncomp, nkpts, nvir, nvir), dtype=dtype)
+    for k in range(nkpts):
+        Moo[:, k] = einsum('xkc,ic->xki', dov[:, k], t1[k])
+        Nvv[:, k] = einsum('xkc,ka->xca', dov[:, k], t1[kbra[k]])
+
+    b2 = np.zeros((ncomp, nkpts, nkpts, nkpts, nocc, nocc, nvir, nvir), dtype=dtype)
+    for ki, kj, ka in kpts_helper.loop_kkk(nkpts):
+        # i at ki, j at kj, a at ka, b at kb
+        kb = kconserv_r2[ki, ka, kj]
+        # b_ijab <- - O_mj t_imab                   (m at kbra[kj])
+        tmp = -einsum('xmj,imab->xijab', doo[:, kj], t2[ki, kbra[kj], ka])
+        # b_ijab <- - O_mi t_jmba                   (m at kbra[ki])
+        tmp -= einsum('xmi,jmba->xijab', doo[:, ki], t2[kj, kbra[ki], kb])
+        # b_ijab <- O_be t_ijae                     (e at kket[kb])
+        tmp += einsum('xbe,ijae->xijab', dvv[:, kket[kb]], t2[ki, kj, ka])
+        # b_ijab <- O_ae t_jibe                     (e at kket[ka])
+        tmp += einsum('xae,jibe->xijab', dvv[:, kket[ka]], t2[kj, ki, kb])
+        # b_ijab <- - O_me t_ie t_mjab = - M_mi t_mjab  (e at ki, m at kbra[ki])
+        tmp -= einsum('xmi,mjab->xijab', Moo[:, ki], t2[kbra[ki], kj, ka])
+        # b_ijab <- - O_me t_je t_miba = - M_mj t_miba  (e at kj, m at kbra[kj])
+        tmp -= einsum('xmj,miba->xijab', Moo[:, kj], t2[kbra[kj], ki, kb])
+        # b_ijab <- - O_me t_mb t_jiea = - N_eb t_jiea  (e at kket[kb], m at kb)
+        tmp -= einsum('xeb,jiea->xijab', Nvv[:, kket[kb]], t2[kj, ki, kket[kb]])
+        # b_ijab <- - O_me t_ma t_ijeb = - N_ea t_ijeb  (e at kket[ka], m at ka)
+        tmp -= einsum('xea,ijeb->xijab', Nvv[:, kket[ka]], t2[ki, kj, kket[ka]])
+        b2[:, ki, kj, ka] = tmp
+
+    b = np.asarray([amplitudes_to_vector_singlet(b1[x], b2[x], kconserv_r2) for x in range(ncomp)])
+    return b0, b
+
+
+def _theta_r2(r2, kconserv):
+    '''2 r_ijab - r_ijba for a (possibly k-shifted) doubles array.'''
+    nkpts = r2.shape[0]
+    theta = 2. * r2
+    for ki, kj, ka in kpts_helper.loop_kkk(nkpts):
+        kb = kconserv[ki, ka, kj]
+        theta[ki, kj, ka] -= r2[ki, kj, kb].transpose(0, 1, 3, 2)
+    return theta
+
+
+def make_trans_rdm1_imds(eom, kshift=0):
+    '''Ground-state (zero momentum) intermediates used by trans_rdm1_right.'''
+    cc = eom._cc
+    t1, t2, l1, l2 = cc.t1, cc.t2, cc.l1, cc.l2
+    nkpts, nocc, nvir = t1.shape
+    kconserv = cc.khelper.kconserv
+    dtype = np.result_type(t1, t2, l1, l2)
+    theta = _theta_r2(t2, kconserv)
+    xtv = np.asarray([einsum('ie,me->im', t1[k], l1[k]) for k in range(nkpts)])
+    xt1 = np.zeros((nkpts, nocc, nocc), dtype=dtype)   # xt1_mi = l_mnef theta_inef
+    xt2 = np.zeros((nkpts, nvir, nvir), dtype=dtype)   # xt2_ae = theta_mnaf l_mnef
+    for km, kn, ke in kpts_helper.loop_kkk(nkpts):
+        xt1[km] += einsum('mnef,inef->mi', l2[km, kn, ke], theta[km, kn, ke])
+        xt2[ke] += einsum('mnaf,mnef->ae', theta[km, kn, ke], l2[km, kn, ke])
+    imds = {'theta': theta, 'xtv': xtv, 'xt1': xt1, 'xt2': xt2, 'kshift': kshift}
+    kbra = _kshift_maps(eom, kshift)[0]
+    if (kbra == np.arange(nkpts)).all():
+        kconserv_r2 = eom.get_kconserv_ee_r2(kshift)
+        imds['lambda_weights'] = _singlet_metric_weights(
+            eom, amplitudes_to_vector_singlet(l1, l2, kconserv_r2), kconserv_r2)
+    return imds
+
+
+def trans_rdm1_right(eom, r1, r2, kshift, imds=None):
+    '''Spin-summed right transition density of an excitation vector R = (r1, r2) at `kshift`, without a
+    reference amplitude r0:
+
+        dm[p, q] = <Phi_0|(1+Lambda) exp(-T) q^+ p exp(T) R|Phi_0>.
+
+    The terms follow Stanton and Bartlett, J. Chem. Phys. 98, 7029 (1993), with k-point labels.
+    '''
+    cc = eom._cc
+    t1, t2, l1, l2 = cc.t1, cc.t2, cc.l1, cc.l2
+    nkpts, nocc, nvir = t1.shape
+    if imds is None:
+        imds = make_trans_rdm1_imds(eom, kshift)
+    kbra, kket = _kshift_maps(eom, kshift)
+    kconserv_r2 = eom.get_kconserv_ee_r2(kshift)
+    kconserv = cc.khelper.kconserv
+    theta, xtv, xt1, xt2 = imds['theta'], imds['xtv'], imds['xt1'], imds['xt2']
+    dtype = np.result_type(r1, r2, t1, l1)
+    thetaR = _theta_r2(r2, kconserv_r2)
+    doo = np.zeros((nkpts, nocc, nocc), dtype=dtype)
+    dov = np.zeros((nkpts, nocc, nvir), dtype=dtype)
+    dvo = np.zeros((nkpts, nvir, nocc), dtype=dtype)
+    dvv = np.zeros((nkpts, nvir, nvir), dtype=dtype)
+
+    # Linear response of gamma(T, Lambda) along T -> R: the derivative of every T-dependent term of
+    #     ground_rdm1_blocks, with one t replaced by r (r1 -> r, theta -> thetaR, xtv/xt1/xt2 -> their derivatives).
+    for kj in range(nkpts):
+        ki = kbra[kj]
+        # d_ij <- - r_ja l_ia                    (j at kj; i, a at ki = kbra[kj])
+        doo[kj] -= einsum('ja,ia->ij', r1[kj], l1[ki])
+        for kk, ka in itertools.product(range(nkpts), repeat=2):
+            # d_ij <- - thetaR_jkab l_ikab       (j at kj, i at ki, k at kk, a at ka)
+            doo[kj] -= einsum('jkab,ikab->ij', thetaR[kj, kk, ka], l2[ki, kk, ka])
+    for ki in range(nkpts):
+        # d_ab <- r_ia l_ib                      (i, b at ki; a at kbra[ki])
+        dvv[ki] += einsum('ia,ib->ab', r1[ki], l1[ki])
+    for kb in range(nkpts):
+        for kj, ki in itertools.product(range(nkpts), repeat=2):
+            # d_ab <- thetaR_jica l_jicb         (j at kj, i at ki, c at kc, b at kb; a at kbra[kb])
+            kc = kconserv[kj, kb, ki]
+            dvv[kb] += einsum('jica,jicb->ab', thetaR[kj, ki, kc], l2[kj, ki, kc])
+    for ki in range(nkpts):
+        ka = kbra[ki]
+        # d_ai <- r_ia                           (i at ki, a at ka = kbra[ki])
+        dvo[ki] += r1[ki].T
+        # d_ai <- - (r_ie l_me) t_ma             (derivative of -xtv_im t_ma, xtv_im = t_ie l_me; m, e at ka)
+        dvo[ki] -= einsum('im,ma->ai', einsum('ie,me->im', r1[ki], l1[ka]), t1[ka])
+        # d_ai <- - xtv_im r_ma                  (m at ki)
+        dvo[ki] -= einsum('im,ma->ai', xtv[ki], r1[ki])
+        for km in range(nkpts):
+            # d_ai <- thetaR_imae l_me           (derivative of theta_imae l_me; m, e at km)
+            dvo[ki] += einsum('imae,me->ai', thetaR[ki, km, ka], l1[km])
+        # Derivatives of xt1_mi = l_mnef theta_inef and xt2_ae = theta_mnaf l_mnef:
+        #   xt1R_mi = l_mnef thetaR_inef (m at ka, i at ki),  xt2R_ae = thetaR_mnaf l_mnef (a at ka, e at ki)
+        xt1R = np.zeros((nocc, nocc), dtype=dtype)
+        xt2R = np.zeros((nvir, nvir), dtype=dtype)
+        for kn, ke in itertools.product(range(nkpts), repeat=2):
+            # xt1R: n at kn, e at ke
+            xt1R += einsum('mnef,inef->mi', l2[ka, kn, ke], thetaR[ki, kn, ke])
+            # xt2R: m at kn, n at ke
+            xt2R += einsum('mnaf,mnef->ae', thetaR[kn, ke, ka], l2[kn, ke, ki])
+        # d_ai <- - xt1R_mi t_ma - xt1_mi r_ma   (derivative of -xt1_mi t_ma)
+        dvo[ki] -= einsum('mi,ma->ai', xt1R, t1[ka])
+        dvo[ki] -= einsum('mi,ma->ai', xt1[ki], r1[ki])
+        # d_ai <- - r_ie xt2_ae - t_ie xt2R_ae   (derivative of -t_ie xt2_ae)
+        dvo[ki] -= einsum('ie,ae->ai', r1[ki], xt2[ka])
+        dvo[ki] -= einsum('ie,ae->ai', t1[ki], xt2R)
+
+    # Lambda_2 R_1 leaves the one-body de-excitation y_ia = (2 l_ijab - l_ijba) r_jb (i at ki, a at kket[ki]),
+    #     which enters through the l1-linear terms of gamma(T, Lambda) with l1 -> y.
+    y1 = np.zeros((nkpts, nocc, nvir), dtype=dtype)
+    for ki in range(nkpts):
+        for kj in range(nkpts):
+            # j at kj, b at kbra[kj]
+            y1[ki] += 2. * einsum('ijab,jb->ia', l2[ki, kj, kket[ki]], r1[kj])
+            y1[ki] -= einsum('ijba,jb->ia', l2[ki, kj, kbra[kj]], r1[kj])
+    for kj in range(nkpts):
+        # d_ij <- - t_ja y_ia                    (j, a at kj; i at kbra[kj])
+        doo[kj] -= einsum('ja,ia->ij', t1[kj], y1[kbra[kj]])
+        # d_ab <- t_ia y_ib                      (i, a at kbra[kj]; b at kj)
+        dvv[kj] += einsum('ia,ib->ab', t1[kbra[kj]], y1[kbra[kj]])
+        # d_ia <- y_ia                           (i at kbra[kj], a at kj)
+        dov[kj] += y1[kbra[kj]]
+    for ki in range(nkpts):
+        ka = kbra[ki]
+        # d_ai <- - (t_ie y_me) t_ma             (e at ki; m at ka)
+        dvo[ki] -= einsum('im,ma->ai', einsum('ie,me->im', t1[ki], y1[ka]), t1[ka])
+        for km in range(nkpts):
+            # d_ai <- theta_imae y_me            (m at km, e at kket[km])
+            dvo[ki] += einsum('imae,me->ai', theta[ki, km, ka], y1[km])
+
+    # Zero momentum transfer only: + <Lambda|R> <Phi_0| exp(-T) q^+ p exp(T) |Phi_0>, where
+    #     <Phi_0| exp(-T) q^+ p exp(T) |Phi_0> is d_ij = delta_ij, d_ai = t_ia (per spin)
+    if 'lambda_weights' in imds:
+        s = _singlet_dot(eom, imds['lambda_weights'],
+                         amplitudes_to_vector_singlet(r1, r2, kconserv_r2), kconserv_r2)
+        for k in range(nkpts):
+            doo[k] += s * np.eye(nocc)
+            dvo[k] += s * t1[k].T
+    # spin sum
+    return 2 * doo, 2 * dov, 2 * dvo, 2 * dvv
+
+
+def ground_rdm1_blocks(eom):
+    '''Spin-summed unrelaxed CCSD one-particle density matrix including the HF part, as k-diagonal blocks
+    (doo, dov, dvo, dvv):
+
+        dm[p, q] = <Phi_0|(1+Lambda) exp(-T) q^+ p exp(T) |Phi_0> (= <q^+ p>, pyscf.cc.ccsd_rdm convention).
+
+    The terms are those of pyscf.cc.ccsd_rdm._gamma1_intermediates with k-point labels.
+    '''
+    cc = eom._cc
+    t1, l1, l2 = cc.t1, cc.l1, cc.l2
+    nkpts, nocc, nvir = t1.shape
+    kconserv = cc.khelper.kconserv
+    imds = make_trans_rdm1_imds(eom, 0)
+    theta, xtv, xt1, xt2 = imds['theta'], imds['xtv'], imds['xt1'], imds['xt2']
+    doo = np.zeros((nkpts, nocc, nocc), dtype=xt1.dtype)
+    dvv = np.zeros((nkpts, nvir, nvir), dtype=xt1.dtype)
+    dvo = np.zeros((nkpts, nvir, nocc), dtype=xt1.dtype)
+    for k in range(nkpts):
+        # d_ij = delta_ij (HF) - t_ja l_ia;  d_ab = t_ia l_ib   (all indices at k)
+        doo[k] = np.eye(nocc) - einsum('ja,ia->ij', t1[k], l1[k])
+        dvv[k] = einsum('ia,ib->ab', t1[k], l1[k])
+        # d_ai = t_ia - xtv_im t_ma - xt1_mi t_ma - t_ie xt2_ae
+        #   with xtv_im = t_ie l_me, xt1_mi = l_mnef theta_inef, xt2_ae = theta_mnaf l_mnef (make_trans_rdm1_imds)
+        dvo[k] = (t1[k].T - einsum('im,ma->ai', xtv[k], t1[k])
+                  - einsum('mi,ma->ai', xt1[k], t1[k]) - einsum('ie,ae->ai', t1[k], xt2[k]))
+    for ki, kj, ka in kpts_helper.loop_kkk(nkpts):
+        # d_ij <- - theta_jkab l_ikab   (i, j at ki; k at kj; a at ka)
+        doo[ki] -= einsum('jkab,ikab->ij', theta[ki, kj, ka], l2[ki, kj, ka])
+        # d_ab <- theta_jica l_jicb     (j at ki, i at kj, c at ka; a, b at kconserv[ki, ka, kj])
+        dvv[kconserv[ki, ka, kj]] += einsum('jica,jicb->ab', theta[ki, kj, ka], l2[ki, kj, ka])
+    for ki, km in itertools.product(range(nkpts), repeat=2):
+        # d_ai <- theta_imae l_me       (i, a at ki; m, e at km)
+        dvo[ki] += einsum('imae,me->ai', theta[ki, km, ki], l1[km])
+    # d_ia = l_ia (ov block); spin sum
+    return 2 * doo, 2 * np.asarray(l1), 2 * dvo, 2 * dvv
+
+
+def _contract_dagger(op_x, dm):
+    '''<O^dagger> = sum_pq (O^dagger)_pq dm[q, p] for a density dm[p, q] = <q^+ p>, e.g. from trans_rdm1_right
+    or ground_rdm1_blocks.
+    '''
+    doo, dov, dvo, dvv = dm
+    nocc = doo.shape[1]
+    out = 0
+    for k in range(op_x.shape[0]):
+        o = op_x[k].conj()
+        out += (np.sum(o[:nocc, :nocc] * doo[k]) + np.sum(o[:nocc, nocc:] * dov[k])
+                + np.sum(o[nocc:, :nocc] * dvo[k]) + np.sum(o[nocc:, nocc:] * dvv[k]))
+    return out
 
 
 def vector_to_amplitudes_singlet(vector, nkpts, nmo, nocc, kconserv):
@@ -2026,6 +2390,13 @@ class EOMEE(eom_kgccsd.EOMEE):
         return imds
 
 
+def _check_qvec(qvec):
+    if qvec is None:
+        raise ValueError('A momentum transfer qvec is required')
+    if np.linalg.norm(np.asarray(qvec, dtype=float)) < 1e-12:
+        raise ValueError('qvec = 0: the density operator exp(iQ.r) has no inelastic response at Q = 0')
+
+
 class EOMEESinglet(EOMEE):
     kernel = eomee_ccsd_singlet
     eomee_ccsd_singlet = eomee_ccsd_singlet
@@ -2033,7 +2404,55 @@ class EOMEESinglet(EOMEE):
     get_init_guess = get_init_guess_cis
     cis = cis_easy
 
-    get_absorption_spectrum = optical_absorption_singlet
+    get_spectrum = eeccsd_spectrum_singlet
+
+    def get_absorption_spectrum(self, scan, eta, kshift=None, tol=1e-5, maxiter=500, eris=None, imds=None, x0=None,
+                                partition=None, qvec=None, **kwargs):
+        '''Optical absorption (velocity gauge): eeccsd_spectrum_singlet for the momentum operator.
+
+        qvec must be None (zero momentum transfer, kshift 0). Returns (S, x0) with S of shape (3, len(scan)):
+        S_x(w) = sum_n |<n|p_x|0>|^2 L(w - w_n) for the whole Born-von Karman crystal, in 1/Hartree,
+        elastic (w = 0) pole included. The absorption is eps_2,xx(w) = 4 pi^2 S_x(w) / (w^2 N_k V_cell)
+        (atomic units).
+        '''
+        if qvec is not None:
+            raise ValueError('get_absorption_spectrum is for the momentum operator (qvec=None); use '
+                             'get_dynamic_structure_factor, get_energy_loss_function or get_spectrum '
+                             'for a finite qvec.')
+        return eeccsd_spectrum_singlet(self, scan, eta, kshift=kshift, tol=tol, maxiter=maxiter, eris=eris,
+                                       imds=imds, x0=x0, partition=partition, **kwargs)
+
+    def get_dynamic_structure_factor(self, scan, eta, qvec, **kwargs):
+        '''Dynamic structure factor S(Q, w) per electron (inelastic part), in 1/Hartree.
+
+        S(Q, w) = sum_n |<n|rho_Q|0>|^2 L(w - w_n) / (N_k N_e), rho_Q = exp(iQ.r), from eeccsd_spectrum_singlet
+        with qvec = Q (Cartesian, 1/Bohr, nonzero, commensurate with the k-mesh; Q = q + G may lie beyond the first
+        Brillouin zone). N_e = cell.nelectron (all electrons of the calculation: pseudopotential valence and
+        semicore, frozen orbitals included). The elastic (Bragg) part at Q = G is not included. Measured by
+        inelastic X-ray scattering (IXS, NIXS; X-ray Raman scattering at core edges).
+        In EOM-CCSD the transition strengths are complex, so S(-Q, w) differs from S(Q, w) at the 1e-2 level;
+        the exact relation is S(-Q, w; eta) = -S(Q, w; -eta).
+        Returns (S, x0) with S of shape (len(scan),).
+        '''
+        _check_qvec(qvec)
+        spectrum, x0 = eeccsd_spectrum_singlet(self, scan, eta, qvec=qvec, **kwargs)
+        return spectrum[0] / (self.nkpts * self._cc._scf.cell.nelectron), x0
+
+    def get_energy_loss_function(self, scan, eta, qvec, **kwargs):
+        '''Energy-loss function -Im eps^-1(Q, w) (dimensionless), from the density response with the full Coulomb
+        interaction:
+
+            -Im eps^-1(Q, w) = 4 pi^2 n S(Q, w) / |Q|^2 = 4 pi^2 S_crystal(Q, w) / (|Q|^2 N_k V_cell)
+
+        with S(Q, w) per electron (get_dynamic_structure_factor), n = N_e / V_cell, and S_crystal the
+        eeccsd_spectrum_singlet result for qvec = Q (nonzero, commensurate with the k-mesh). For Q = q + G0
+        beyond the first Brillouin zone this is the diagonal element [eps^-1]_{G0,G0}(q). Measured by electron
+        energy-loss spectroscopy (EELS, momentum resolved). Returns (loss, x0) with loss of shape (len(scan),).
+        '''
+        _check_qvec(qvec)
+        spectrum, x0 = eeccsd_spectrum_singlet(self, scan, eta, qvec=qvec, **kwargs)
+        q2 = np.dot(np.asarray(qvec, dtype=float).ravel(), np.asarray(qvec, dtype=float).ravel())
+        return 4 * np.pi**2 * spectrum[0] / (q2 * self.nkpts * self._cc._scf.cell.vol), x0
 
     def vector_size(self, kshift=0):
         '''Size of the linear excitation operator R vector based on spatial
