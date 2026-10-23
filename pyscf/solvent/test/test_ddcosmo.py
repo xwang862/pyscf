@@ -16,11 +16,11 @@
 import unittest
 from functools import reduce
 import numpy
-import scipy.special
 from pyscf import lib, gto, scf, dft, ao2mo, df
 from pyscf.solvent import ddcosmo
 from pyscf.solvent import _attach_solvent
 from pyscf.symm import sph
+from pyscf.lib import Ylm
 
 
 def make_v_phi(mol, dm, r_vdw, lebedev_order):
@@ -227,6 +227,15 @@ def tearDownModule():
     del mol
 
 class KnownValues(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.original_grids = dft.radi.ATOM_SPECIFIC_TREUTLER_GRIDS
+        dft.radi.ATOM_SPECIFIC_TREUTLER_GRIDS = False
+
+    @classmethod
+    def tearDownClass(cls):
+        dft.radi.ATOM_SPECIFIC_TREUTLER_GRIDS = cls.original_grids
+
     def test_ddcosmo_scf(self):
         mol = gto.M(atom=''' H 0 0 0 ''', charge=1, basis='sto3g', verbose=7,
                     output='/dev/null')
@@ -292,10 +301,10 @@ class KnownValues(unittest.TestCase):
         ylmref = []
         for l in range(lmax+1):
             ylm = numpy.empty((l*2+1,ngrid))
-            ylm[l] = scipy.special.sph_harm(0, l, theta, varphi).real
+            ylm[l] = Ylm(l, 0, varphi, theta).real
             for m in range(1, l+1):
-                f1 = scipy.special.sph_harm(-m, l, theta, varphi)
-                f2 = scipy.special.sph_harm( m, l, theta, varphi)
+                f1 = Ylm(l, -m, varphi, theta)
+                f2 = Ylm(l,  m, varphi, theta)
                 # complex to real spherical functions
                 if m % 2 == 1:
                     ylm[l-m] = (-f1.imag - f2.imag) / numpy.sqrt(2)
@@ -486,18 +495,26 @@ class KnownValues(unittest.TestCase):
         self.assertTrue(mf._scf.with_df.mol is mol1)
         self.assertTrue(mf._scf.with_solvent.mol is mol1)
 
+    def test_df_cosmo(self):
+        mol = gto.M(atom='H 0 0 0 ; H 0 0 1')
+        auxbasis = [[0, [1, 1]]]
+        mf1 = mol.RHF().density_fit(auxbasis=auxbasis).ddCOSMO().run()
+        mf2 = mol.RHF().ddCOSMO().density_fit(auxbasis=auxbasis).run()
+        assert abs(mf1.e_tot - mf2.e_tot) < 1e-12
+
+class SolventWithDefaultGrids(unittest.TestCase):
     def test_rhf_tda(self):
         # TDA with equilibrium_solvation
-        mf = mol.RHF().ddCOSMO().run(conv_tol=1e-10)
-        td = mf.TDA().ddCOSMO().run(equilibrium_solvation=True)
-        ref = numpy.array([0.30124900879, 0.358722766464, 0.3950184783571])
+        mf = mol.RHF().ddCOSMO().run(conv_tol=1e-12)
+        td = mf.TDA(equilibrium_solvation=True).run(conv_tol=1e-10)
+        ref = numpy.array([0.30125788456, 0.358731044210, 0.39502266389])
         self.assertAlmostEqual(abs(ref - td.e).max(), 0, 7)
         self.assertEqual(td.undo_solvent().__class__.__name__, 'TDA')
 
         # TDA without equilibrium_solvation
         mf = mol.RHF().ddCOSMO().run(conv_tol=1e-10)
-        td = mf.TDA().ddCOSMO().run()
-        ref = numpy.array([0.301421953639, 0.358782851661, 0.400409174628])
+        td = mf.TDA().run()
+        ref = numpy.array([0.301354470812, 0.358764482083, 0.398123841665])
         self.assertAlmostEqual(abs(ref - td.e).max(), 0, 7)
 
 # TODO: add tests for direct-scf, ROHF, ROKS, .newton(), and their mixes

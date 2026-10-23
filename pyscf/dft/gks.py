@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-# Copyright 2014-2022 The PySCF Developers. All Rights Reserved.
+# Copyright 2014-2026 The PySCF Developers. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -30,7 +30,7 @@ from pyscf.dft import rks
 from pyscf.dft.numint2c import NumInt2C
 
 
-def get_veff(ks, mol=None, dm=None, dm_last=0, vhf_last=0, hermi=1):
+def get_veff(ks, mol=None, dm=None, dm_last=None, vhf_last=None, hermi=1):
     '''Coulomb + XC functional
 
     .. note::
@@ -44,10 +44,10 @@ def get_veff(ks, mol=None, dm=None, dm_last=0, vhf_last=0, hermi=1):
             A density matrix or a list of density matrices
 
     Kwargs:
-        dm_last : ndarray or a list of ndarrays or 0
+        dm_last : ndarray or a list of ndarrays
             The density matrix baseline.  If not 0, this function computes the
             increment of HF potential w.r.t. the reference HF potential matrix.
-        vhf_last : ndarray or a list of ndarrays or 0
+        vhf_last : ndarray or a list of ndarrays
             The reference Vxc potential matrix.
         hermi : int
             Whether J, K matrix is hermitian
@@ -62,7 +62,8 @@ def get_veff(ks, mol=None, dm=None, dm_last=0, vhf_last=0, hermi=1):
     '''
     if mol is None: mol = ks.mol
     if dm is None: dm = ks.make_rdm1()
-    ks.initialize_grids(mol, dm)
+    if ks.grids.coords is None:
+        ks.initialize_grids(mol, dm)
 
     t0 = (logger.process_clock(), logger.perf_counter())
 
@@ -89,36 +90,41 @@ def get_veff(ks, mol=None, dm=None, dm_last=0, vhf_last=0, hermi=1):
             logger.debug(ks, 'nelec with nlc grids = %s', n)
         t0 = logger.timer(ks, 'vxc', *t0)
 
+    incremental_jk = (ks._eri is None and ks.direct_scf and
+                      dm_last is not None and
+                      getattr(vhf_last, 'vj', None) is not None)
+    if incremental_jk:
+        _dm = numpy.asarray(dm) - numpy.asarray(dm_last)
+    else:
+        _dm = dm
     if not ni.libxc.is_hybrid_xc(ks.xc):
         vk = None
-        if (ks._eri is None and ks.direct_scf and
-            getattr(vhf_last, 'vj', None) is not None):
-            ddm = numpy.asarray(dm) - numpy.asarray(dm_last)
-            vj = ks.get_j(mol, ddm, hermi)
+        vj = ks.get_j(mol, _dm, hermi)
+        if incremental_jk:
             vj += vhf_last.vj
-        else:
-            vj = ks.get_j(mol, dm, hermi)
         vxc += vj
     else:
         omega, alpha, hyb = ni.rsh_and_hybrid_coeff(ks.xc, spin=mol.spin)
-        if (ks._eri is None and ks.direct_scf and
-            getattr(vhf_last, 'vk', None) is not None):
-            ddm = numpy.asarray(dm) - numpy.asarray(dm_last)
-            vj, vk = ks.get_jk(mol, ddm, hermi)
+        if omega == 0:
+            vj, vk = ks.get_jk(mol, _dm, hermi)
             vk *= hyb
-            if omega != 0:
-                vklr = ks.get_k(mol, ddm, hermi, omega=omega)
-                vklr *= (alpha - hyb)
-                vk += vklr
+        elif alpha == 0: # LR=0, only SR exchange
+            vj = ks.get_j(mol, _dm, hermi)
+            vk = ks.get_k(mol, _dm, hermi, omega=-omega)
+            vk *= hyb
+        elif hyb == 0: # SR=0, only LR exchange
+            vj = ks.get_j(mol, _dm, hermi)
+            vk = ks.get_k(mol, _dm, hermi, omega=omega)
+            vk *= alpha
+        else: # SR and LR exchange with different ratios
+            vj, vk = ks.get_jk(mol, _dm, hermi)
+            vk *= hyb
+            vklr = ks.get_k(mol, _dm, hermi, omega=omega)
+            vklr *= (alpha - hyb)
+            vk += vklr
+        if incremental_jk:
             vj += vhf_last.vj
             vk += vhf_last.vk
-        else:
-            vj, vk = ks.get_jk(mol, dm, hermi)
-            vk *= hyb
-            if omega != 0:
-                vklr = ks.get_k(mol, dm, hermi, omega=omega)
-                vklr *= (alpha - hyb)
-                vk += vklr
         vxc += vj - vk
 
         if ground_state:
@@ -171,7 +177,8 @@ class GKS(rks.KohnShamDFT, ghf.GHF):
         self._numint.spin_samples = val
 
     def nuc_grad_method(self):
-        raise NotImplementedError
+        from pyscf.grad import gks
+        return gks.Gradients(self)
 
     def to_hf(self):
         '''Convert to GHF object.'''

@@ -352,6 +352,20 @@ class KnownValues(unittest.TestCase):
         self.assertAlmostEqual(abs(v0 - v3).max(), 0, 8)
         self.assertAlmostEqual(lib.fp(v0) - (-5.7070290795125445-0.00038722541238732697j), 0, 8)
 
+    # issue 2575
+    def test_aft_get_pp1(self):
+        cell = pgto.M(atom='Cu .0 .0 .0', a=np.eye(3)*3, spin=1,
+               basis=[[1, [1, 1]]], pseudo='''Cu
+1    0   10
+0.53    0
+1
+0.26    1   1.8''')
+        kpts = cell.make_kpts([2,1,1])
+        ref = fft.FFTDF(cell, kpts).get_pp()
+        v = aft.AFTDF(cell, kpts).get_pp()
+        self.assertAlmostEqual(abs(v - ref).max(), 0, 8)
+        self.assertAlmostEqual(lib.fp(v), 0.37494551685809624, 8)
+
     def test_aft_get_nuc(self):
         v0 = fft.FFTDF(cell, kpts[0]).get_nuc()
         v1 = aft.AFTDF(cell, kpts[0]).get_nuc()
@@ -520,6 +534,7 @@ class KnownValues(unittest.TestCase):
         cell.basis = {'He': [(0, (2.5, 1)), (0, (1., 1))]}
         cell.a = np.eye(3) * 2.5
         cell.dimension = 1
+        cell.low_dim_ft_type = 'inf_vacuum'
         cell.mesh = [3, 3, 3]
         cell.build()
         f = aft.AFTDF(cell)
@@ -527,6 +542,29 @@ class KnownValues(unittest.TestCase):
         f.kpts = np.random.random((4,3))
         f.check_sanity()
 
+    def test_check_kpts(self):
+        aft_obj = aft.AFTDF(cell)
+        aft_obj.kpts = np.ones(3)
+        ks, is_single_kpt = aft._check_kpts(aft_obj, None)
+        assert ks.ndim == 2
+        assert is_single_kpt
+        ks, is_single_kpt = aft._check_kpts(aft_obj, np.ones((1, 3)))
+        assert ks.ndim == 2
+        assert not is_single_kpt
+        ks, is_single_kpt = aft._check_kpts(aft_obj, np.ones(3))
+        assert ks.ndim == 2
+        assert is_single_kpt
+
+        aft_obj.kpts = np.ones((1, 3))
+        ks, is_single_kpt = aft._check_kpts(aft_obj, None)
+        assert ks.ndim == 2
+        assert not is_single_kpt
+        ks, is_single_kpt = aft._check_kpts(aft_obj, np.ones((1, 3)))
+        assert ks.ndim == 2
+        assert not is_single_kpt
+        ks, is_single_kpt = aft._check_kpts(aft_obj, np.ones(3))
+        assert ks.ndim == 2
+        assert is_single_kpt
 
 if __name__ == '__main__':
     print("Full Tests for aft")

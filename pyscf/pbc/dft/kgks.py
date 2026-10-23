@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-# Copyright 2014-2019 The PySCF Developers. All Rights Reserved.
+# Copyright 2014-2026 The PySCF Developers. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -38,7 +38,7 @@ from pyscf.pbc.dft.numint2c import KNumInt2C
 from pyscf.dft import gks as mol_ks
 from pyscf import __config__
 
-def get_veff(ks, cell=None, dm=None, dm_last=0, vhf_last=0, hermi=1,
+def get_veff(ks, cell=None, dm=None, dm_last=None, vhf_last=None, hermi=1,
              kpts=None, kpts_band=None):
     '''Coulomb + XC functional for KGKS
 
@@ -50,7 +50,7 @@ def get_veff(ks, cell=None, dm=None, dm_last=0, vhf_last=0, hermi=1,
             A density matrix or a list of density matrices
 
     Returns:
-        Veff : (nkpts, 2*nao, 2*nao) or (*, nkpts, 2*nao, 2*nao) ndarray
+        Veff : ``(nkpts, 2*nao, 2*nao)`` or ``(*, nkpts, 2*nao, 2*nao)`` ndarray
         Veff = J + Vxc.
     '''
     if cell is None: cell = ks.cell
@@ -70,7 +70,7 @@ def get_veff(ks, cell=None, dm=None, dm_last=0, vhf_last=0, hermi=1,
         raise NotImplementedError
 
     # TODO GKS with multigrid method
-    if isinstance(ks.with_df, multigrid.MultiGridFFTDF):
+    if isinstance(ks._numint, multigrid.MultiGridNumInt):
         raise NotImplementedError
 
     # ndim = 3 : dm.shape = (nkpts, nao, nao)
@@ -95,9 +95,20 @@ def get_veff(ks, cell=None, dm=None, dm_last=0, vhf_last=0, hermi=1,
         vxc += vj
     else:
         omega, alpha, hyb = ks._numint.rsh_and_hybrid_coeff(ks.xc, spin=cell.spin)
-        vj, vk = ks.get_jk(cell, dm, hermi, kpts, kpts_band)
-        vk *= hyb
-        if omega != 0:
+        if omega == 0:
+            vj, vk = ks.get_jk(cell, dm, hermi, kpts, kpts_band)
+            vk *= hyb
+        elif alpha == 0: # LR=0, only SR exchange
+            vj = ks.get_j(cell, dm, hermi, kpts, kpts_band)
+            vk = ks.get_k(cell, dm, hermi, kpts, kpts_band, omega=-omega)
+            vk *= hyb
+        elif hyb == 0: # SR=0, only LR exchange
+            vj = ks.get_j(cell, dm, hermi, kpts, kpts_band)
+            vk = ks.get_k(cell, dm, hermi, kpts, kpts_band, omega=omega)
+            vk *= alpha
+        else: # SR and LR exchange with different ratios
+            vj, vk = ks.get_jk(cell, dm, hermi, kpts, kpts_band)
+            vk *= hyb
             vklr = ks.get_k(cell, dm, hermi, kpts, kpts_band, omega=omega)
             vklr *= (alpha - hyb)
             vk += vklr
@@ -115,7 +126,7 @@ def get_veff(ks, cell=None, dm=None, dm_last=0, vhf_last=0, hermi=1,
     return vxc
 
 class KGKS(rks.KohnShamDFT, kghf.KGHF):
-    '''GKS class adapted for PBCs with k-point sampling.
+    '''GKS class adapted for PBCs with k-point sampling (default: gamma point).
     '''
 
     collinear = mol_ks.GKS.collinear
@@ -124,7 +135,7 @@ class KGKS(rks.KohnShamDFT, kghf.KGHF):
     energy_elec = krks.energy_elec
     get_rho = krks.get_rho
 
-    def __init__(self, cell, kpts=np.zeros((1,3)), xc='LDA,VWN',
+    def __init__(self, cell, kpts=None, xc='LDA,VWN',
                  exxdiv=getattr(__config__, 'pbc_scf_SCF_exxdiv', 'ewald')):
         kghf.KGHF.__init__(self, cell, kpts, exxdiv=exxdiv)
         rks.KohnShamDFT.__init__(self, xc)

@@ -26,6 +26,7 @@ import scipy.linalg
 from pyscf import lib
 from pyscf import symm
 from pyscf.lib import logger
+from pyscf.data import nist
 from pyscf.scf import hf
 from pyscf.scf import hf_symm
 from pyscf.scf import ghf
@@ -145,13 +146,60 @@ class SymAdaptedGHF(ghf.GHF):
                         mol.nelectron-nelec_fix, ' '.join(float_irname))
         return ghf.GHF.build(self, mol)
 
-    def eig(self, h, s, symm_orb=None, irrep_id=None):
+    def check_linear_dependency(self, s, verbose=None):
+        log = logger.new_logger(self, verbose)
+        mol = self.mol
+        symm_orb = [scipy.linalg.block_diag(c, c) for c in mol.symm_orb]
+        irrep_id = mol.irrep_id
+        nirrep = len(symm_orb)
+        s = symm.symmetrize_matrix(s, symm_orb)
+        xs = []
+        orbsym = []
+        cond = []
+        for ir in range(nirrep):
+            e, v = scipy.linalg.eigh(s[ir])
+            abs_e = abs(e)
+            emax = abs_e.max()
+            emin = abs_e.min()
+            c = emax / emin
+            log.debug('irrep %d, cond(S) = %s', ir, c)
+            cond.append(c)
+            if hf.remove_overlap_zero_eigenvalue:
+                mask = e > hf.overlap_zero_eigenvalue_threshold
+                x = v[:,mask] / numpy.sqrt(e[mask])
+                nso, nmo = x.shape
+                if nmo < nso:
+                    log.info('irrep %d: %d small eigenvectors of overlap matrix removed',
+                             ir, nso-nmo)
+            else:
+                x = v / numpy.sqrt(e)
+            xs.append(x)
+            orbsym.append([irrep_id[ir]] * x.shape[1])
+
+        if any(c > 1e10 for c in cond):
+            log.warn('Singularity detected in the overlap matrix. '
+                     'SCF may be inaccurate and difficult to converge.')
+
+        x_orth = hf_symm.so2ao_mo_coeff(symm_orb, xs)
+        x_orth = lib.tag_array(x_orth, orbsym=numpy.hstack(orbsym))
+        return x_orth
+
+    def eig(self, h, s, overwrite=False, x=None, symm_orb=None, irrep_id=None):
         if symm_orb is None or irrep_id is None:
             mol = self.mol
             symm_orb = mol.symm_orb
             irrep_id = mol.irrep_id
-
         nirrep = len(symm_orb)
+
+        if x is not None:
+            orbsym = x.orbsym
+            res = [self._eigh(h, s, x=x[:,orbsym==irrep_id[ir]])
+                   for ir in range(nirrep)]
+            e = numpy.hstack([e for e, c in res])
+            c = numpy.hstack([c for e, c in res])
+            c = lib.tag_array(c, orbsym=numpy.hstack(orbsym))
+            return e, c
+
         symm_orb = [scipy.linalg.block_diag(c, c) for c in symm_orb]
         h = symm.symmetrize_matrix(h, symm_orb)
         s = symm.symmetrize_matrix(s, symm_orb)
@@ -209,29 +257,32 @@ class SymAdaptedGHF(ghf.GHF):
             mo_occ[occ_idx] = 1
 
         vir_idx = (mo_occ==0)
-        if self.verbose >= logger.INFO and numpy.count_nonzero(vir_idx) > 0:
+        if numpy.count_nonzero(vir_idx) > 0:
             ehomo = max(mo_energy[~vir_idx])
             elumo = min(mo_energy[ vir_idx])
-            noccs = []
-            for i, ir in enumerate(mol.irrep_id):
-                irname = mol.irrep_name[i]
-                ir_idx = (orbsym == ir)
+            gap = (elumo - ehomo) * nist.HARTREE2EV
+            self.scf_summary['gap'] = gap
+            if self.verbose >= logger.INFO:
+                noccs = []
+                for i, ir in enumerate(mol.irrep_id):
+                    irname = mol.irrep_name[i]
+                    ir_idx = (orbsym == ir)
 
-                noccs.append(int(mo_occ[ir_idx].sum()))
-                if ehomo in mo_energy[ir_idx]:
-                    irhomo = irname
-                if elumo in mo_energy[ir_idx]:
-                    irlumo = irname
-            logger.info(self, 'HOMO (%s) = %.15g  LUMO (%s) = %.15g',
-                        irhomo, ehomo, irlumo, elumo)
+                    noccs.append(int(mo_occ[ir_idx].sum()))
+                    if ehomo in mo_energy[ir_idx]:
+                        irhomo = irname
+                    if elumo in mo_energy[ir_idx]:
+                        irlumo = irname
+                logger.info(self, 'HOMO (%s) = %.15g  LUMO (%s) = %.15g  gap/eV = %.5f',
+                            irhomo, ehomo, irlumo, elumo, gap)
 
-            logger.debug(self, 'irrep_nelec = %s', noccs)
-            hf_symm._dump_mo_energy(mol, mo_energy, mo_occ, ehomo, elumo, orbsym,
-                                    verbose=self.verbose)
+                logger.debug(self, 'irrep_nelec = %s', noccs)
+                hf_symm._dump_mo_energy(mol, mo_energy, mo_occ, ehomo, elumo, orbsym,
+                                        verbose=self.verbose)
 
-            if mo_coeff is not None and self.verbose >= logger.DEBUG:
-                ss, s = self.spin_square(mo_coeff[:,mo_occ>0], self.get_ovlp())
-                logger.debug(self, 'multiplicity <S^2> = %.8g  2S+1 = %.8g', ss, s)
+                if mo_coeff is not None and self.verbose >= logger.DEBUG:
+                    ss, s = self.spin_square(mo_coeff[:,mo_occ>0], self.get_ovlp())
+                    logger.debug(self, 'multiplicity <S^2> = %.8g  2S+1 = %.8g', ss, s)
         return mo_occ
 
     def _finalize(self):

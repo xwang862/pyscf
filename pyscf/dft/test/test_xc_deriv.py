@@ -521,8 +521,12 @@ class KnownValues(unittest.TestCase):
         self.assertAlmostEqual(xc1.sum(), 19.977512805950784, 9)
         self.assertAlmostEqual(abs(ref[1] - xc1).max(), 0, 9)
 
-    @unittest.skipIf(not (hasattr(dft, 'xcfun') and dft.xcfun.MAX_DERIV_ORDER > 3), 'xcfun order')
     def test_xcfun_gga_deriv4(self):
+        if not hasattr(dft, 'xcfun'):
+            raise unittest.SkipTest('XCFun not available.')
+        if dft.xcfun.MAX_DERIV_ORDER <= 3:
+            raise unittest.SkipTest('XCFun MAX_DERIV_ORDER <= 3.')
+
         rho1 = rho[:,:4].copy()
         xc1 = dft.xcfun.eval_xc_eff('PBE', rho1, deriv=4)
         self.assertAlmostEqual(xc1.sum(), -1141.356286780069, 9)
@@ -531,8 +535,12 @@ class KnownValues(unittest.TestCase):
         xc1 = dft.xcfun.eval_xc_eff('PBE', rho1, deriv=4)
         self.assertAlmostEqual(xc1.sum(), -615.116081052867, 9)
 
-    @unittest.skipIf(not (hasattr(dft, 'xcfun') and dft.xcfun.MAX_DERIV_ORDER > 3), 'xcfun order')
     def test_xcfun_gga_deriv4_finite_diff(self):
+        if not hasattr(dft, 'xcfun'):
+            raise unittest.SkipTest('XCFun not available.')
+        if dft.xcfun.MAX_DERIV_ORDER <= 3:
+            raise unittest.SkipTest('XCFun MAX_DERIV_ORDER <= 3.')
+
         xctype = 'GGA'
         deriv = 4
         nvar = 4
@@ -566,6 +574,39 @@ class KnownValues(unittest.TestCase):
             xcp = dft.xcfun.eval_xc1('b88,', rhop, spin, deriv=deriv-1)
             kxc1 = xc_deriv.transform_xc(rhop, xcp, xctype, spin, deriv-1)
             self.assertAlmostEqual(abs((kxc0-kxc1)/delta - lxc[t]).max(), 0, 7)
+
+    def test_diagonal_indices(self):
+        nabla_idx = [1, 2, 3]
+
+        def equiv_diagonal_indices(idx, order):
+            # this function is equivalent to xc_deriv._diagonal_indices
+            # it is less efficient but probably more intuitive
+            len_idx = len(idx)
+            indices = np.arange(len_idx**(2 * order)).reshape([len_idx] * (2 * order))
+            # diagonalize all pairs
+            # e.g. [(0, 1), (2, 3), (4, 5)] -> [(2, 3), (4, 5), diag01] ->
+            #      [(4, 5), diag01, diag23] -> [diag01, diag23, diag45]    (when order = 3)
+            for _ in range(order):
+                indices = indices.diagonal(axis1=0, axis2=1)
+            # retrive diagonal indices [diag01, diag23, diag45] from original [(0, 1), (2, 3), (4, 5)]
+            indices = np.unravel_index(indices.reshape(-1), shape=[len_idx] * (2 * order))
+            # map to original indices
+            return tuple([np.asarray(idx)[i] for i in indices])
+
+        # case of order = 2, corresponds to 4th/5th xc derivative
+        # this order is more like n_pairs, related to the order of xc derivative but not the same
+        order = 2
+        indices = xc_deriv._diagonal_indices(nabla_idx, order)
+        equiv_indices = equiv_diagonal_indices(nabla_idx, order)
+        for (idx, equiv_idx) in zip(indices, equiv_indices):
+            self.assertTrue((idx == equiv_idx).all())
+
+        # case of order = 4, corresponds to 8th/9th xc derivative
+        order = 4
+        indices = xc_deriv._diagonal_indices(nabla_idx, order)
+        equiv_indices = equiv_diagonal_indices(nabla_idx, order)
+        for (idx, equiv_idx) in zip(indices, equiv_indices):
+            self.assertTrue((idx == equiv_idx).all())
 
 if __name__ == "__main__":
     print("Test xc_deriv")

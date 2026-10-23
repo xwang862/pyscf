@@ -30,7 +30,37 @@ KPT_DIFF_TOL = getattr(__config__, 'pbc_lib_kpts_helper_kpt_diff_tol', 1e-6)
 
 def is_zero(kpt):
     return abs(np.asarray(kpt)).sum() < KPT_DIFF_TOL
+
+# kpt might be an instance of KPoints class. If the pbc.lib.kpts module is
+# imported, is_gamma_point and gamma_point function will be overwritten by this
+# module to handle to handle the KPoints instances.
 is_gamma_point = gamma_point = is_zero
+
+def is_trim(cell, kpts, tol=KPT_DIFF_TOL):
+    ''' Check whether k-points are time-reversal invariant momenta (TRIM),
+        i.e., k = -k mod G.
+
+    Args:
+        cell : Cell object
+        kpts : (3,) or (nk,3) array_like
+        tol : float
+            Numerical tolerance for deciding whether 2*k_scaled is an integer
+            vector (mod 1). Default is :data:`KPT_DIFF_TOL`.
+
+    Returns:
+        mask : bool or ndarray of bool
+            Boolean mask indicating whether each k-point is a TRIM. If ``kpts``
+            corresponds to a single kpt, a single boolean is returned.
+            Otherwise an array of shape (nk,) is returned.
+    '''
+    logtol = np.ceil(-np.log10(tol)).astype(int)
+    kpts_reshape = kpts.reshape(-1,3)
+    scaled_kpts = cell.get_scaled_kpts(kpts_reshape)
+    scaled_k2 = np.round(2*scaled_kpts, logtol+1)%1
+    mask = scaled_k2.max(axis=1) < tol
+    if kpts.ndim == 1:
+        mask = mask[0]
+    return mask
 
 def round_to_fbz(kpts, wrap_around=False, tol=KPT_DIFF_TOL):
     '''
@@ -270,6 +300,17 @@ def get_kconserv(cell, kpts):
         [\phi*[k](1) \phi[l](1) | \phi*[m](2) \phi[n](2)]
     are zero unless n satisfies the above.
     '''
+    from pyscf.pbc.tools.k2gamma import kpts_to_kmesh, double_translation_indices
+    kmesh = kpts_to_kmesh(cell, kpts)
+    nkpts = kpts.shape[0]
+    if np.prod(kmesh) == nkpts:
+        # k=ijk_conserv[i,j] provides: -i + j - k = 2n\pi
+        # k - l + m - n = -(-k+l) + m - n = 2n\pi  ->  n = ijk_conserv[(-k+l), m]
+        ijk_conserv = double_translation_indices(kmesh)
+        return ijk_conserv[ijk_conserv.ravel()].reshape([nkpts]*3)
+    return _get_kconserv_slow(cell, kpts)
+
+def _get_kconserv_slow(cell, kpts):
     nkpts = kpts.shape[0]
     a = cell.lattice_vectors() / (2*np.pi)
 

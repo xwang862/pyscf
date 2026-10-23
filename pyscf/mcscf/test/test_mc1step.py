@@ -14,7 +14,6 @@
 # limitations under the License.
 
 import unittest
-import tempfile
 import numpy
 import h5py
 from pyscf import lib
@@ -37,7 +36,7 @@ def setUpModule():
     )
     m = scf.RHF(mol)
     m.conv_tol = 1e-10
-    m.chkfile = tempfile.NamedTemporaryFile().name
+    m.chkfile = lib.NamedTemporaryFile().name
     m.scf()
     mc0 = mcscf.CASSCF(m, 4, 4).run()
 
@@ -51,8 +50,8 @@ def setUpModule():
     symmetry = True
     )
     msym = scf.RHF(molsym)
-    msym.chkfile = tempfile.NamedTemporaryFile().name
     msym.conv_tol = 1e-10
+    msym.chkfile = lib.NamedTemporaryFile().name
     msym.scf()
 
 def tearDownModule():
@@ -191,7 +190,7 @@ class KnownValues(unittest.TestCase):
         mc1.max_cycle_micro = 6
         mc1.fcisolver.pspace_size = 0
         mc1.kernel(mo)
-        self.assertAlmostEqual(mc1.e_tot, -105.82833244029327, 6)
+        self.assertAlmostEqual(mc1.e_tot, -105.82833497389831, 6)
 
     # FIXME: How to test ci_response_space? The test below seems numerical instable
     #def test_ci_response_space(self):
@@ -279,7 +278,7 @@ class KnownValues(unittest.TestCase):
         with h5py.File(mc0.chkfile, 'r') as f:
             self.assertEqual(
                 set(f['mcscf'].keys()),
-                {'ncore', 'e_tot', 'mo_energy', 'casdm1', 'mo_occ', 'ncas', 'mo_coeff', 'e_cas'})
+                {'ncore', 'e_tot', 'mo_energy', 'casdm1', 'mo_occ', 'ncas', 'nelecas', 'mo_coeff', 'e_cas'})
 
     def test_state_average1(self):
         mc = mcscf.CASSCF(m, 4, 4)
@@ -308,7 +307,7 @@ class KnownValues(unittest.TestCase):
         mc = mcscf.CASSCF(m, 4, 4)
         cis1 = mc.fcisolver.copy()
         cis1.spin = 2
-        mc = mcscf.addons.state_average_mix(mc, [cis1, mc.fcisolver], [.5, .5])
+        mc = mc.state_average_mix([cis1, mc.fcisolver], [.5, .5])
         mc.run()
         self.assertAlmostEqual(mc.e_states[0], -108.7506795311190, 5)
         self.assertAlmostEqual(mc.e_states[1], -108.8582272809495, 5)
@@ -336,6 +335,10 @@ class KnownValues(unittest.TestCase):
         mc.kernel(m.mo_coeff)
         self.assertAlmostEqual(mc.e_tot, -108.85974001740854, 7)
         mc.analyze()
+
+        mc = mcscf.CASSCF(mol.RHF(), 4, 4)
+        mc.kernel()
+        self.assertAlmostEqual(mc.e_tot, -108.85974001740854, 7)
 
 
 if __name__ == "__main__":

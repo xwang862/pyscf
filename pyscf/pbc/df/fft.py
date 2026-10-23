@@ -38,11 +38,25 @@ KE_SCALING = getattr(__config__, 'pbc_df_aft_ke_cutoff_scaling', 0.75)
 
 
 def get_nuc(mydf, kpts=None):
+    r'''
+    Compute integrals for the nuclear attraction term.
+
+    The output of this function depends on the input `kpts`. Generally, the
+    output is a (Nk, Nao, Nao) array, where Nk is the number of k-points in the
+    provided `kpts`. If `kpts` is a (3,) array, corresponding to a single
+    k-point, the output will be a (Nao, Nao) matrix. If the optional input
+    `kpts` is not specified, this function will read the FFTDF.kpts for the
+    k-mesh and return a (Nk, Nao, Nao) array.
+
+    Note: This API has changed since PySCF-2.10. In PySCF 2.9 (or older), if
+    `kpts` is not specified, this function may return a (Nao, Nao) matrix for
+    the gamma point and a (Nk, Nao, Nao) array for other k-points.
+    '''
     from pyscf.pbc.dft import gen_grid
     kpts, is_single_kpt = _check_kpts(mydf, kpts)
     cell = mydf.cell
     assert cell.low_dim_ft_type != 'inf_vacuum'
-    assert cell.dimension > 1
+    assert cell.dimension != 1
     mesh = mydf.mesh
     charge = -cell.atom_charges()
     Gv = cell.get_Gv(mesh)
@@ -66,12 +80,23 @@ def get_nuc(mydf, kpts=None):
 
 def get_pp(mydf, kpts=None):
     '''Get the periodic pseudopotential nuc-el AO matrix, with G=0 removed.
+
+    The output of this function depends on the input `kpts`. Generally, the
+    output is a (Nk, Nao, Nao) array, where Nk is the number of k-points in the
+    provided `kpts`. If `kpts` is a (3,) array, corresponding to a single
+    k-point, the output will be a (Nao, Nao) matrix. If the optional input
+    `kpts` is not specified, this function will read the FFTDF.kpts for the
+    k-mesh and return a (Nk, Nao, Nao) array.
+
+    Note: This API has changed since PySCF-2.10. In PySCF 2.9 (or older), if
+    `kpts` is not specified, this function may return a (Nao, Nao) matrix for
+    the gamma point and a (Nk, Nao, Nao) array for other k-points.
     '''
     from pyscf.pbc.dft import gen_grid
     kpts, is_single_kpt = _check_kpts(mydf, kpts)
     cell = mydf.cell
     assert cell.low_dim_ft_type != 'inf_vacuum'
-    assert cell.dimension > 1
+    assert cell.dimension != 1
     mesh = mydf.mesh
     Gv = cell.get_Gv(mesh)
     SI = cell.get_SI(mesh=mesh)
@@ -113,7 +138,7 @@ def get_pp(mydf, kpts=None):
             pp = cell._pseudo[symb]
             p1 = 0
             for l, proj in enumerate(pp[5:]):
-                rl, nl, hl = proj
+                rl, nl, hl = proj[:3]
                 if nl > 0:
                     fakemol._bas[0,gto.ANG_OF] = l
                     fakemol._env[ptr+3] = .5*rl**2
@@ -136,7 +161,7 @@ def get_pp(mydf, kpts=None):
                 SPG_lm_aoGs = lib.zdot(SPG_lmi, aokG)
                 p1 = 0
                 for l, proj in enumerate(pp[5:]):
-                    rl, nl, hl = proj
+                    rl, nl, hl = proj[:3]
                     if nl > 0:
                         p0, p1 = p1, p1+nl*(l*2+1)
                         hl = numpy.asarray(hl)
@@ -161,32 +186,27 @@ class FFTDF(lib.StreamObject):
     '''Density expansion on plane waves
     '''
 
+    # to mimic molecular DF object
+    blockdim = getattr(__config__, 'pbc_df_df_DF_blockdim', 240)
+
     _keys = {
-        'cell', 'kpts', 'grids', 'mesh', 'blockdim', 'exxdiv',
+        'cell', 'kpts', 'mesh', 'blockdim', 'exxdiv',
     }
 
-    def __init__(self, cell, kpts=numpy.zeros((1,3))):
-        from pyscf.pbc.dft import gen_grid
+    def __init__(self, cell, kpts=None):
         from pyscf.pbc.dft import numint
         self.cell = cell
         self.stdout = cell.stdout
         self.verbose = cell.verbose
         self.max_memory = cell.max_memory
 
-        if isinstance(kpts, KPoints):
-            kpts = kpts.kpts
         self.kpts = kpts
-
-        self.grids = gen_grid.UniformGrids(cell)
         # FFT from real space density distributes error to every rho_ij(G) than
         # the one with largest Gaussian exponent. Therefore the error for FFT-ERI
         # ~ Nele * error[rho(Ecut)] while in AFT the error is ~ error[rho(Ecut)]^2.
         # This is a first order error, same to the error estimation for nuclear
         # attraction.
-        self.mesh = cell.mesh
-
-        # to mimic molecular DF object
-        self.blockdim = getattr(__config__, 'pbc_df_df_DF_blockdim', 240)
+        self._mesh = None
 
         # The following attributes are not input options.
         # self.exxdiv has no effects. It was set in the get_k_kpts function to
@@ -197,24 +217,61 @@ class FFTDF(lib.StreamObject):
 
     @property
     def mesh(self):
-        return self.grids.mesh
+        # Follow the current cell unless a DF mesh was explicitly assigned.
+        if self._mesh is None:
+            return self.cell.mesh
+        return self._mesh
     @mesh.setter
-    def mesh(self, mesh):
-        self.grids.mesh = mesh
+    def mesh(self, value):
+        self._mesh = value
+
+    @property
+    def grids(self):
+        from pyscf.pbc.dft import gen_grid
+        grids = gen_grid.UniformGrids(self.cell)
+        grids.mesh = self.mesh
+        return grids
+    @grids.setter
+    def grids(self, val):
+        self.mesh = val.mesh
+
+    @property
+    def kpts(self):
+        if isinstance(self._kpts, KPoints):
+            return self._kpts.kpts
+        else:
+            return self.cell.get_abs_kpts(self._kpts)
+
+    @kpts.setter
+    def kpts(self, val):
+        if val is None:
+            self._kpts = numpy.zeros((1, 3))
+        elif isinstance(val, KPoints):
+            self._kpts = val
+        else:
+            self._kpts = self.cell.get_scaled_kpts(val)
 
     def reset(self, cell=None):
         if cell is not None:
+            if isinstance(self._kpts, KPoints):
+                self._kpts.reset(cell)
             self.cell = cell
-        self.grids.reset(cell)
         self._rsh_df = {}
+        # _ws_exx may be attached to AFTDF by weighted_coulG() in
+        # pyscf/pbc/df/aft.py
+        self.__dict__.pop('_ws_exx', None)
         return self
 
     def dump_flags(self, verbose=None):
-        logger.info(self, '\n')
-        logger.info(self, '******** %s ********', self.__class__)
-        logger.info(self, 'mesh = %s (%d PWs)', self.mesh, numpy.prod(self.mesh))
-        logger.info(self, 'len(kpts) = %d', len(self.kpts))
-        logger.debug1(self, '    kpts = %s', self.kpts)
+        log = logger.new_logger(self, verbose)
+        if log.verbose < logger.INFO:
+            return self
+        log.info('\n')
+        log.info('******** %s ********', self.__class__)
+        log.info('mesh = %s (%d PWs)', self.mesh, numpy.prod(self.mesh))
+        kpts = self.kpts
+        log.info('len(kpts) = %d', len(kpts))
+        log.debug1('    kpts = %s', kpts)
         return self
 
     def check_sanity(self):
@@ -259,11 +316,7 @@ class FFTDF(lib.StreamObject):
         if grids.non0tab is None:
             grids.build(with_non0tab=True)
 
-        if kpts is None: kpts = self.kpts
-        kpts = numpy.asarray(kpts)
-
-        if (cell.dimension < 2 or
-            (cell.dimension == 2 and cell.low_dim_ft_type == 'inf_vacuum')):
+        if cell.dimension <= 2 and cell.low_dim_ft_type == 'inf_vacuum':
             raise RuntimeError('FFTDF method does not support low-dimension '
                                'PBC system.  DF, MDF or AFTDF methods should '
                                'be used.\nSee also examples/pbc/31-low_dimensional_pbc.py')

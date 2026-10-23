@@ -22,7 +22,6 @@
 # Author: Qiming Sun <osirpt.sun@gmail.com>
 #
 
-import time
 import numpy
 import ctypes
 import scipy.linalg
@@ -69,14 +68,24 @@ def get_jk(mf_grad, mol=None, dm=None, hermi=0, with_j=True, with_k=True,
     '''
     assert (with_j or with_k)
     if not with_k:
-        return get_j (mf_grad, mol=mol, dm=dm, hermi=hermi), None
+        return get_j(mf_grad, mol=mol, dm=dm, hermi=hermi), None
+
+    if hasattr(mf_grad.base, 'only_dfj') and mf_grad.base.only_dfj:
+        if mol is None: mol = mf_grad.mol
+        if with_j:
+            vj = get_j(mf_grad, mol=mol, dm=dm, hermi=hermi)
+            vkaux = numpy.zeros_like(vj.aux)
+        else:
+            vj = None
+            vkaux = numpy.zeros((1, 1, mol.natm, 3))
+        vk = rhf_grad.get_k(mol, dm)
+        vk = lib.tag_array(vk, aux=vkaux)
+        return vj, vk
+
     t0 = (logger.process_clock (), logger.perf_counter ())
     if mol is None: mol = mf_grad.mol
     if dm is None: dm = mf_grad.base.make_rdm1()
-    with_df = mf_grad.base.with_df
-    auxmol = with_df.auxmol
-    if auxmol is None:
-        auxmol = df.addons.make_auxmol(with_df.mol, with_df.auxbasis)
+    auxmol = _make_auxmol(mf_grad.base.with_df, mol)
     nbas, nao, naux = mol.nbas, mol.nao, auxmol.nao
     aux_loc = auxmol.ao_loc
 
@@ -94,7 +103,10 @@ def get_jk(mf_grad, mol=None, dm=None, hermi=0, with_j=True, with_k=True,
     dm_tril[:,idx] *= .5
 
     # For k
-    orbol, orbor = _decompose_rdm1 (mf_grad, mol, dm)
+    if hermi == 1:
+        orbol, orbor = _decompose_rdm1 (mf_grad, mol, dm)
+    else:
+        orbol, orbor = _decompose_rdm1_svd (mf_grad, mol, dm)
     nocc = [o.shape[-1] for o in orbor]
 
     # Coulomb: (P|Q) D_Q = (P|uv) D_uv for D_Q ("rhoj")
@@ -233,10 +245,7 @@ def get_j(mf_grad, mol=None, dm=None, hermi=0):
     if dm is None: dm = mf_grad.base.make_rdm1()
     t0 = (logger.process_clock (), logger.perf_counter ())
 
-    with_df = mf_grad.base.with_df
-    auxmol = with_df.auxmol
-    if auxmol is None:
-        auxmol = df.addons.make_auxmol(with_df.mol, with_df.auxbasis)
+    auxmol = _make_auxmol(mf_grad.base.with_df, mol)
     nbas = mol.nbas
 
     get_int3c_s2 = _int3c_wrapper(mol, auxmol, 'int3c2e', 's2ij')
@@ -271,16 +280,22 @@ def get_j(mf_grad, mol=None, dm=None, hermi=0):
 
     # (P|Q)
     int2c = auxmol.intor('int2c2e', aosym='s1')
-    rhoj = scipy.linalg.solve(int2c, rhoj.T, assume_a='pos').T
+    rhoj = _gen_metric_solver(int2c)(rhoj.T).T
     int2c = None
 
     # (d/dX i,j|P)
     vj = numpy.zeros((nset,3,nao,nao))
+    _vj = vj.view()
+    _vj.shape = (nset, 3, -1)
     for shl0, shl1, nL in ao_ranges:
         int3c = get_int3c_ip1((0, nbas, 0, nbas, shl0, shl1))  # (i,j|P)
         p0, p1 = aux_loc[shl0], aux_loc[shl1]
-        vj += lib.einsum('xijp,np->nxij', int3c, rhoj[:,p0:p1])
+        for x in range(3):
+            _int3c = int3c[x].T
+            _int3c.shape = (p1 - p0, -1)
+            _vj[:, x] += lib.dot(rhoj[:, p0:p1], _int3c)
         int3c = None
+    vj = numpy.ascontiguousarray(vj.transpose(0, 1, 3, 2))
 
     if mf_grad.auxbasis_response:
         # (i,j|d/dX P)
@@ -288,13 +303,16 @@ def get_j(mf_grad, mol=None, dm=None, hermi=0):
         for shl0, shl1, nL in ao_ranges:
             int3c = get_int3c_ip2((0, nbas, 0, nbas, shl0, shl1))  # (i,j|P)
             p0, p1 = aux_loc[shl0], aux_loc[shl1]
-            vjaux[:,:,:,p0:p1] = lib.einsum('xwp,mw,np->mnxp',
-                                          int3c, dm_tril, rhoj[:,p0:p1])
+            tmp_mxp = lib.einsum("xwp,mw->mxp", int3c, dm_tril)
+            vjaux[:,:,:,p0:p1] = lib.einsum("np,mxp->mnxp", rhoj[:,p0:p1], tmp_mxp)
             int3c = None
 
         # (d/dX P|Q)
         int2c_e1 = auxmol.intor('int2c2e_ip1', aosym='s1')
-        vjaux -= lib.einsum('xpq,mp,nq->mnxp', int2c_e1, rhoj, rhoj)
+        shape = int2c_e1.shape
+        b = numpy.reshape(int2c_e1, (-1, shape[-1]))
+        tmp_nxp = numpy.reshape(lib.dot(rhoj, b.T), (-1, shape[0], shape[1]))
+        vjaux -= lib.einsum("mp,nxp->mnxp", rhoj, tmp_nxp)
 
         auxslices = auxmol.aoslice_by_atom()
         vjaux = numpy.array ([-vjaux[:,:,:,p0:p1].sum(axis=3) for p0, p1 in auxslices[:,2:]])
@@ -302,8 +320,28 @@ def get_j(mf_grad, mol=None, dm=None, hermi=0):
         vj = lib.tag_array(-vj.reshape(out_shape), aux=numpy.array(vjaux))
     else:
         vj = -vj.reshape(out_shape)
-    logger.timer (mf_grad, 'df vj', *t0)
+
+    logger.timer(mf_grad, 'df vj', *t0)
     return vj
+
+def _make_auxmol(with_df, mol):
+    '''The auxiliary basis of with_df, carrying the range-separation
+    parameter of mol.
+
+    The 3-center integrals are evaluated in the environment of mol and auxmol
+    concatenated (see _int3c_wrapper), which takes omega from mol, while the
+    2-center metric (P|Q) is evaluated with auxmol alone.  Were omega set on
+    mol only (as inside a mol.with_range_coulomb context), the two factors of
+    the fitted operator would correspond to different interactions.
+    '''
+    auxmol = with_df.auxmol
+    if auxmol is None:
+        # make_auxmol copies mol._env[:PTR_ENV_START], omega included
+        auxmol = df.addons.make_auxmol(with_df.mol, with_df.auxbasis)
+    if auxmol.omega != mol.omega:
+        auxmol = auxmol.copy()
+        auxmol.omega = mol.omega
+    return auxmol
 
 def _int3c_wrapper(mol, auxmol, intor, aosym):
     ''' Convenience wrapper for getints '''
@@ -319,6 +357,33 @@ def _int3c_wrapper(mol, auxmol, intor, aosym):
         return getints(intor, pmol._atm, pmol._bas, pmol._env, shls_slice,
                        aosym=aosym, cintopt=opt)
     return get_int3c
+
+def _decompose_rdm1_svd (mf_grad, mol, dm):
+    '''Decompose dms as U.Vh using SVD
+
+    Args:
+        mf_grad : instance of :class:`Gradients`
+        mol : instance of :class:`gto.Mole`
+        dm : ndarray or sequence of ndarrays of shape (nao,nao)
+            Density matrices
+
+    Returns:
+        orbol : list of ndarrays of shape (nao,*)
+            Contains non-null eigenvectors of density matrix
+        orbor : list of ndarrays of shape (nao,*)
+            Contains orbol * eigenvalues (occupancies)
+    '''
+    nao = mol.nao
+    dms = numpy.asarray(dm).reshape (-1,nao,nao)
+    orbor = []
+    orbol = []
+    for dm in dms:
+        u, s, vh = numpy.linalg.svd (dm)
+        idx = numpy.abs (s)>1e-8
+        orbol.append (numpy.asfortranarray (u[:,idx]))
+        orbor.append (numpy.asfortranarray (lib.einsum('i,ip->pi', s[idx], vh[idx])))
+
+    return orbol, orbor
 
 def _decompose_rdm1 (mf_grad, mol, dm):
     '''Decompose dms as U.Vh, where
@@ -383,7 +448,7 @@ def _gen_metric_solver(int2c, decompose_j2c='CD', lindep=LINEAR_DEP_THRESHOLD):
     mask = w > lindep
     v1 = v[:,mask]
     j2c = lib.dot(v1/w[mask], v1.conj().T)
-    def j2c_solver(v): # noqa: F811
+    def j2c_solver(v):
         if v.ndim == 2:
             return lib.dot(j2c, v)
         else:

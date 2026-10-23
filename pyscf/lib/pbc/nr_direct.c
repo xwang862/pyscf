@@ -568,6 +568,7 @@ static void approx_bvk_rcond0(float *rcond, int ish0, int ish1, BVKEnvs *envs_bv
                 for (jseg = jseg0; jseg < jseg1; jseg++) {
                         jsh0 = seg2sh[jseg];
                         jsh1 = seg2sh[jseg+1];
+                        if (jsh0 >= jsh1) continue;
                         aj = env[bas(PTR_EXP, jsh0) + bas(NPRIM_OF, jsh0) - 1];
                         aij = ai + aj;
                         ci = ai / aij;
@@ -953,8 +954,6 @@ void PBCVHF_direct_drv_nodddd(
                         k = kl / nlsh + ksh0;
                         l = kl % nlsh + lsh0;
                 }
-                k = kl / nlsh + ksh0;
-                l = kl % nlsh + lsh0;
                 qklkl_max = _max_qindex(qindex, Nbas,
                                         seg2sh[seg_loc[k]], seg2sh[seg_loc[k+1]],
                                         seg2sh[seg_loc[l]], seg2sh[seg_loc[l+1]]);
@@ -1174,7 +1173,7 @@ void PBCVHFnr_sindex(int16_t *sindex, int *atm, int natm,
 {
         float fac_guess = .5f - logf(omega2)/4;
         int ijb, ib, jb, i0, j0, i1, j1, i, j, li, lj;
-        float dx, dy, dz, ai, aj, ci, cj, aij, a1, fi, fj, rr, rij, dri, drj;
+        float dx, dy, dz, ai, aj, ci, cj, aij, a1, rr;
         float log_fac, theta, theta_r, r_guess, v;
 #pragma omp for schedule(dynamic, 1)
         for (ijb = 0; ijb < ngroups*(ngroups+1)/2; ijb++) {
@@ -1193,8 +1192,6 @@ void PBCVHFnr_sindex(int16_t *sindex, int *atm, int natm,
                 cj = cs[jb];
 
                 aij = ai + aj;
-                fi = ai / aij;
-                fj = aj / aij;
                 a1 = ai * aj / aij;
                 theta = omega2/(omega2+aij);
                 r_guess = sqrtf(-logf(1e-9f) / (aij * theta));
@@ -1209,10 +1206,7 @@ void PBCVHFnr_sindex(int16_t *sindex, int *atm, int natm,
                         dy = ry[i] - ry[j];
                         dz = rz[i] - rz[j];
                         rr = dx * dx + dy * dy + dz * dz;
-                        rij = sqrtf(rr);
-                        dri = fj * rij + theta_r;
-                        drj = fi * rij + theta_r;
-                        v = li*logf(dri) + lj*logf(drj) - a1*rr + log_fac;
+                        v = (li+lj)*logf(MAX(theta_r, 1.f)) - a1*rr + log_fac;
                         sindex[i*Nbas+j] = v * LOG_ADJUST;
                 } }
                 if (ib > jb) {

@@ -15,12 +15,12 @@
 #
 
 import unittest
-import tempfile
 import numpy as np
 from pyscf import lib
 from pyscf.pbc import gto as pgto
 from pyscf.pbc import scf as pscf
 from pyscf.pbc.scf import kuhf
+from pyscf.pbc.tools.pbc import super_cell
 
 def setUpModule():
     global cell, mf, kmf, kpts
@@ -48,12 +48,26 @@ def tearDownModule():
 
 class KnownValues(unittest.TestCase):
     def test_kuhf_kernel(self):
-        self.assertAlmostEqual(kmf.e_tot, -4.586720023431593, 8)
+        # If G=0 term is evaluated using _ewald_exxdiv_for_G0, e_tot=-4.59
+        #self.assertAlmostEqual(kmf.e_tot, -4.594854184081046, 8)
+        self.assertAlmostEqual(kmf.e_tot, -4.63255627933303, 8)
+        e4 = super_cell(cell, [2,2,1]).KUHF().run().e_tot
+        self.assertAlmostEqual(kmf.e_tot - e4/4, 0, 8)
         kmf.analyze()
 
     def test_uhf_kernel(self):
         self.assertAlmostEqual(mf.e_tot, -3.3634535013441855, 8)
         mf.analyze()
+
+    def test_kuhf_uhf_limit (self):
+        cell0 = pgto.Cell()
+        cell0.spin = 2
+        cell0.build(atom="H 0 0 0; H 0 0 1", basis="6-31g", a=np.diag([3.0, 3.0, 5.0]), output='/dev/null', verbose=0)
+        mf0 = pscf.UHF(cell0).density_fit().run ()
+        kpts0 = cell0.make_kpts((1,1,1))
+        kmf0 = pscf.KUHF(cell0, kpts=kpts0).density_fit().run ()
+        self.assertAlmostEqual (mf0.e_tot, kmf0.e_tot, 6)
+        self.assertAlmostEqual (mf0.scf_summary['gap'], kmf0.scf_summary['gap'], 6)
 
     def test_kuhf_vs_uhf(self):
         np.random.seed(1)
@@ -77,9 +91,9 @@ class KnownValues(unittest.TestCase):
         np.random.seed(1)
         k = np.random.random(3)
         mf = pscf.KUHF(cell, [k], exxdiv='vcut_sph')
-        mf.chkfile = tempfile.NamedTemporaryFile().name
         mf.max_cycle = 1
         mf.diis = None
+        mf.chkfile = lib.NamedTemporaryFile().name
         e1 = mf.kernel()
         self.assertAlmostEqual(e1, -3.4070772194665477, 7)
 
@@ -102,17 +116,18 @@ class KnownValues(unittest.TestCase):
 
     def test_spin_square(self):
         ss = kmf.spin_square()[0]
-        self.assertAlmostEqual(ss, 2.077383024287556, 4)
+        # If G=0 term is evaluated using _ewald_exxdiv_for_G0, ss=2.0836
+        self.assertAlmostEqual(ss, 2.088998921595176, 4)
 
     def test_bands(self):
         np.random.seed(1)
         kpts_bands = np.random.random((1,3))
 
         e = mf.get_bands(kpts_bands)[0]
-        self.assertAlmostEqual(lib.fp(e), 0.9038555558945438, 6)
+        self.assertAlmostEqual(lib.fp(e), 0.8857024, 5)
 
         e = kmf.get_bands(kpts_bands)[0]
-        self.assertAlmostEqual(lib.fp(e), -0.3020614, 5)
+        self.assertAlmostEqual(lib.fp(e), -0.293993954, 5)
 
     def test_small_system(self):
         mol = pgto.Cell(
@@ -136,6 +151,12 @@ class KnownValues(unittest.TestCase):
         mf = pscf.KUHF(mol,kpts=[[0., 0., 0.]]).run()
         self.assertAlmostEqual(mf.e_tot, -2.2719576422665635, 8)
 
+    def test_invalid_occupancy(self):
+        cell = pgto.M(a=np.eye(3)*5.,
+                      atom='He 0 0 1',
+                      basis=[[0, [.6, 1]]], spin=2)
+        mf = cell.KUHF(kpts=cell.make_kpts([2,1,1]))
+        self.assertRaises(RuntimeError, mf.run)
 
 if __name__ == '__main__':
     print("Tests for PBC UHF and PBC KUHF")

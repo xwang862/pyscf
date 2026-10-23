@@ -13,6 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# This file is adapted from `dft/test/test_libxc.py` of the PySCF core module
+# commit 25eaa9572977b903de24d5c11ad345cecd744728
+
 import os
 import ctypes
 import unittest
@@ -31,19 +34,29 @@ def setUpModule():
     mol.build()
     #dm = scf.RHF(mol).run(conv_tol=1e-14).make_rdm1()
     dm = numpy.load(os.path.realpath(os.path.join(__file__, '..', 'dm_h4.npy')))
-    mf = dft.RKS(mol)
-    mf.grids.atom_grid = {"H": (50, 110)}
-    mf.prune = None
-    mf.grids.build(with_non0tab=False)
-    nao = mol.nao_nr()
-    ao = dft.numint.eval_ao(mol, mf.grids.coords, deriv=1)
-    rho = dft.numint.eval_rho(mol, ao, dm, xctype='GGA')
+    with lib.temporary_env(dft.radi, ATOM_SPECIFIC_TREUTLER_GRIDS=False):
+        mf = dft.RKS(mol)
+        mf.grids.atom_grid = {"H": (50, 110)}
+        mf.prune = None
+        mf.grids.build(with_non0tab=False)
+        nao = mol.nao_nr()
+        ao = dft.numint.eval_ao(mol, mf.grids.coords, deriv=1)
+        rho = dft.numint.eval_rho(mol, ao, dm, xctype='GGA')
 
 def tearDownModule():
     global mol, mf, ao, rho
     del mol, mf, ao, rho
 
 class KnownValues(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.original_grids = dft.radi.ATOM_SPECIFIC_TREUTLER_GRIDS
+        dft.radi.ATOM_SPECIFIC_TREUTLER_GRIDS = False
+
+    @classmethod
+    def tearDownClass(cls):
+        dft.radi.ATOM_SPECIFIC_TREUTLER_GRIDS = cls.original_grids
+
     def test_parse_xc(self):
         hyb, fn_facs = dft.libxc.parse_xc('.5*HF+.5*B3LYP5,VWN*.5')
         self.assertAlmostEqual(hyb[0], .6, 12)
@@ -63,18 +76,22 @@ class KnownValues(unittest.TestCase):
         self.assertAlmostEqual(hyb, .15, 12)
 
         hyb, fn_facs = dft.libxc.parse_xc('0.6*CAM_B3LYP+0.4*B3P86V5')
-        self.assertTrue(numpy.allclose(hyb, (.08, 0, 0)))
+        self.assertTrue(numpy.allclose(hyb, (.08, .08, 0)))
         self.assertTrue(numpy.allclose(fn_facs,
                                        ((433, 0.6), (1, 0.032), (106, 0.288), (132, 0.324), (7, 0.076))))
         rsh = dft.libxc.rsh_coeff('0.6*CAM_B3LYP+0.4*B3P86V5')
-        self.assertTrue(numpy.allclose(rsh, (0.33, 0.39, -0.196)))
+        rsh1 = dft.libxc.rsh_coeff('CAM_B3LYP')
+        hyb = dft.libxc.hybrid_coeff('B3P86V5')
+        self.assertTrue(numpy.allclose(rsh, (0.33, 0.6*rsh1[1]+.4*hyb, 0.6*rsh1[2])))
 
         hyb, fn_facs = dft.libxc.parse_xc('0.4*B3P86V5+0.6*CAM_B3LYP')
-        self.assertTrue(numpy.allclose(hyb, (.08, 0, 0)))
+        self.assertTrue(numpy.allclose(hyb, (.08, .08, 0)))
         self.assertTrue(numpy.allclose(fn_facs,
                                        ((1, 0.032), (106, 0.288), (132, 0.324), (7, 0.076), (433, 0.6))))
         rsh = dft.libxc.rsh_coeff('0.4*B3P86V5+0.6*CAM_B3LYP')
-        self.assertTrue(numpy.allclose(rsh, (0.33, 0.39, -0.196)))
+        rsh1 = dft.libxc.rsh_coeff('CAM_B3LYP')
+        hyb = dft.libxc.hybrid_coeff('B3P86V5')
+        self.assertTrue(numpy.allclose(rsh, (0.33, 0.6*rsh1[1]+.4*hyb, 0.6*rsh1[2])))
 
         hyb, fn_facs = dft.libxc.parse_xc('0.5*SR-HF(0.3) + .8*HF + .22*LR_HF')
         self.assertEqual(hyb, (1.3, 1.02, 0.3))
@@ -93,8 +110,17 @@ class KnownValues(unittest.TestCase):
         self.assertEqual(hyb, (1.3, 1.02, 0.3))
         self.assertEqual(fn_facs, ((106, 0.5), (132, 0.5)))
 
+        rsh = dft.libxc.rsh_coeff('0.5*HSE06+.001*HF')
+        self.assertTrue(numpy.allclose(rsh, (0.11, .001, 0.125)))
+
+        rsh = dft.libxc.rsh_coeff('0.5*wb97+0.001*HF')
+        self.assertTrue(numpy.allclose(rsh, (0.4, 0.501, -.5)))
+
         self.assertRaises(ValueError, dft.libxc.parse_xc, 'SR_HF(0.3) + LR_HF(.5)')
         self.assertRaises(ValueError, dft.libxc.parse_xc, 'LR-HF(0.3) + SR-HF(.5)')
+
+        hyb = dft.libxc.hybrid_coeff('0.5*B3LYP+0.2*HF')
+        self.assertAlmostEqual(hyb, .3, 12)
 
         hyb = dft.libxc.hybrid_coeff('M05')
         self.assertAlmostEqual(hyb, 0.28, 9)
@@ -109,7 +135,7 @@ class KnownValues(unittest.TestCase):
         #self.assertEqual(fn_facs, [(50, 1)])
 
         hyb, fn_facs = dft.libxc.parse_xc("9.999e-5*HF,")
-        self.assertEqual(hyb, (9.999e-5, 0, 0))
+        self.assertEqual(hyb, (9.999e-5, 9.999e-5, 0))
 
         ref = ((1, 1), (7, 1))
         self.assertEqual(dft.libxc.parse_xc_name('LDA,VWN'), (1,7))
@@ -156,18 +182,17 @@ class KnownValues(unittest.TestCase):
         self.assertTrue (dft.libxc.is_nlc(('402', 'b97mv')))
 
     def test_libxc_cam_beta(self):
-        rsh_tmp = (ctypes.c_double*3)()
-        dft.libxc._itrf.LIBXC_rsh_coeff(1, rsh_tmp)
+        rsh_tmp = dft.libxc.rsh_coeff(1)
         beta = rsh_tmp[2]
         self.assertEqual(beta, 0)
 
-        dft.libxc._itrf.LIBXC_rsh_coeff(433, rsh_tmp)
-        dft.libxc._itrf.LIBXC_rsh_coeff(1, rsh_tmp)
+        rsh_tmp = dft.libxc.rsh_coeff(433)
+        rsh_tmp = dft.libxc.rsh_coeff(1)
         beta = rsh_tmp[2]
         self.assertEqual(beta, 0)
 
-        dft.libxc._itrf.LIBXC_is_hybrid(1)
-        dft.libxc._itrf.LIBXC_rsh_coeff(1, rsh_tmp)
+        dft.libxc.is_hybrid_xc(1)
+        rsh_tmp = dft.libxc.rsh_coeff(1)
         beta = rsh_tmp[2]
         self.assertEqual(beta, 0)
 
@@ -208,7 +233,27 @@ class KnownValues(unittest.TestCase):
     #    rho_b = numpy.array([[4.53272893e-06, 4.18968775e-06,-2.83034672e-06, 2.61832978e-06, 5.63360737e-06, 8.97541777e-07]]).T
     #    e, v = dft.libxc.eval_xc('tpss,', (rho_a, rho_b), spin=1, deriv=1)[:2]
 
-    def test_define_xc(self):
+    #TDOO: enable this test when https://gitlab.com/libxc/libxc/-/issues/561 is solved
+    @unittest.skip('hse03 and hse06 fxc have large numerical errors in Libxc')
+    def test_hse06(self):
+        ni = dft.numint.NumInt()
+        rho = numpy.array([.235, 1.5e-9, 2e-9, 1e-9])[:,None]
+        xc = 'hse06'
+        fxc1 = ni.eval_xc_eff(xc, rho, deriv=2, xctype='GGA')[2]
+        rho = numpy.array([rho*.5]*2)
+        fxc2 = ni.eval_xc_eff(xc, rho, deriv=2, xctype='GGA')[2]
+        fxc2 = (fxc2[0,:,0] + fxc2[0,:,1])/2
+        self.assertAlmostEqual(abs(fxc2 - fxc1).max(), 0, 12)
+
+        rho = numpy.array([.235, 0, 0, 0])[:,None]
+        xc = 'hse06'
+        fxc1 = ni.eval_xc_eff(xc, rho, deriv=2, xctype='GGA')[2]
+        rho = numpy.array([rho*.5]*2)
+        fxc2 = ni.eval_xc_eff(xc, rho, deriv=2, xctype='GGA')[2]
+        fxc2 = (fxc2[0,:,0] + fxc2[0,:,1])/2
+        self.assertAlmostEqual(abs(fxc2 - fxc1).max(), 0, 12)
+
+    def test_define_xc_gga(self):
         def eval_xc(xc_code, rho, spin=0, relativity=0, deriv=1, omega=None, verbose=None):
             # A fictitious XC functional to demonstrate the usage
             rho0, dx, dy, dz = rho[:4]
@@ -232,10 +277,18 @@ class KnownValues(unittest.TestCase):
         self.assertAlmostEqual(lib.fp(vxc[0]), 0.0065565189784811129, 9)
         self.assertAlmostEqual(lib.fp(vxc[1]), 0.0049270110162854116, 9)
 
+        with self.assertRaises(AssertionError):
+            ni.eval_xc_eff(None, rho, deriv=2)
+
+        # Ensure the xc_code in the input has no impact to the result.
         n, exc, vxc = ni.nr_rks(mol, mf.grids, 'm06x', dm)
         self.assertAlmostEqual(n, 4, 5)
         self.assertAlmostEqual(lib.fp(exc), 0.01197588220700074, 6)
         self.assertAlmostEqual(lib.fp(vxc), -0.043974912389152986, 6)
+
+        ni = dft.libxc.define_xc(ni, eval_xc, 'MGGA')
+        with self.assertRaises(AssertionError):
+            ni.eval_xc_eff(None, rho, deriv=1)
 
         mf = mf.define_xc_('0.5*B3LYP+0.5*B3LYP')
         exc0, vxc0 = mf._numint.eval_xc(None, rho, 0, deriv=1)[:2]
@@ -252,6 +305,45 @@ class KnownValues(unittest.TestCase):
         self.assertAlmostEqual(abs(exc0-exc1).max(), 0, 9)
         self.assertAlmostEqual(abs(vxc0[0]-vxc1[0]).max(), 0, 9)
         self.assertAlmostEqual(abs(vxc0[1]-vxc1[1]).max(), 0, 9)
+
+        ni = dft.numint.NumInt()
+        ref = ni.eval_xc1('pbe', rho, deriv=2)
+        ni = dft.libxc.define_xc_(ni, 'pbe*1.0', xctype='GGA')
+        dat = ni.eval_xc1('abc', rho, deriv=2)
+        self.assertAlmostEqual(abs(ref - dat).max(), 0, 9)
+
+    def test_define_xc_mgga(self):
+        def eval_mgga_xc(xc_code, rho, spin=0, relativity=0, deriv=1, omega=None, verbose=None):
+            # A fictitious XC functional to demonstrate the usage
+            rho0, dx, dy, dz, tau = rho
+            gamma = (dx**2 + dy**2 + dz**2)
+            exc = .01 * rho0**2 + .02 * (gamma+.001)**.5 + .01 * tau**2
+            vrho = .01 * 2 * rho0
+            vgamma = .02 * .5 * (gamma+.001)**(-.5)
+            vtau = .02 * tau
+            vxc = (vrho, vgamma, vtau)
+            zeros = numpy.zeros_like(rho0)
+            fxc = (zeros, zeros, zeros)
+            kxc = None  # 3rd order functional derivative
+            return exc, vxc, fxc, kxc
+
+        mf = dft.RKS(mol)
+        ni = dft.libxc.define_xc(mf._numint, eval_mgga_xc, 'MGGA')
+        numpy.random.seed(1)
+        rho = numpy.random.random((5,10))
+        exc, vxc = ni.eval_xc(None, rho, 0, deriv=1)[:2]
+        self.assertAlmostEqual(lib.fp(exc), 0.016353861820705, 9)
+        self.assertAlmostEqual(lib.fp(vxc[0]), 0.0065565189784811129, 9)
+        self.assertAlmostEqual(lib.fp(vxc[1]), 0.0049270110162854116, 9)
+
+        with self.assertRaises(AssertionError):
+            ni.eval_xc_eff(None, rho, deriv=2)
+
+        ni = dft.numint.NumInt()
+        ref = ni.eval_xc1('r2scan', rho, deriv=2)
+        ni = dft.libxc.define_xc_(ni, 'r2scan*1.0', xctype='MGGA')
+        dat = ni.eval_xc1('abc', rho, deriv=2)
+        self.assertAlmostEqual(abs(ref - dat).max(), 0, 9)
 
     def test_m05x(self):
         rho =(numpy.array([1., 1., 0., 0., 0., 0.165 ]).reshape(-1,1),
@@ -287,6 +379,15 @@ class KnownValues(unittest.TestCase):
         self.assertAlmostEqual(float(vxc[0][0]), -0.6761177630311709, 9)
         self.assertAlmostEqual(float(vxc[1][0]), -0.002949151742087167, 9)
 
+    def test_rsh_coeff_combined_cam_functionals(self):
+        # Combining two distinct HYB_CAM functionals that share the same
+        # omega must not raise. rsh_coeff() checks (for the 2nd and later
+        # RSH components) that the functional is actually CAM-type via
+        # LIBXC_is_cam_rsh, which previously crashed with a ctypes
+        # TypeError due to a wrong argtypes declaration.
+        rsh = dft.libxc.rsh_coeff('0.5*CAM_B3LYP + 0.5*CAM_O3LYP')
+        self.assertAlmostEqual(rsh[0], 0.33, 12)
+
     def test_ityh(self):
         rho = numpy.array([1., 1., 0.1, 0.1]).reshape(-1,1)
         exc, vxc, fxc, kxc = dft.libxc.eval_xc('ityh,', rho, 0, deriv=1)
@@ -294,6 +395,14 @@ class KnownValues(unittest.TestCase):
         self.assertAlmostEqual(float(vxc[0][0]), -0.8712041561251518, 7)
         self.assertAlmostEqual(float(vxc[1][0]), -0.003911167644579979, 7)
         self.assertEqual(dft.libxc.rsh_coeff('ityh,'), (0.2, 0.0, 0.0))
+
+    def test_lcwpbe(self):
+        rho = numpy.array([1., 1., 0.1, 0.1]).reshape(-1,1)
+        exc, vxc, fxc, kxc = dft.libxc.eval_xc('LC_wPBE', rho, 0, deriv=1)
+        exc1, vxc1, fxc1, kxc1 = dft.libxc.eval_xc('RSH(0.4,1.0,-1.0)+wpbeh,pbe', rho, 0, deriv=1)
+        self.assertAlmostEqual(float(exc[0]), float(exc1[0]), 7)
+        self.assertAlmostEqual(float(vxc[0][0]), float(vxc1[0][0]), 7)
+        self.assertAlmostEqual(float(vxc[1][0]), float(vxc1[1][0]), 7)
 
     def test_deriv_order(self):
         self.assertTrue(dft.libxc.test_deriv_order('lda', 3, raise_error=False))
@@ -358,6 +467,110 @@ class KnownValues(unittest.TestCase):
         self.assertEqual(parse_dft('b3lyp-d3zerom'), ('b3lyp', '', 'd3zerom'))
         self.assertEqual(parse_dft('wb97x-d3bj'), ('wb97x-v', False, 'd3bj'))
         self.assertEqual(parse_dft('wb97x-d3zero2b'), ('wb97x', '', 'd3zero2b'))
+        self.assertEqual(parse_dft('wb97x-3c'), ('wb97x-v', False, 'd4:wb97x-3c'))
+
+    def test_set_param(self):
+        XC_ID_B97_2 = 410
+
+        B97_2_ref = dft.libxc.eval_xc('B97-2', rho, 0, deriv=2)[:3]
+
+        param_b97_1 = numpy.array([0.789518, 0.573805, 0.660975, 0.0, 0.0,
+                                   0.0820011, 2.71681, -2.87103, 0.0, 0.0,
+                                   0.955689, 0.788552, -5.47869, 0.0, 0.0,
+                                   0.21
+        ])
+
+        param_b97_3 = numpy.array([0.7334648, 0.292527, 3.338789, -10.51158, 10.60907,
+                                   0.5623649, -1.32298, 6.359191, -7.464002, 1.827082,
+                                   1.13383, -2.811967, 7.431302, -1.969342, -11.74423,
+                                   2.692880E-01
+        ])
+
+        e1, v1, f1 = dft.libxc.eval_xc('B97-1', rho, 0, deriv=2)[:3]
+
+        e3, v3, f3 = dft.libxc.eval_xc('B97-3', rho, 0, deriv=2)[:3]
+
+        dft.libxc.register_custom_functional_('myfunc1', 'B97-2',
+                                              ext_params={XC_ID_B97_2: param_b97_1})
+        self.assertAlmostEqual(dft.libxc.hybrid_coeff('myfunc1'), 0.21, 10)
+        e, v, f = dft.libxc.eval_xc('myfunc1', rho, 0, deriv=2)[:3]
+        self.assertTrue(numpy.allclose(e, e1, 1e-7))
+        self.assertTrue(numpy.allclose(v, v1, 1e-7))
+        self.assertTrue(numpy.allclose(f, f1, 1e-7))
+
+        dft.libxc.register_custom_functional_('myfunc2', 'B97-2',
+                                              ext_params={XC_ID_B97_2: param_b97_3})
+        self.assertAlmostEqual(dft.libxc.hybrid_coeff('myfunc2'), 2.692880E-01, 10)
+        e, v, f = dft.libxc.eval_xc('myfunc2', rho, 0, deriv=2)[:3]
+        self.assertTrue(numpy.allclose(e, e3, 1e-7))
+        self.assertTrue(numpy.allclose(v, v3, 1e-7))
+        self.assertTrue(numpy.allclose(f, f3, 1e-7))
+
+        dft.libxc.update_custom_functional_('myfunc1',
+                                            ext_params={XC_ID_B97_2: param_b97_3})
+        self.assertAlmostEqual(dft.libxc.hybrid_coeff('myfunc1'), 2.692880E-01, 10)
+        e, v, f = dft.libxc.eval_xc('myfunc1', rho, 0, deriv=2)[:3]
+        self.assertTrue(numpy.allclose(e, e3, 1e-7))
+        self.assertTrue(numpy.allclose(v, v3, 1e-7))
+        self.assertTrue(numpy.allclose(f, f3, 1e-7))
+
+        self.assertEqual(dft.libxc.xc_type('myfunc1'), 'GGA')
+
+        dft.libxc.unregister_custom_functional_('myfunc1')
+        dft.libxc.unregister_custom_functional_('myfunc2')
+        self.assertRaises(KeyError, dft.libxc.xc_type, 'myfunc1')
+        self.assertRaises(KeyError, dft.libxc.xc_type, 'myfunc2')
+
+        # Ensure original xc functionals after unregister_custom_functional_
+        e_ref, v_ref, f_ref = B97_2_ref
+        e, v, f = dft.libxc.eval_xc('B97-2', rho, 0, deriv=2)[:3]
+        self.assertAlmostEqual(abs(e    / e_ref    - 1).max(), 0, 14)
+        self.assertAlmostEqual(abs(v[0] / v_ref[0] - 1).max(), 0, 14)
+        self.assertAlmostEqual(abs(v[1] / v_ref[1] - 1).max(), 0, 14)
+        self.assertAlmostEqual(abs(f[0] / f_ref[0] - 1).max(), 0, 14)
+        self.assertAlmostEqual(abs(f[1] / f_ref[1] - 1).max(), 0, 14)
+        self.assertAlmostEqual(abs(f[2] / f_ref[2] - 1).max(), 0, 14)
+
+    def test_set_param_named(self):
+        XC_ID_TPSS_X = 202  # MGGA_X_TPSS
+
+        ao_mgga = dft.numint.eval_ao(mol, mf.grids.coords, deriv=2)
+        rho_mgga = dft.numint.eval_rho(mol, ao_mgga, dm, xctype='MGGA')
+
+        # Array param (matching PTPSS defaults, positional)
+        param_tpss = numpy.array([0.15, 0.88491, 0.047, 0.872, 0.16952, 2.0, 0.0])
+
+        dft.libxc.register_custom_functional_('test_arr', 'MGGA_X_TPSS',
+                                              ext_params={XC_ID_TPSS_X: param_tpss})
+        e_ref, v_ref, f_ref = dft.libxc.eval_xc('test_arr', rho_mgga, 0, deriv=2)[:3]
+
+        # Same params as named dict (lowercase keys)
+        named = {
+            '_b': 0.15, '_c': 0.88491, '_e': 0.047, '_kappa': 0.872,
+            '_mu': 0.16952, '_BLOC_a': 2.0, '_BLOC_b': 0.0,
+        }
+        dft.libxc.register_custom_functional_('test_dict', 'MGGA_X_TPSS',
+                                              ext_params={XC_ID_TPSS_X: named})
+        e_dict, v_dict, f_dict = dft.libxc.eval_xc('test_dict', rho_mgga, 0, deriv=2)[:3]
+
+        self.assertTrue(numpy.allclose(e_ref, e_dict, 1e-7))
+        self.assertTrue(numpy.allclose(v_ref[0], v_dict[0], 1e-7))
+        self.assertTrue(numpy.allclose(f_ref[0], f_dict[0], 1e-7))
+
+        # Partial dict: omit _BLOC_a and _BLOC_b (same as native defaults)
+        named_partial = {'_b': 0.15, '_c': 0.88491, '_e': 0.047,
+                         '_kappa': 0.872, '_mu': 0.16952}
+        dft.libxc.register_custom_functional_('test_partial', 'MGGA_X_TPSS',
+                                              ext_params={XC_ID_TPSS_X: named_partial})
+        e_partial, v_partial, f_partial = dft.libxc.eval_xc(
+            'test_partial', rho_mgga, 0, deriv=2)[:3]
+        self.assertTrue(numpy.allclose(e_ref, e_partial, 1e-7))
+        self.assertTrue(numpy.allclose(v_ref[0], v_partial[0], 1e-7))
+        self.assertTrue(numpy.allclose(f_ref[0], f_partial[0], 1e-7))
+
+        dft.libxc.unregister_custom_functional_('test_arr')
+        dft.libxc.unregister_custom_functional_('test_dict')
+        dft.libxc.unregister_custom_functional_('test_partial')
 
 if __name__ == "__main__":
     print("Test libxc")

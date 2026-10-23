@@ -45,14 +45,29 @@ def density_fit(mf, auxbasis=None, mesh=None, with_df=None):
             number of grids in each direction
         with_df : DF object
     '''
+    from pyscf.pbc.scf.hf import KohnShamDFT
+    from pyscf.df.addons import predefined_auxbasis
     from pyscf.pbc.df import df
+    from pyscf.pbc.scf.khf import KSCF
     if with_df is None:
-        if getattr(mf, 'kpts', None) is not None:
+        if isinstance(mf, KSCF):
             kpts = mf.kpts
         else:
             kpts = numpy.reshape(mf.kpt, (1,3))
 
-        with_df = df.DF(mf.cell, kpts)
+        cell = mf.cell
+        if auxbasis is None and isinstance(cell.basis, str):
+            if isinstance(mf, KohnShamDFT):
+                xc = mf.xc
+            else:
+                xc = 'HF'
+            if xc == 'LDA,VWN':
+                # This is likely the default xc setting of a KS instance.
+                # Postpone the auxbasis assignment to with_df.build().
+                auxbasis = None
+            else:
+                auxbasis = predefined_auxbasis(cell, cell.basis, xc)
+        with_df = df.DF(cell, kpts)
         with_df.max_memory = mf.max_memory
         with_df.stdout = mf.stdout
         with_df.verbose = mf.verbose
@@ -60,9 +75,8 @@ def density_fit(mf, auxbasis=None, mesh=None, with_df=None):
         if mesh is not None:
             with_df.mesh = mesh
 
-    mf = mf.copy()
+    mf = mf.copy().reset()
     mf.with_df = with_df
-    mf._eri = None
     return mf
 
 
@@ -280,8 +294,12 @@ def get_k_kpts(mydf, dm_kpts, hermi=1, kpts=numpy.zeros((1,3)), kpts_band=None,
             log.warn('DF integrals for band k-points were not found %s. '
                      'DF integrals will be rebuilt to include band k-points.',
                      mydf._cderi)
-        mydf.build(kpts_band=kpts_band)
+        mydf.build(j_only=False, kpts_band=kpts_band)
         t0 = log.timer_debug1('Init get_k_kpts', *t0)
+    elif mydf._j_only:
+        log.warn('DF integrals for HF exchange were not initialized. '
+                 'df.j_only cannot be used with hybrid functional. DF integrals will be rebuilt.')
+        mydf.build(j_only=False, kpts_band=kpts_band)
 
     mo_coeff = getattr(dm_kpts, 'mo_coeff', None)
     if mo_coeff is not None:
@@ -366,8 +384,8 @@ def get_k_kpts(mydf, dm_kpts, hermi=1, kpts=numpy.zeros((1,3)), kpts_band=None,
         log.debug2('get_k_kpts: build K from dm')
         dmsR = numpy.asarray(dms.real, order='C')
         dmsI = numpy.asarray(dms.imag, order='C')
-        bufR = numpy.empty((mydf.blockdim*nao**2))
-        bufI = numpy.empty((mydf.blockdim*nao**2))
+        bufR = numpy.empty(mydf.blockdim*nao**2)
+        bufI = numpy.empty(mydf.blockdim*nao**2)
         max_memory = max(2000, mydf.max_memory-lib.current_memory()[0])
         def make_kpt(ki, kj, swap_2e, inverse_idx=None):
             kpti = kpts[ki]
@@ -430,10 +448,14 @@ def get_k_kpts(mydf, dm_kpts, hermi=1, kpts=numpy.zeros((1,3)), kpts_band=None,
         log.debug2('get_k_kpts: build K from symm mo coeff')
         nmo = skmoR[0,0].shape[1]
         log.debug2('get_k_kpts: rank(dm) = %d / %d', nmo, nao)
-        skmoI_mask = numpy.asarray([[abs(skmoI[i,k]).max() > cell.precision
-                                     for k in range(nkpts)] for i in range(nset)])
-        bufR = numpy.empty((mydf.blockdim*nao**2))
-        bufI = numpy.empty((mydf.blockdim*nao**2))
+        # Taking care of the case skmoI is empty array.
+        # skmoI_mask = numpy.asarray([[abs(skmoI[i,k]).max() > cell.precision
+        #                              for k in range(nkpts)] for i in range(nset)])
+        skmoI_mask = numpy.asarray(
+            [[(skmoI[i,k].size > 0) and (numpy.abs(skmoI[i,k]).max() > cell.precision)
+            for k in range(nkpts)] for i in range(nset)])
+        bufR = numpy.empty(mydf.blockdim*nao**2)
+        bufI = numpy.empty(mydf.blockdim*nao**2)
         max_memory = max(2000, mydf.max_memory-lib.current_memory()[0])
         def make_kpt(ki, kj, swap_2e, inverse_idx=None):
             kpti = kpts[ki]
@@ -513,8 +535,8 @@ def get_k_kpts(mydf, dm_kpts, hermi=1, kpts=numpy.zeros((1,3)), kpts_band=None,
         skmoI_mask = numpy.asarray([[max(abs(skmo1I[i,k]).max(),
                                          abs(skmo2I[i,k]).max()) > cell.precision
                                      for k in range(nkpts)] for i in range(nset)])
-        bufR = numpy.empty((mydf.blockdim*nao**2))
-        bufI = numpy.empty((mydf.blockdim*nao**2))
+        bufR = numpy.empty(mydf.blockdim*nao**2)
+        bufI = numpy.empty(mydf.blockdim*nao**2)
         max_memory = max(2000, mydf.max_memory-lib.current_memory()[0])
         def make_kpt(ki, kj, swap_2e, inverse_idx=None):
             kpti = kpts[ki]
@@ -652,7 +674,9 @@ def get_k_kpts(mydf, dm_kpts, hermi=1, kpts=numpy.zeros((1,3)), kpts_band=None,
         vk_kpts = vkR + vkI * 1j
     vk_kpts *= 1./nkpts
 
-    if exxdiv == 'ewald':
+    if exxdiv == 'ewald' and cell.dimension != 0:
+        # Integrals are computed analytically in GDF and RSJK.
+        # Finite size correction for exx is not needed.
         _ewald_exxdiv_for_G0(cell, kpts, dms, vk_kpts, kpts_band)
 
     log.timer('get_k_kpts', *t0)
@@ -772,10 +796,10 @@ def get_k_kpts_kshift(mydf, dm_kpts, kshift, hermi=0, kpts=numpy.zeros((1,3)), k
         log.debug2('get_k_kpts: build K from dm')
         dmsR = numpy.asarray(dms.real, order='C')
         dmsI = numpy.asarray(dms.imag, order='C')
-        bufR = numpy.empty((mydf.blockdim*nao**2))
-        bufI = numpy.empty((mydf.blockdim*nao**2))
-        bufR1 = numpy.empty((mydf.blockdim*nao**2))
-        bufI1 = numpy.empty((mydf.blockdim*nao**2))
+        bufR = numpy.empty(mydf.blockdim*nao**2)
+        bufI = numpy.empty(mydf.blockdim*nao**2)
+        bufR1 = numpy.empty(mydf.blockdim*nao**2)
+        bufI1 = numpy.empty(mydf.blockdim*nao**2)
         max_memory = max(2000, mydf.max_memory-lib.current_memory()[0])
         def make_kpt(ki, kj, swap_2e, inverse_idx=None):
             if inverse_idx:
@@ -870,10 +894,10 @@ def get_k_kpts_kshift(mydf, dm_kpts, kshift, hermi=0, kpts=numpy.zeros((1,3)), k
         skmoI_mask = numpy.asarray([[max(abs(skmo1I[i,k]).max(),
                                          abs(skmo2I[i,k]).max()) > cell.precision
                                      for k in range(nkpts)] for i in range(nset)])
-        bufR = numpy.empty((mydf.blockdim*nao**2))
-        bufI = numpy.empty((mydf.blockdim*nao**2))
-        bufR1 = numpy.empty((mydf.blockdim*nao**2))
-        bufI1 = numpy.empty((mydf.blockdim*nao**2))
+        bufR = numpy.empty(mydf.blockdim*nao**2)
+        bufI = numpy.empty(mydf.blockdim*nao**2)
+        bufR1 = numpy.empty(mydf.blockdim*nao**2)
+        bufI1 = numpy.empty(mydf.blockdim*nao**2)
         max_memory = max(2000, mydf.max_memory-lib.current_memory()[0])
         def make_kpt(ki, kj, swap_2e, inverse_idx=None):
             if inverse_idx:
@@ -1048,7 +1072,9 @@ def get_k_kpts_kshift(mydf, dm_kpts, kshift, hermi=0, kpts=numpy.zeros((1,3)), k
         vk_kpts = vkR + vkI * 1j
     vk_kpts *= 1./nkpts
 
-    if exxdiv == 'ewald':
+    if exxdiv == 'ewald' and cell.dimension != 0:
+        # Integrals are computed analytically in GDF and RSJK.
+        # Finite size correction for exx is not needed.
         _ewald_exxdiv_for_G0(cell, kpts, dms, vk_kpts, kpts_band)
 
     log.timer('get_k_kpts', *t0)
@@ -1086,7 +1112,7 @@ def get_jk(mydf, dm, hermi=1, kpt=numpy.zeros(3),
 
     cell = mydf.cell
     dm = numpy.asarray(dm, order='C')
-    dms = _format_dms(dm, [kpt])
+    dms = _format_dms(dm, kpt.reshape(1, 3))
     nset, _, nao = dms.shape[:3]
     dms = dms.reshape(nset,nao,nao)
     j_real = gamma_point(kpt)
@@ -1141,8 +1167,8 @@ def get_jk(mydf, dm, hermi=1, kpt=numpy.zeros(3),
 
         vkR = numpy.zeros((nset,nao,nao))
         vkI = numpy.zeros((nset,nao,nao))
-        buf1R = numpy.empty((mydf.blockdim*nao**2))
-        buf1I = numpy.zeros((mydf.blockdim*nao**2))
+        buf1R = numpy.empty(mydf.blockdim*nao**2)
+        buf1I = numpy.zeros(mydf.blockdim*nao**2)
         if smoR is None:
             # K ~ 'iLj,lLk*,li->kj' + 'lLk*,iLj,li->kj'
             #:pLq = (LpqR + LpqI.reshape(-1,nao,nao)*1j).transpose(1,0,2)
@@ -1150,8 +1176,8 @@ def get_jk(mydf, dm, hermi=1, kpt=numpy.zeros(3),
             #:vk += numpy.dot(pLq.reshape(-1,nao).conj().T, tmp.reshape(-1,nao))
             log.debug2('get_jk: build K from dm')
             k_real = gamma_point(kpt) and not numpy.iscomplexobj(dms)
-            buf2R = numpy.empty((mydf.blockdim*nao**2))
-            buf2I = numpy.empty((mydf.blockdim*nao**2))
+            buf2R = numpy.empty(mydf.blockdim*nao**2)
+            buf2I = numpy.empty(mydf.blockdim*nao**2)
             if k_real:
                 def contract_k(pLqR, pLqI, sign):
                     nrow = pLqR.shape[1]
@@ -1161,7 +1187,7 @@ def get_jk(mydf, dm, hermi=1, kpt=numpy.zeros(3),
                         lib.ddot(pLqR.reshape(-1,nao).T, tmpR.reshape(-1,nao),
                                  sign, vkR[i], 1)
             else:
-                buf2I = numpy.empty((mydf.blockdim*nao**2))
+                buf2I = numpy.empty(mydf.blockdim*nao**2)
                 def contract_k(pLqR, pLqI, sign):
                     nrow = pLqR.shape[1]
                     tmpR = numpy.ndarray((nao,nrow*nao), buffer=buf2R)
@@ -1178,7 +1204,7 @@ def get_jk(mydf, dm, hermi=1, kpt=numpy.zeros(3),
             log.debug2('get_jk: rank(dm) = %d / %d', nmo, nao)
             smoI_mask = numpy.asarray([abs(moI).max() > cell.precision for moI in smoI])
             k_real = gamma_point(kpt) and not numpy.any(smoI_mask)
-            buf2R = numpy.empty((mydf.blockdim*nao*nmo))
+            buf2R = numpy.empty(mydf.blockdim*nao*nmo)
             if k_real:
                 def contract_k(pLqR, pLqI, sign):
                     nrow = pLqR.shape[1]
@@ -1189,7 +1215,7 @@ def get_jk(mydf, dm, hermi=1, kpt=numpy.zeros(3),
                                  sign, vkR[i], 1)
                     tmpR = None
             else:
-                buf2I = numpy.empty((mydf.blockdim*nao*nmo))
+                buf2I = numpy.empty(mydf.blockdim*nao*nmo)
                 def contract_k(pLqR, pLqI, sign):
                     nrow = pLqR.shape[1]
                     tmpR = numpy.ndarray((nmo,nrow*nao), buffer=buf2R)
@@ -1212,7 +1238,7 @@ def get_jk(mydf, dm, hermi=1, kpt=numpy.zeros(3),
                                            abs(mo2I).max()) > cell.precision
                                        for mo1I,mo2I in zip(smo1I,smo2I)])
             k_real = gamma_point(kpt) and not numpy.any(smoI_mask)
-            buf2R = numpy.empty((mydf.blockdim*nao*nmo*2))
+            buf2R = numpy.empty(mydf.blockdim*nao*nmo*2)
             buf3R = buf2R[buf2R.size//2:]
             if k_real:
                 def contract_k(pLqR, pLqI, sign):
@@ -1226,7 +1252,7 @@ def get_jk(mydf, dm, hermi=1, kpt=numpy.zeros(3),
                                  sign, vkR[i], 1)
                     tmp1R = tmp2R = None
             else:
-                buf2I = numpy.empty((mydf.blockdim*nao*nmo*2))
+                buf2I = numpy.empty(mydf.blockdim*nao*nmo*2)
                 buf3I = buf2I[buf2I.size//2:]
                 def contract_k(pLqR, pLqI, sign):
                     nrow = pLqR.shape[1]
@@ -1319,7 +1345,7 @@ def get_jk(mydf, dm, hermi=1, kpt=numpy.zeros(3),
             vk = vkR
         else:
             vk = vkR + vkI * 1j
-        if exxdiv == 'ewald':
+        if exxdiv == 'ewald' and cell.dimension != 0:
             _ewald_exxdiv_for_G0(cell, kpt, dms, vk)
         vk = vk.reshape(dm.shape)
 
@@ -1334,6 +1360,7 @@ def _sep_real_imag(a, ncolmax, order):
     aR[:,:ncol] = numpy.asarray(a.real, order=order)
     aI[:,:ncol] = numpy.asarray(a.imag, order=order)
     return aR, aI
+
 def _format_mo(mo_coeff, mo_occ, shape=None, order='F', precision=DM2MO_PREC):
     mos = [mo[:,mocc>precision]*mocc[mocc>precision]**0.5
            for mo,mocc in zip(mo_coeff,mo_occ)]
@@ -1347,6 +1374,7 @@ def _format_mo(mo_coeff, mo_occ, shape=None, order='F', precision=DM2MO_PREC):
         moRs = moRs.reshape(*shape)
         moIs = moIs.reshape(*shape)
     return moRs, moIs
+
 def _mo_from_dm(dms, method='eigh', shape=None, order='C', precision=DM2MO_PREC):
     import scipy.linalg
     nkpts = len(dms)
@@ -1407,7 +1435,10 @@ def _mo_from_dm(dms, method='eigh', shape=None, order='C', precision=DM2MO_PREC)
         raise RuntimeError('Unknown method %s' % method)
 
 def _format_dms(dm_kpts, kpts):
-    nkpts = len(kpts)
+    if kpts is None or kpts.ndim == 1:
+        nkpts = 1
+    else:
+        nkpts = len(kpts)
     nao = dm_kpts.shape[-1]
     dms = dm_kpts.reshape(-1,nkpts,nao,nao)
     if dms.dtype not in (numpy.double, numpy.complex128):
@@ -1425,6 +1456,10 @@ def _format_jks(v_kpts, dm_kpts, kpts_band, kpts):
     if kpts_band is kpts or kpts_band is None:
         return v_kpts.reshape(dm_kpts.shape)
     else:
+        if kpts is None or kpts.ndim == 1:
+            nkpts = 1
+        else:
+            nkpts = len(kpts)
         if getattr(kpts_band, 'ndim', None) == 1:
             v_kpts = v_kpts[:,0]
 # A temporary solution for issue 242. Looking for better ways to sort out the
@@ -1436,7 +1471,7 @@ def _format_jks(v_kpts, dm_kpts, kpts_band, kpts):
 # (Ndm,Nk,Nao,Nao)  (Nk,3)         Ndm
         if dm_kpts.ndim < 3:     # nset=None
             return v_kpts[0]
-        elif dm_kpts.ndim == 3 and dm_kpts.shape[0] == kpts.shape[0]:
+        elif dm_kpts.ndim == 3 and len(dm_kpts) == nkpts:
             return v_kpts[0]
         else:  # dm_kpts.ndim == 4 or kpts.shape[0] == 1:  # nset=Ndm
             return v_kpts

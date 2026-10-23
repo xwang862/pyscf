@@ -227,7 +227,7 @@ TriChloroEthene                        3.422
 TriEthylAmine                          2.3832
 Xylene-mixture                         2.3879
 z-1,2-DiChloroEthene                   9.2
-'''  # noqa: E501
+'''
 
 import ctypes
 import numpy
@@ -237,10 +237,16 @@ from pyscf import gto
 from pyscf import df
 from pyscf.dft import gen_grid, numint
 from pyscf.data import radii
-from pyscf.solvent.grad import ddcosmo_grad
 from pyscf.symm import sph
 
 from pyscf.solvent import _attach_solvent
+
+# Static (zero-frequency) dielectric constant of water at 298 K
+EPS_WATER = 78.3553
+
+# Optical (high-frequency) dielectric constant of water, roughly the square of
+# its refractive index. See the QChem manual, the non-equilibrium PCM section.
+EPS_OPTICAL_WATER = 1.78
 
 @lib.with_doc(_attach_solvent._for_scf.__doc__)
 def ddcosmo_for_scf(mf, solvent_obj=None, dm=None):
@@ -275,14 +281,7 @@ def ddcosmo_for_post_scf(method, solvent_obj=None, dm=None):
             solvent_obj = DDCOSMO(method.mol)
     return _attach_solvent._for_post_scf(method, solvent_obj, dm)
 
-@lib.with_doc(_attach_solvent._for_tdscf.__doc__)
-def ddcosmo_for_tdscf(method, solvent_obj=None, dm=None):
-    scf_solvent = getattr(method._scf, 'with_solvent', None)
-    assert scf_solvent is None or isinstance(scf_solvent, DDCOSMO)
-
-    if solvent_obj is None:
-        solvent_obj = DDCOSMO(method.mol)
-    return _attach_solvent._for_tdscf(method, solvent_obj, dm)
+ddcosmo_for_tdscf = _attach_solvent._for_tdscf
 
 
 # Inject ddCOSMO into other methods
@@ -452,7 +451,7 @@ def make_phi(pcmobj, dm, r_vdw, ui, ylm_1sph, with_nuc=True):
             v_phi[:,ia] = numpy.einsum('z,zp->p', atom_charges, 1./lib.norm(d_rs,axis=2))
 
     max_memory = pcmobj.max_memory - lib.current_memory()[0]
-    blksize = int(max(max_memory*.9e6/8/nao**2, 400))
+    blksize = int(max(max_memory*.9e6/8/nao**2, 8))
 
     cav_coords = cav_coords[extern_point_idx]
     v_phi_e = numpy.empty((n_dm, cav_coords.shape[0]))
@@ -462,6 +461,8 @@ def make_phi(pcmobj, dm, r_vdw, ui, ylm_1sph, with_nuc=True):
         fakemol = gto.fakemol_for_charges(cav_coords[i0:i1])
         v_nj = df.incore.aux_e2(mol, fakemol, intor=int3c2e, aosym='s2ij', cintopt=cintopt)
         v_phi_e[:,i0:i1] = numpy.einsum('nx,xk->nk', tril_dm, v_nj)
+        # Free up v_nj to stay within mem limits
+        del v_nj
     v_phi[:,extern_point_idx] -= v_phi_e
 
     phi = -numpy.einsum('n,xn,jn,ijn->ijx', weights_1sph, ylm_1sph, ui, v_phi)
@@ -548,7 +549,7 @@ def make_psi_vmat(pcmobj, dm, r_vdw, ui, ylm_1sph, cached_pol, Xvec, L,
     xi_jn = xi_jn[:,extern_point_idx]
 
     max_memory = pcmobj.max_memory - lib.current_memory()[0]
-    blksize = int(max(max_memory*.9e6/8/nao**2, 400))
+    blksize = int(max(max_memory*.9e6/8/nao**2, 8))
 
     cintopt = gto.moleintor.make_cintopt(mol._atm, mol._bas, mol._env, 'int3c2e')
     vmat_tril = 0
@@ -557,6 +558,8 @@ def make_psi_vmat(pcmobj, dm, r_vdw, ui, ylm_1sph, cached_pol, Xvec, L,
         v_nj = df.incore.aux_e2(mol, fakemol, intor='int3c2e', aosym='s2ij',
                                 cintopt=cintopt)
         vmat_tril += numpy.einsum('xn,in->ix', v_nj, xi_jn[:,i0:i1])
+        # Free up v_nj to stay within mem limits
+        del v_nj
     vmat += lib.unpack_tril(vmat_tril)
 
     if is_single_dm:
@@ -620,8 +623,8 @@ def atoms_with_vdw_overlap(atm_id, atom_coords, r_vdw):
 class ddCOSMO(lib.StreamObject):
     _keys = {
         'mol', 'radii_table', 'atom_radii', 'lebedev_order', 'lmax', 'eta',
-        'eps', 'grids', 'max_cycle', 'conv_tol', 'state_id', 'frozen',
-        'equilibrium_solvation', 'e', 'v',
+        'eps', 'eps_optical', 'grids', 'max_cycle', 'conv_tol', 'state_id',
+        'frozen', 'equilibrium_solvation', 'e', 'v',
     }
 
     def __init__(self, mol):
@@ -637,7 +640,12 @@ class ddCOSMO(lib.StreamObject):
         self.lebedev_order = 17
         self.lmax = 6  # max angular momentum of spherical harmonics basis
         self.eta = .1  # regularization parameter
-        self.eps = 78.3553
+        self.eps = EPS_WATER
+
+        # Square of the refractive index of the solvent, used by the
+        # non-equilibrium solvation (see .get_eps_optical)
+        self.eps_optical = None
+
         self.grids = Grids(mol)
 
         # The maximum iterations and convergence tolerance to update solvent
@@ -705,6 +713,24 @@ class ddCOSMO(lib.StreamObject):
     def vpcm(self, val):
         self.v_solvent = val
 
+    def get_eps_optical(self):
+        '''The optical (high-frequency) dielectric constant of the solvent.
+
+        Only the fast, electronic part of the solvent polarization follows a
+        vertical excitation. Its response is governed by the optical dielectric
+        constant rather than the static one (see .equilibrium_solvation).
+        '''
+        if self.eps_optical is not None:
+            return self.eps_optical
+        # .eps is None in the SMD model when eps is taken from solvent_db
+        if self.eps is not None and abs(self.eps - EPS_WATER) > 1e-6:
+            logger.warn(self, 'eps_optical was not specified for eps=%g. The '
+                        'optical dielectric constant of water (%g) is applied '
+                        'in the non-equilibrium solvation. Please set '
+                        '.eps_optical to the square of the refractive index of '
+                        'the solvent in use.', self.eps, EPS_OPTICAL_WATER)
+        return EPS_OPTICAL_WATER
+
     def __setattr__(self, key, val):
         if key in ('radii_table', 'atom_radii', 'lebedev_order', 'lmax',
                    'eta', 'eps', 'grids'):
@@ -718,6 +744,7 @@ class ddCOSMO(lib.StreamObject):
         logger.info(self, 'lmax = %s'         , self.lmax)
         logger.info(self, 'eta = %s'          , self.eta)
         logger.info(self, 'eps = %s'          , self.eps)
+        logger.info(self, 'eps_optical = %s'  , self.eps_optical)
         logger.info(self, 'frozen = %s'       , self.frozen)
         logger.info(self, 'equilibrium_solvation = %s', self.equilibrium_solvation)
         logger.debug2(self, 'radii_table %s', self.radii_table)
@@ -770,7 +797,7 @@ class ddCOSMO(lib.StreamObject):
         '''
         self._dm = dm
         self.e, self.v = self._get_vind(dm)
-        logger.info(self, '%s E_diel = %.15g', self.__class__, self.e)
+        logger.info(self, '%s E_diel = %.15g', self.__class__.__name__, self.e)
         return self.e, self.v
 
     def reset(self, mol=None):
@@ -860,15 +887,20 @@ class ddCOSMO(lib.StreamObject):
     def nuc_grad_method(self, grad_method):
         '''For grad_method in vacuum, add nuclear gradients of solvent
         '''
-        from pyscf import tdscf
-        from pyscf.solvent import _ddcosmo_tdscf_grad
-        if self.frozen:
-            raise RuntimeError('Frozen solvent model is not supported for '
-                               'energy gradients')
-        if isinstance(grad_method.base, tdscf.rhf.TDBase):
-            return _ddcosmo_tdscf_grad.make_grad_object(grad_method)
-        else:
-            return ddcosmo_grad.make_grad_object(grad_method)
+        raise DeprecationWarning('Use the make_grad_object function from '
+                                 'pyscf.solvent.grad.ddcosmo_grad or '
+                                 'pyscf.solvent._ddcosmo_tdscf_grad instead.')
+
+    def grad(self, dm):
+        '''Computes the Jacobian for the energy associated with the solvent,
+        including the derivatives of the solvent itsself and the interactions
+        between the solvent and the charge density of the solute.
+        '''
+        from pyscf.solvent.grad import ddcosmo_grad
+        return ddcosmo_grad.kernel(self, dm, self.verbose)
+
+    def hess(self, dm):
+        raise NotImplementedError
 
     to_gpu = lib.to_gpu
 

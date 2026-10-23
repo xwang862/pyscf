@@ -17,7 +17,6 @@
 
 import os
 import unittest
-import tempfile
 import numpy
 from pyscf import lib
 from pyscf import gto
@@ -73,7 +72,7 @@ class KnownValues(unittest.TestCase):
 
     def test_cderi_to_save(self):
         with open(os.devnull, 'w') as f:
-            ftmp = tempfile.NamedTemporaryFile()
+            ftmp = lib.NamedTemporaryFile()
             dfobj = df.DF(mol)
             dfobj.auxmol = df.addons.make_auxmol(mol, 'weigend')
             dfobj.verbose = 5
@@ -105,8 +104,13 @@ class KnownValues(unittest.TestCase):
         dm = numpy.random.random((2,nao,nao))
         dfobj = df.DF(mol)
         vj, vk = dfobj.get_jk(dm, hermi=0, omega=1.1)
-        self.assertAlmostEqual(lib.fp(vj), -181.5033531437091, 4)
-        self.assertAlmostEqual(lib.fp(vk), -37.78854217974532, 4)
+        # The long-range Coulomb metric of the JK-fit auxiliary basis is
+        # severely linearly dependent (condition number ~1e19) and has
+        # eigenvalues straddling the 1e-7 linear dependency threshold used by
+        # DF, so these fingerprints are only reproducible to about 1e-4 across
+        # LAPACK implementations.
+        self.assertAlmostEqual(lib.fp(vj), -181.5033531437091, 3)
+        self.assertAlmostEqual(lib.fp(vk), -37.78854217974532, 3)
 
         vj1, vk1 = scf.hf.get_jk(mol, dm, hermi=0, omega=1.1)
         self.assertAlmostEqual(abs(vj-vj1).max(), 0, 2)
@@ -132,15 +136,53 @@ class KnownValues(unittest.TestCase):
         mol = gto.M(atom = 'H 0 0 0; F 0 0 1.1', basis='ccpvdz', max_memory=10, verbose=0)
         mf = mol.RKS().density_fit()
         mf.xc = 'lda+0.5*SR_HF(0.3)'
-        with tempfile.NamedTemporaryFile() as ftmp:
+        with lib.NamedTemporaryFile() as ftmp:
             mf.with_df._cderi_to_save = ftmp.name
             mf.run()
-        self.assertAlmostEqual(mf.e_tot, -103.4965622991, 7)
+        self.assertAlmostEqual(mf.e_tot, -103.4965622991, 6)
 
         mol.max_memory = 4000
         mf = mol.RKS(xc='lda+0.5*SR_HF(0.3)').density_fit()
         mf.run()
-        self.assertAlmostEqual(mf.e_tot, -103.4965622991, 7)
+        self.assertAlmostEqual(mf.e_tot, -103.4965622991, 6)
+
+    def test_only_dfj(self):
+        mol = gto.M(atom='H 0 0 0; H 0 0 1')
+        dm = numpy.eye(mol.nao)
+        mf = mol.RHF().density_fit()
+        refj, refk = mf.get_jk(mol, dm)
+        vk = mf.get_k(mol, dm)
+        self.assertAlmostEqual(abs(vk - refk).max(), 0, 9)
+        vj = mf.get_j(mol, dm)
+        self.assertAlmostEqual(abs(vj - refj).max(), 0, 9)
+
+        mf = mol.RHF().density_fit(only_dfj=True)
+        refk = mol.RHF().get_k(mol, dm)
+        vj, vk = mf.get_jk(mol, dm)
+        self.assertAlmostEqual(abs(vk - refk).max(), 0, 9)
+        self.assertAlmostEqual(abs(vj - refj).max(), 0, 9)
+        vk = mf.get_k(mol, dm)
+        self.assertAlmostEqual(abs(vk - refk).max(), 0, 9)
+        vj = mf.get_j(mol, dm)
+        self.assertAlmostEqual(abs(vj - refj).max(), 0, 9)
+
+        dm = numpy.eye(mol.nao*2)
+        mf = mol.GHF().density_fit()
+        refj, refk = mf.get_jk(mol, dm)
+        vk = mf.get_k(mol, dm)
+        self.assertAlmostEqual(abs(vk - refk).max(), 0, 9)
+        vj = mf.get_j(mol, dm)
+        self.assertAlmostEqual(abs(vj - refj).max(), 0, 9)
+
+        mf = mol.GHF().density_fit(only_dfj=True)
+        refk = mol.GHF().get_k(mol, dm)
+        vj, vk = mf.get_jk(mol, dm)
+        self.assertAlmostEqual(abs(vk - refk).max(), 0, 9)
+        self.assertAlmostEqual(abs(vj - refj).max(), 0, 9)
+        vk = mf.get_k(mol, dm)
+        self.assertAlmostEqual(abs(vk - refk).max(), 0, 9)
+        vj = mf.get_j(mol, dm)
+        self.assertAlmostEqual(abs(vj - refj).max(), 0, 9)
 
 if __name__ == "__main__":
     print("Full Tests for df")

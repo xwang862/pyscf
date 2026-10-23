@@ -115,7 +115,7 @@ The Following attributes are used for CASSCF
         Max number of iterations allowd in AH solver.  Default is 20.
     ah_lindep : float, for AH solver.
         Linear dependence threshold for AH solver.  Default is 1e-16.
-    ah_start_tol : flat, for AH solver.
+    ah_start_tol : float, for AH solver.
         In AH solver, the orbital rotation is started without completely solving the AH problem.
         This value is to control the start point. Default is 2.5.
     ah_start_cycle : int, for AH solver.
@@ -188,7 +188,7 @@ def CASSCF(mf_or_mol, ncas, nelecas, ncore=None, frozen=None):
     if isinstance(mf, scf.uhf.UHF):
         mf = mf.to_rhf()
     if isinstance(mf, _DFHF) and mf.with_df:
-        return DFCASSCF(mf, ncas, nelecas, ncore, frozen)
+        return DFCASSCF(mf, ncas, nelecas, ncore=ncore, frozen=frozen)
 
     if mf.mol.symmetry and mf.mol.groupname != 'C1':
         mc = mc1step_symm.CASSCF(mf, ncas, nelecas, ncore, frozen)
@@ -212,7 +212,7 @@ def CASCI(mf_or_mol, ncas, nelecas, ncore=None):
         mf = mf.to_rhf()
 
     if isinstance(mf, _DFHF) and mf.with_df:
-        return DFCASCI(mf, ncas, nelecas, ncore)
+        return DFCASCI(mf, ncas, nelecas, ncore=ncore)
 
     if mf.mol.symmetry and mf.mol.groupname != 'C1':
         mc = casci_symm.CASCI(mf, ncas, nelecas, ncore)
@@ -238,8 +238,12 @@ def UCASCI(mf_or_mol, ncas, nelecas, ncore=None):
         from pyscf.lib import logger
         logger.warn(mf, f'DF-UCASCI for DFHF method {mf} is not available. '
                     'Normal UCASCI method is called.')
+        df_source = True
         mf = mf.undo_df()
+    else:
+        df_source = False
     mc = ucasci.UCASCI(mf, ncas, nelecas, ncore)
+    mc._scf_df_source = df_source # need flag to reject gradients for DF orbitals
     return mc
 
 

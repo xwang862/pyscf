@@ -13,13 +13,12 @@
 # limitations under the License.
 
 import unittest
-import tempfile
 import numpy as np
 import scipy.linalg
 from pyscf import lib
 import pyscf.pbc
 from pyscf.pbc import gto as pgto
-from pyscf.pbc.df import df, aug_etb, FFTDF, make_auxcell
+from pyscf.pbc.df import df, FFTDF, make_auxcell
 from pyscf.pbc.df import rsdf_builder
 from pyscf.pbc.df import ft_ao
 from pyscf.pbc.tools import pbc as pbctools
@@ -116,7 +115,7 @@ class KnownValues(unittest.TestCase):
 
     def test_make_j3c_gamma(self):
         dfbuilder = rsdf_builder._RSGDFBuilder(cell, auxcell).build()
-        with tempfile.NamedTemporaryFile() as tmpf:
+        with lib.NamedTemporaryFile() as tmpf:
             dfbuilder.make_j3c(tmpf.name)
             v2 = load(tmpf.name, kpts[[0, 0]])
             self.assertAlmostEqual(lib.fp(v2), 1.5094843470069796, 7)
@@ -145,7 +144,7 @@ class KnownValues(unittest.TestCase):
 
     def test_make_j3c(self):
         dfbuilder = rsdf_builder._RSGDFBuilder(cell, auxcell, kpts).build()
-        with tempfile.NamedTemporaryFile() as tmpf:
+        with lib.NamedTemporaryFile() as tmpf:
             dfbuilder.make_j3c(tmpf.name, aosym='s2')
             v_s2 = []
             for ki in range(nkpts):
@@ -168,7 +167,7 @@ class KnownValues(unittest.TestCase):
 
     def test_make_j3c_j_only(self):
         dfbuilder = rsdf_builder._RSGDFBuilder(cell, auxcell, kpts).build()
-        with tempfile.NamedTemporaryFile() as tmpf:
+        with lib.NamedTemporaryFile() as tmpf:
             dfbuilder.make_j3c(tmpf.name, aosym='s2', j_only=True)
             v_s2 = []
             for ki in range(nkpts):
@@ -189,13 +188,13 @@ class KnownValues(unittest.TestCase):
         kj_idx = np.array([15, 18, 21, 1, 2 , 4, 5])
         kij_idx = np.array([ki_idx,kj_idx]).T
         kptij_lst = kpts[kij_idx]
-        with tempfile.NamedTemporaryFile() as tmpf:
+        with lib.NamedTemporaryFile() as tmpf:
             cderi = tmpf.name
             dfbuilder.make_j3c(cderi, aosym='s1')
             with df.CDERIArray(cderi) as cderi_array:
                 ref = np.array([cderi_array[ki, kj] for ki, kj in kij_idx])
 
-        with tempfile.NamedTemporaryFile() as tmpf:
+        with lib.NamedTemporaryFile() as tmpf:
             cderi = tmpf.name
             dfbuilder.make_j3c(cderi, aosym='s1', kptij_lst=kptij_lst)
             with df.CDERIArray(cderi) as cderi_array:
@@ -210,7 +209,7 @@ class KnownValues(unittest.TestCase):
                       dimension=2)
         auxcell = df.make_auxcell(cell, auxbasis)
         dfbuilder = rsdf_builder._RSGDFBuilder(cell, auxcell).build()
-        with tempfile.NamedTemporaryFile() as tmpf:
+        with lib.NamedTemporaryFile() as tmpf:
             dfbuilder.make_j3c(tmpf.name)
             v2 = load(tmpf.name, kpts[[0, 0]])
             self.assertAlmostEqual(lib.fp(v2.T.dot(v2)), 0.3289627476345819, 7)
@@ -219,15 +218,15 @@ class KnownValues(unittest.TestCase):
         cell = pgto.M(atom='He 0 0 0; He 0.9 0 0',
                       basis=basis,
                       a=np.eye(3) * 2.8,
+                      low_dim_ft_type='inf_vacuum',
                       dimension=1)
         auxcell = df.make_auxcell(cell, auxbasis)
         dfbuilder = rsdf_builder._RSGDFBuilder(cell, auxcell).build()
-        with tempfile.NamedTemporaryFile() as tmpf:
+        with lib.NamedTemporaryFile() as tmpf:
             dfbuilder.make_j3c(tmpf.name)
             v2 = load(tmpf.name, kpts[[0, 0]])
             self.assertAlmostEqual(lib.fp(v2), 1.7171973261620863, 5)
 
-    @unittest.skip('_RSGDFBuilder for dimension=0 not accurate')
     def test_make_j3c_gamma_0d(self):
         from pyscf.df.incore import cholesky_eri
         cell = pgto.M(atom='He 0 0 0; He 0.9 0 0',
@@ -236,7 +235,7 @@ class KnownValues(unittest.TestCase):
                       dimension=0)
         auxcell = df.make_auxcell(cell, auxbasis)
         dfbuilder = rsdf_builder._RSGDFBuilder(cell, auxcell).build()
-        with tempfile.NamedTemporaryFile() as tmpf:
+        with lib.NamedTemporaryFile() as tmpf:
             dfbuilder.make_j3c(tmpf.name)
             v2 = load(tmpf.name, kpts[[0, 0]])
         ref = cholesky_eri(cell, auxmol=auxcell)
@@ -314,7 +313,7 @@ class KnownValues(unittest.TestCase):
         j3c = lib.dot(auxG.conj()*wcoulG, aopair.reshape(ngrids,-1))
         j2c = scipy.linalg.cholesky(j2c[0], lower=True)
         ref = scipy.linalg.solve_triangular(j2c, j3c, lower=True)
-        with tempfile.NamedTemporaryFile() as tmpf:
+        with lib.NamedTemporaryFile() as tmpf:
             dfbuilder.make_j3c(tmpf.name, aosym='s2', j_only=True)
             v1 = load(tmpf.name, kpts[[0, 0]])
             self.assertAlmostEqual(abs(ref - v1).max(), 0, 7)
@@ -344,7 +343,7 @@ class KnownValues(unittest.TestCase):
 
     def test_make_j3c_gamma_sr(self):
         dfbuilder = rsdf_builder._RSGDFBuilder(cell_sr, auxcell_sr).build()
-        with tempfile.NamedTemporaryFile() as tmpf:
+        with lib.NamedTemporaryFile() as tmpf:
             dfbuilder.make_j3c(tmpf.name)
             v2 = load(tmpf.name, kpts[[0, 0]])
             self.assertAlmostEqual(lib.fp(v2), 0.9647178630614499, 8)
@@ -373,7 +372,7 @@ class KnownValues(unittest.TestCase):
 
     def test_make_j3c_sr_high_cost(self):
         dfbuilder = rsdf_builder._RSGDFBuilder(cell_sr, auxcell_sr, kpts).build()
-        with tempfile.NamedTemporaryFile() as tmpf:
+        with lib.NamedTemporaryFile() as tmpf:
             dfbuilder.make_j3c(tmpf.name, aosym='s2')
             v_s2 = []
             for ki in range(nkpts):
@@ -397,7 +396,7 @@ class KnownValues(unittest.TestCase):
 
     def test_make_j3c_j_only_sr(self):
         dfbuilder = rsdf_builder._RSGDFBuilder(cell_sr, auxcell_sr, kpts).build()
-        with tempfile.NamedTemporaryFile() as tmpf:
+        with lib.NamedTemporaryFile() as tmpf:
             dfbuilder.make_j3c(tmpf.name, aosym='s2', j_only=True)
             v_s2 = []
             for ki in range(nkpts):
@@ -445,10 +444,56 @@ class KnownValues(unittest.TestCase):
         j3c = lib.dot(auxG.conj()*wcoulG, aopair.reshape(ngrids,-1))
         j2c = scipy.linalg.cholesky(j2c[0], lower=True)
         ref = scipy.linalg.solve_triangular(j2c, j3c, lower=True)
-        with tempfile.NamedTemporaryFile() as tmpf:
+        with lib.NamedTemporaryFile() as tmpf:
             dfbuilder.make_j3c(tmpf.name, aosym='s2', j_only=True)
             v1 = load(tmpf.name, kpts[[0, 0]])
             self.assertAlmostEqual(abs(ref - v1).max(), 0, 7)
+
+    # issue 2973
+    def test_off_center_kpts_rsdf_vs_fft(self):
+        cell = pgto.M(
+            atom='He 0 0 0', a=np.eye(3)*3.2,
+            basis=[[2, [.06, 1]]], cart=True)
+        cell.mesh = [9] * 3
+        cell.build()
+        nk = [2,1,1]
+        tw = np.array([0.81,0.57,0.27])
+        kpts = cell.make_kpts(nk, scaled_center=tw)
+        gpw_ref = FFTDF(cell, kpts)
+        auxcell = cell.copy()
+        auxcell.basis = [[4, [.12, 1]]]
+        auxcell.mesh = [9] * 3
+        auxcell.build(0, 0)
+        naux = auxcell.nao
+        nao = cell.nao
+        Gv, Gvbase, kws = cell.get_Gv_weights()
+        dfbuilder = rsdf_builder._RSGDFBuilder(cell, auxcell, kpts)
+        dfbuilder.fft_dd_block = False
+        dfbuilder.exclude_d_aux = False
+        with lib.NamedTemporaryFile() as tmpf:
+            dfbuilder.build()
+            dfbuilder.make_j3c(tmpf.name)
+            nkpts = len(kpts)
+            with df.CDERIArray(tmpf.name) as cderi_array:
+                for ki in range(nkpts):
+                    for kj in range(nkpts):
+                        v1 = cderi_array[ki, kj]
+                        if ki == kj:
+                            v1 = lib.unpack_tril(v1)
+                        else:
+                            v1 = v1.reshape(naux, nao, nao)
+                        dat = np.einsum('pij,plk->ijkl', v1, v1.conj())
+
+                        q = kpts[kj]-kpts[ki]
+                        coulG = pbctools.get_coulG(cell, q, Gv=Gv)
+                        auxG = ft_ao.ft_ao(auxcell, Gv=Gv+q)
+                        j2c = (coulG[:,None]*kws * auxG).T.dot(auxG.conj())
+                        ngrids = np.prod(cell.mesh)
+                        pair_ij = gpw_ref.get_ao_pairs_G(kpts[[ki,kj]])
+                        ref = np.einsum('gm,g,gk->mk', pair_ij, coulG/ngrids, auxG.conj())
+                        ref = ref.dot(np.linalg.solve(j2c, ref.conj().T))
+                        ref = ref.reshape(dat.shape).transpose(0,1,3,2)
+                        self.assertAlmostEqual(abs(ref - dat).max(), 0, 7)
 
 if __name__ == '__main__':
     print("Full Tests for rsdf_builder")

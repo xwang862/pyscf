@@ -13,8 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 import unittest
-import tempfile
 from functools import reduce
 import numpy
 from pyscf import gto
@@ -23,22 +23,26 @@ from pyscf.gto.basis import parse_molpro
 from pyscf.gto.basis import parse_gaussian
 from pyscf.gto.basis import parse_cp2k, parse_cp2k_pp
 from pyscf.lib.exceptions import BasisNotFoundError
+try:
+    import basis_set_exchange
+except ImportError:
+    basis_set_exchange = None
 
 class KnownValues(unittest.TestCase):
     def test_parse_pople(self):
+        join = os.path.join
         self.assertEqual(gto.basis._parse_pople_basis('631g(d)', 'C'),
-                         ('pople-basis/6-31G.dat', 'pople-basis/6-31G-polarization-d.dat'))
+                         (join('pople-basis', '6-31G.dat'), join('pople-basis', '6-31G-polarization-d.dat')))
         self.assertEqual(gto.basis._parse_pople_basis('631g**', 'C'),
-                         ('pople-basis/6-31Gss.dat',))
+                         (join('pople-basis', '6-31Gss.dat'),))
         self.assertEqual(gto.basis._parse_pople_basis('631++g**', 'C'),
-                         ('pople-basis/6-31++Gss.dat',))
+                         (join('pople-basis', '6-31++Gss.dat'),))
         self.assertEqual(gto.basis._parse_pople_basis('6311+g(d,p)', 'C'),
-                         ('pople-basis/6-311+G.dat', 'pople-basis/6-311G-polarization-d.dat'))
+                         (join('pople-basis', '6-311+G.dat'), join('pople-basis', '6-311G-polarization-d.dat')))
         self.assertRaises(KeyError, gto.basis._parse_pople_basis, '631g++', 'C')
 
     def test_basis_load(self):
-        self.assertRaises(BasisNotFoundError, gto.basis.load, __file__, 'H')
-        self.assertRaises(BasisNotFoundError, gto.basis.load, 'abas', 'H')
+        self.assertRaises(RuntimeError, gto.basis.load, 'abas', 'H')
 
         self.assertEqual(len(gto.basis.load('631++g**', 'C')), 8)
         self.assertEqual(len(gto.basis.load('ccpcvdz', 'C')), 7)
@@ -58,7 +62,7 @@ class KnownValues(unittest.TestCase):
         self.assertEqual(len(gto.basis.load('def2-svp', 'Rn')), 16)
 
     def test_basis_load_from_file(self):
-        ftmp = tempfile.NamedTemporaryFile()
+        ftmp = lib.NamedTemporaryFile()
         ftmp.write('''
 Li    S
      16.1195750              0.15432897
@@ -94,6 +98,30 @@ C    SP
         basis_dat = gto.basis.parse_nwchem.parse(basis_str)
         self.assertEqual(len(basis_dat), 3)
 
+        basis_str = '''
+#BASIS SET: (3s) -> [1s]
+H    S
+     18.7311370     0.03349460
+      2.8253937     0.23472695
+      0.6401217     0.81375733
+#BASIS SET:
+#C    S
+#     1.5   1.
+C    SP
+      0.25  1.  1.'''
+        basis_dat = gto.basis.parse_nwchem.parse(basis_str, 'C')
+        self.assertEqual(len(basis_dat), 2)
+
+        bas = gto.parse(r'''
+#        C    S
+#              0.2222899             1.
+        C    S
+              2.9412494             0.15591627
+              0.6834831             0.60768372
+              0.2222899             0.39195739''',
+                        'C')
+        self.assertEqual(len(bas), 1)
+
     def test_parse_ecp(self):
         ecp_str = '''
 #
@@ -122,6 +150,9 @@ Na P
         ecpdat1 = gto.basis.parse_nwchem.parse_ecp(
             gto.basis.parse_nwchem.convert_ecp_to_nwchem('Na', ecpdat), 'Na')
         self.assertEqual(ecpdat, ecpdat1)
+
+        mol = gto.M(atom='Cl 0 0 0; Cl 0 0 1', ecp=ecp_str)
+        self.assertEqual(len(mol._ecp['Cl']), 2)
 
     def test_optimize_contraction(self):
         bas = gto.parse(r'''
@@ -371,7 +402,7 @@ F   1   1.00
         self.assertEqual(ref, basis1)
 
     def test_parse_gaussian_load_basis(self):
-        with tempfile.NamedTemporaryFile(mode='w+') as f:
+        with lib.NamedTemporaryFile(mode='w+') as f:
             f.write('''
 ****
 H 0
@@ -382,7 +413,7 @@ S 1 1.0
             f.flush()
             self.assertEqual(parse_gaussian.load(f.name, 'H'), [[0, [1., 1.]]])
 
-        with tempfile.NamedTemporaryFile(mode='w+') as f:
+        with lib.NamedTemporaryFile(mode='w+') as f:
             f.write('''
 H 0
 S 1 1.0
@@ -392,7 +423,7 @@ S 1 1.0
             f.flush()
             self.assertEqual(parse_gaussian.load(f.name, 'H'), [[0, [1., 1.]]])
 
-        with tempfile.NamedTemporaryFile(mode='w+') as f:
+        with lib.NamedTemporaryFile(mode='w+') as f:
             f.write('''
 ****
 H 0
@@ -402,7 +433,7 @@ S 1 1.0
             f.flush()
             self.assertEqual(parse_gaussian.load(f.name, 'H'), [[0, [1., 1.]]])
 
-        with tempfile.NamedTemporaryFile(mode='w+') as f:
+        with lib.NamedTemporaryFile(mode='w+') as f:
             f.write('''
 H 0
 S 1 1.0
@@ -491,6 +522,9 @@ ECP,I,46,4,3;
         ref = gto.basis.load('gth-dzv', 'N')
         self.assertEqual(ref, basis1)
 
+        mol = gto.M(atom='N 0 0 0; N 0 0 1', basis=basis_str)
+        self.assertEqual(mol.nbas, 4)
+
         basis_str = '''
                         C DZV-GTH
                           1
@@ -504,6 +538,9 @@ ECP,I,46,4,3;
         basis1 = parse_cp2k.parse(basis_str)
         ref = gto.basis.load('gth-dzv', 'C')
         self.assertEqual(ref, basis1)
+
+        mol = gto.M(atom='Li 0 0 0; Li 0 0 1', basis=basis_str)
+        self.assertEqual(mol.nbas, 4)
 
     def test_parse_gth_pp(self):
         pp_str = '''
@@ -527,6 +564,85 @@ ECP,I,46,4,3;
         pp1 = parse_cp2k_pp.parse(pp_str, 'C')
         ref = gto.basis.load_pseudo('gth-pade', 'C')
         self.assertEqual(ref, pp1)
+
+        mol = gto.M(atom='C 0 0 0; C 0 0 1', pseudo=pp_str)
+        self.assertEqual(len(mol._pseudo['C']), 7)
+        self.assertEqual(mol._pseudo['C'][0], [2, 2])
+
+        mol = gto.M(atom='N 0 0 0; N 0 0 1', pseudo=pp_str)
+        self.assertEqual(len(mol._pseudo['N']), 7)
+        self.assertEqual(mol._pseudo['N'][0], [2, 1])
+
+    # issue 2880
+    @unittest.skipIf(basis_set_exchange is None, 'BSE not installed')
+    def test_parse_bse_ecp(self):
+        from pyscf.gto.basis import bse
+        ecp = bse._ecp_basis(basis_set_exchange.get_basis('crenbs', 'Fe'))
+        mol = gto.M(atom='Fe', ecp=ecp)
+        dat1 = mol.intor('ECPscalar')
+        mol = gto.M(atom='Fe', ecp='crenbs')
+        dat2 = mol.intor('ECPscalar')
+        self.assertAlmostEqual(abs(dat1 - dat2).max(), 0, 12)
+
+    def test_to_MOLOPT_name(self):
+        assert parse_cp2k._to_MOLOPT_name('gthszvmolopt'   ) == 'SZV-MOLOPT-GTH'
+        assert parse_cp2k._to_MOLOPT_name('gthdzvpmolopt'  ) == 'DZVP-MOLOPT-GTH'
+        assert parse_cp2k._to_MOLOPT_name('gthtzvpmolopt'  ) == 'TZVP-MOLOPT-GTH'
+        assert parse_cp2k._to_MOLOPT_name('gthtzv2pmolopt' ) == 'TZV2P-MOLOPT-GTH'
+        assert parse_cp2k._to_MOLOPT_name('gthszvmoloptsr' ) == 'SZV-MOLOPT-SR-GTH'
+        assert parse_cp2k._to_MOLOPT_name('gthdzvpmoloptsr') == 'DZVP-MOLOPT-SR-GTH'
+
+    def test_load_gth_basis(self):
+        basis_dir = gto.basis._GTH_BASIS_DIR
+        def load(basis_name, element):
+            basis = parse_cp2k._load_MOLOPT(basis_name, element, basis_dir)
+            return [x[0] for x in basis], [len(x)-1 for x in basis]
+        assert load('TZVP-MOLOPT-PBE-GTH', 'Cd') == ([0, 1, 2, 3], [5, 5, 5, 5])
+        assert load('TZVP-MOLOPT-SCAN-GTH', 'Cd') == ([0, 1, 2, 3], [5, 5, 5, 5])
+        assert load('SZV-MOLOPT-SR-GTH', 'Cu') == ([0, 1, 2], [6, 6, 6])
+        assert load('TZVP-MOLOPT-SR-GTH', 'Cu') == ([0, 1, 2, 3], [6, 6, 6, 6])
+        assert load('TZVP-MOLOPT-HYB-GTH', 'Cd') == ([0, 1, 2, 3], [5, 5, 5, 5])
+        assert load('TZVP-GTH', 'C') == ([0, 1, 2], [5, 5, 1])
+        assert load('TZVP-MOLOPT-GTH', 'C') == ([0, 1, 2], [7, 7, 7])
+        assert load('TZV2P-MOLOPT-PBE-GTH', 'Na') == ([0, 1, 2], [3, 3, 3])
+        assert load('TZV2P-MOLOPT-PBE-GTH-q1', 'Na') == ([0, 1, 2], [3, 3, 3])
+        assert load('TZV2P-MOLOPT-PBE-GTH-q9', 'Na') == ([0, 1, 2], [7, 7, 7])
+
+    def test_load_gth_pseudo(self):
+        pp_dir = gto.basis._GTH_PP_DIR
+        pp = parse_cp2k_pp._load_GTH_POTENTIALS('GTH-PBE', 'Na', pp_dir)
+        assert pp[0] == [3, 6]
+        pp = parse_cp2k_pp._load_GTH_POTENTIALS('GTH-PBE-q1', 'Na', pp_dir)
+        assert pp[0] == [1]
+        pp = parse_cp2k_pp._load_GTH_POTENTIALS('GTH-PBE-q9_old', 'Na', pp_dir)
+        assert pp[0] == [3, 6]
+        pp = parse_cp2k_pp._load_GTH_POTENTIALS('GTH-LDA', 'Be', pp_dir)
+        assert pp[0] == [4]
+        pp = parse_cp2k_pp._load_GTH_POTENTIALS('GTH-LDA-q2', 'Be', pp_dir)
+        assert pp[0] == [2]
+
+    def test_cp2k_soc_parser(self):
+        p = gto.basis.load_pseudo('GTH-PBE-SOC-q6', 'Te')
+        self.assertEqual(p[4][1], 'SOC')
+        self.assertEqual(gto.basis.load_pseudo('gth-soc-pbe-q6', 'Te'), p)
+        scalar = gto.basis.load_pseudo('gth-pbe-q6','Te')
+        self.assertIsInstance(scalar[4], int)
+        self.assertEqual(len(scalar), 5+scalar[4])
+        self.assertEqual(scalar, gto.basis.load_pseudo('GTH-PBE-q6','Te'))
+        self.assertNotIsInstance(scalar[-1], dict)
+        u = gto.basis.load_pseudo('GTH-LDA-SOC-q32','U')
+        self.assertAlmostEqual(u[6][2][0][0], -7.23487214)
+        self.assertAlmostEqual(u[6][3][0][0], 25.56783598)
+
+    def test_zero_soc(self):
+        pp = parse_cp2k_pp.parse('''
+He GTH-BLYP-q2 GTH-BLYP
+    2
+     0.20000000    2    -9.14737128     1.71197792
+    0  SOC
+''')
+        self.assertEqual(pp[4], (0, 'SOC'))
+        self.assertEqual(len(pp), 5)
 
 if __name__ == "__main__":
     print("test basis module")

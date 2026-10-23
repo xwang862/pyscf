@@ -14,15 +14,15 @@
 # limitations under the License.
 
 import ctypes
-import _ctypes
 import numpy
 from pyscf import lib
 from pyscf.gto.moleintor import make_cintopt, make_loc, ascint3
 from pyscf.scf import _vhf
 
 libao2mo = lib.load_library('libao2mo')
+
 def _fpointer(name):
-    return ctypes.c_void_p(_ctypes.dlsym(libao2mo._handle, name))
+    return ctypes.cast(getattr(libao2mo, name), ctypes.c_void_p)
 
 class AO2MOpt:
     def __init__(self, mol, intor, prescreen='CVHFnoscreen', qcondname=None):
@@ -73,7 +73,7 @@ def nr_e1fill(intor, sh_range, atm, bas, env,
     natm = ctypes.c_int(c_atm.shape[0])
     nbas = ctypes.c_int(c_bas.shape[0])
     ao_loc = make_loc(bas, intor)
-    nao = ao_loc[-1]
+    nao = int(ao_loc[-1])
 
     klsh0, klsh1, nkl = sh_range
 
@@ -137,6 +137,9 @@ def nr_e1(eri, mo_coeff, orbs_slice, aosym='s1', mosym='s1', out=None):
     if out.size == 0:
         return out
 
+    if eri.dtype != numpy.double:
+        raise TypeError('_ao2mo.nr_e1 is for double precision only')
+
     fdrv = getattr(libao2mo, 'AO2MOnr_e2_drv')
     pao_loc = ctypes.POINTER(ctypes.c_void_p)()
     c_nbas = ctypes.c_int(0)
@@ -183,6 +186,9 @@ def nr_e2(eri, mo_coeff, orbs_slice, aosym='s1', mosym='s1', out=None,
     out = numpy.ndarray((nrow,kl_count), buffer=out)
     if out.size == 0:
         return out
+
+    if eri.dtype != numpy.double:
+        raise TypeError('_ao2mo.nr_e2 is for double precision only')
 
     if ao_loc is None:
         pao_loc = ctypes.POINTER(ctypes.c_void_p)()
@@ -282,6 +288,9 @@ def r_e2(eri, mo_coeff, orbs_slice, tao, ao_loc, aosym='s1', out=None):
     out = numpy.ndarray((nrow,kl_count), dtype=numpy.complex128, buffer=out)
     if out.size == 0:
         return out
+
+    if eri.dtype != numpy.complex128:
+        raise TypeError('_ao2mo.r_e2 is for complex double precision only')
 
     tao = numpy.asarray(tao, dtype=numpy.int32)
     if ao_loc is None:

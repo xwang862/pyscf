@@ -107,6 +107,21 @@ class KnownValues(unittest.TestCase):
         self.assertAlmostEqual(e, -76.025166662910223, 9)
         self.assertAlmostEqual(lib.fp(g1), 0.12457973399092415, 6)
 
+        pt = mf.MP2()
+        pt.frozen = [0, 1]
+        gscan = pt.nuc_grad_method().as_scanner()
+        e, g1 = gscan(mol)
+        self.assertTrue(gscan.converged)
+        self.assertAlmostEqual(e, -76.07095754926583, 9)
+        self.assertAlmostEqual(lib.fp(g1), -0.028399476189179818, 6)
+
+        pt.frozen = 2
+        gscan = pt.nuc_grad_method().as_scanner()
+        e, g1 = gscan(mol)
+        self.assertTrue(gscan.converged)
+        self.assertAlmostEqual(e, -76.07095754926583, 9)
+        self.assertAlmostEqual(lib.fp(g1), -0.028399476189179818, 6)
+
     def test_with_x2c_scanner(self):
         with lib.light_speed(20.):
             pt = mp.mp2.MP2(mf.x2c())
@@ -136,7 +151,7 @@ class KnownValues(unittest.TestCase):
         coords = [(0.5,0.6,0.1)]
         #coords = [(0.0,0.0,0.0)]
         charges = [-0.1]
-        mf = qmmm.add_mm_charges(mol.RHF, coords, charges)
+        mf = qmmm.add_mm_charges(mol.RHF(), coords, charges)
         ps = mf.MP2().as_scanner()
         g = ps.nuc_grad_method().as_scanner()(mol)[1]
         e1 = ps(''' O                  0.00100000    0.00000000   -0.11081188

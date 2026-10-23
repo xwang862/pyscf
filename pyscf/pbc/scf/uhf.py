@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-# Copyright 2014-2019 The PySCF Developers. All Rights Reserved.
+# Copyright 2014-2026 The PySCF Developers. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -104,8 +104,22 @@ def dip_moment(cell, dm, unit='Debye', verbose=logger.NOTE,
 
 get_rho = pbchf.get_rho
 
+def gen_response(mf, mo_coeff=None, mo_occ=None,
+                 with_j=True, hermi=0, max_memory=None, with_nlc=True):
+    cell = mf.cell
+    kpt = mf.kpt
+    if with_j:
+        def vind(dm1):
+            vj, vk = mf.get_jk(cell, dm1, hermi=hermi, kpt=kpt)
+            v1 = vj[0] + vj[1] - vk
+            return v1
+    else:
+        def vind(dm1):
+            return -mf.get_k(cell, dm1, hermi=hermi, kpt=kpt)
+    return vind
+
 class UHF(pbchf.SCF):
-    '''UHF class for PBCs.
+    '''UHF class for PBCs at a single point (default: gamma point).
     '''
     init_guess_breaksym = getattr(__config__, 'scf_uhf_init_guess_breaksym', 1)
 
@@ -131,9 +145,10 @@ class UHF(pbchf.SCF):
     canonicalize = mol_uhf.UHF.canonicalize
     spin_square = mol_uhf.UHF.spin_square
     stability = mol_uhf.UHF.stability
+    gen_response = gen_response
     to_gpu = lib.to_gpu
 
-    def __init__(self, cell, kpt=np.zeros(3),
+    def __init__(self, cell, kpt=None,
                  exxdiv=getattr(__config__, 'pbc_scf_SCF_exxdiv', 'ewald')):
         pbchf.SCF.__init__(self, cell, kpt, exxdiv)
         self.nelec = None
@@ -162,7 +177,7 @@ class UHF(pbchf.SCF):
                     'alpha = %d beta = %d', *self.nelec)
         return self
 
-    def get_veff(self, cell=None, dm=None, dm_last=0, vhf_last=0, hermi=1,
+    def get_veff(self, cell=None, dm=None, dm_last=None, vhf_last=None, hermi=1,
                  kpt=None, kpts_band=None):
         if cell is None: cell = self.cell
         if dm is None: dm = self.make_rdm1()
@@ -170,7 +185,11 @@ class UHF(pbchf.SCF):
         if isinstance(dm, np.ndarray) and dm.ndim == 2:
             dm = np.asarray((dm*.5,dm*.5))
         vj, vk = self.get_jk(cell, dm, hermi, kpt, kpts_band)
-        vhf = vj[0] + vj[1] - vk
+        vj = vj[0] + vj[1]
+        vhf = vj - vk
+        if isinstance(dm, np.ndarray) and dm.ndim == 3 and kpts_band is None:
+            ecoul = np.einsum('nij,ji->', dm, vj).real * .5
+            vhf = lib.tag_array(vhf, ecoul=ecoul)
         return vhf
 
     def get_bands(self, kpts_band, cell=None, dm=None, kpt=None):
@@ -254,6 +273,10 @@ class UHF(pbchf.SCF):
         if kpt is None: kpt = self.kpt
         return init_guess_by_chkfile(self.cell, chk, project, kpt)
 
+    def get_fermi(self):
+        nocc_a, nocc_b = self.nelec
+        return self.mo_energy[0][nocc_a-1], self.mo_energy[1][nocc_b-1]
+
     def to_ks(self, xc='HF'):
         '''Convert to RKS object.
         '''
@@ -264,3 +287,10 @@ class UHF(pbchf.SCF):
         '''Convert given mean-field object to UHF'''
         addons.convert_to_uhf(mf, self)
         return self
+
+    def Gradients(self):
+        from pyscf.pbc.grad import uhf
+        from pyscf.pbc.dft.multigrid import MultiGridNumInt2
+        if not (hasattr(self, '_numint') and isinstance(self._numint, MultiGridNumInt2)):
+            raise NotImplementedError('pbc-UHF must be computed with MultiGridNumInt2')
+        return uhf.Gradients(self)

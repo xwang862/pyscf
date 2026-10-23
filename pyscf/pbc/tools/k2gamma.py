@@ -27,6 +27,7 @@ https://github.com/zhcui/local-orbital-and-cdft/blob/master/k2gamma.py
 
 from functools import reduce
 from fractions import Fraction
+import itertools
 import numpy as np
 import scipy.linalg
 from pyscf import lib
@@ -35,26 +36,37 @@ from pyscf.pbc import tools
 from pyscf.pbc.lib.kpts import KPoints
 from pyscf.pbc.lib.kpts_helper import group_by_conj_pairs
 
-
-def kpts_to_kmesh(cell, kpts, precision=None):
+def kpts_to_kmesh(cell, kpts, precision=None, rcut=None, bound_by_supmol=True):
     '''Find the minimal k-points mesh to include all input kpts'''
+    kpts = np.asarray(kpts)
+    assert kpts.ndim == 2
     scaled_kpts = cell.get_scaled_kpts(kpts)
     logger.debug3(cell, '    scaled_kpts kpts %s', scaled_kpts)
     # cell.nimgs are the upper limits for kmesh
-    kmesh = np.asarray(cell.nimgs) * 2 + 1
+    if rcut is None:
+        kmesh = np.asarray(cell.nimgs) * 2 + 1
+    else:
+        nimgs = cell.get_bounding_sphere(rcut)
+        kmesh = nimgs * 2 + 1
     if precision is None:
-        precision = cell.precision * 1e2
+        precision = cell.precision * 1e3
     for i in range(3):
         floats = scaled_kpts[:,i]
-        uniq_floats_idx = np.unique(floats.round(6), return_index=True)[1]
+        uniq_floats_idx = np.unique((floats/precision+.5).astype(int),
+                                    return_index=True)[1]
         uniq_floats = floats[uniq_floats_idx]
-        # Limit the number of images to 30 in each direction
-        fracs = [Fraction(x).limit_denominator(30) for x in uniq_floats]
+        if bound_by_supmol:
+            denom = int(kmesh[i])
+        else:
+            denom = max(int(kmesh[i]), len(uniq_floats))
+        fracs = [Fraction(x).limit_denominator(denom) for x in uniq_floats]
         denominators = np.unique([x.denominator for x in fracs])
         common_denominator = reduce(np.lcm, denominators)
-        fs = common_denominator * uniq_floats
+        fs = [(x * common_denominator).numerator for x in fracs]
         if abs(uniq_floats - np.rint(fs)/common_denominator).max() < precision:
-            kmesh[i] = min(kmesh[i], common_denominator)
+            kmesh[i] = common_denominator
+        elif not bound_by_supmol:
+            raise RuntimeError(f'Unable to find Monkhorst-Pack k-point mesh for {kpts}')
         if cell.verbose >= logger.DEBUG3:
             logger.debug3(cell, 'dim=%d common_denominator %d  error %g',
                           i, common_denominator, abs(fs - np.rint(fs)).max())

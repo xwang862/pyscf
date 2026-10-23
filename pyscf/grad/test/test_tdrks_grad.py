@@ -34,14 +34,15 @@ def setUpModule():
     mol.unit = 'B'
     mol.basis = '631g'
     mol.build()
-    mf_lda = dft.RKS(mol).set(xc='LDA,')
-    mf_lda.grids.prune = False
-    mf_lda.conv_tol = 1e-10
-    mf_lda.kernel()
-    mf_gga = dft.RKS(mol).set(xc='b88,')
-    mf_gga.grids.prune = False
-    mf_gga.conv_tol = 1e-10
-    mf_gga.kernel()
+    with lib.temporary_env(dft.radi, ATOM_SPECIFIC_TREUTLER_GRIDS=False):
+        mf_lda = dft.RKS(mol).set(xc='LDA,')
+        mf_lda.grids.prune = False
+        mf_lda.conv_tol = 1e-10
+        mf_lda.kernel()
+        mf_gga = dft.RKS(mol).set(xc='b88,')
+        mf_gga.grids.prune = False
+        mf_gga.conv_tol = 1e-10
+        mf_gga.kernel()
     nstates = 5 # to ensure the first 3 TDSCF states are converged
 
 def tearDownModule():
@@ -49,8 +50,17 @@ def tearDownModule():
     del mol, mf_lda, mf_gga
 
 class KnownValues(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.original_grids = dft.radi.ATOM_SPECIFIC_TREUTLER_GRIDS
+        dft.radi.ATOM_SPECIFIC_TREUTLER_GRIDS = False
+
+    @classmethod
+    def tearDownClass(cls):
+        dft.radi.ATOM_SPECIFIC_TREUTLER_GRIDS = cls.original_grids
+
     def test_tda_singlet_lda(self):
-        td = tdscf.TDA(mf_lda).run(nstates=nstates)
+        td = tdscf.TDA(mf_lda).run(conv_tol=1e-6, nstates=nstates)
         tdg = td.nuc_grad_method()
         g1 = tdg.kernel(td.xy[2])
         self.assertAlmostEqual(g1[0,2], -9.23916667e-02, 6)
@@ -68,13 +78,14 @@ class KnownValues(unittest.TestCase):
         self.assertAlmostEqual(abs((e1[2]-e2[2])/.002 - g1[0,2]).max(), 0, 4)
 
     def test_tda_singlet_b88(self):
-        td = tdscf.TDA(mf_gga).run(nstates=nstates)
+        td = tdscf.TDA(mf_gga).run(conv_tol=1e-6, nstates=nstates)
         tdg = td.nuc_grad_method()
         g1 = tdg.kernel(state=3)
         self.assertAlmostEqual(g1[0,2], -9.32506535e-02, 6)
 
-    @unittest.skipIf(not hasattr(dft, 'xcfun'), 'xcfun not available')
     def test_tda_singlet_b3lyp_xcfun(self):
+        if not hasattr(dft, 'xcfun'):
+            raise unittest.SkipTest('PySCF not built with XCFun.')
         mf = dft.RKS(mol)
         mf.xc = 'b3lyp5'
         mf._numint.libxc = dft.xcfun
@@ -141,6 +152,8 @@ class KnownValues(unittest.TestCase):
         self.assertAlmostEqual(abs((e1[2]-e2[2])/.002 - g1[0,2]).max(), 0, 3)
 
     def test_tddft_b3lyp_high_cost(self):
+        if not hasattr(dft, 'xcfun'):
+            raise unittest.SkipTest('PySCF not built with XCFun.')
         mf = dft.RKS(mol)
         mf.xc = 'b3lyp5'
         mf._numint.libxc = dft.xcfun
@@ -151,7 +164,30 @@ class KnownValues(unittest.TestCase):
         g1 = tdg.kernel(state=3)
         self.assertAlmostEqual(g1[0,2], -1.55778110e-01, 6)
 
+    def test_second_grids_tda_grad(self):
+        mf = dft.RKS(mol).set(xc='b3lyp', conv_tol=1e-11)
+        mf.kernel()
+        td = tdscf.TDA(mf).run(nstates=nstates)
+        g0 = td.nuc_grad_method().kernel(state=1)
+
+        # second_grids equal to mf.grids reproduces the default gradient
+        mf.second_grids = mf.grids
+        td = tdscf.TDA(mf).run(nstates=nstates)
+        g1 = td.nuc_grad_method().kernel(state=1)
+        self.assertAlmostEqual(abs(g1 - g0).max(), 0, 7)
+        mf.second_grids = None
+
+        # A level-1 secondary grid gives a very similar gradient
+        mf.set_second_grids(1)
+        td = tdscf.TDA(mf).run(nstates=nstates)
+        g2 = td.nuc_grad_method().kernel(state=1)
+        self.assertTrue(mf.second_grids.coords.shape[0] < mf.grids.coords.shape[0])
+        self.assertAlmostEqual(abs(g2 - g0).max(), 0, 5)
+        mf.second_grids = None
+
     def test_range_separated_high_cost(self):
+        if not hasattr(dft, 'xcfun'):
+            raise unittest.SkipTest('PySCF not built with XCFun.')
         mol = gto.M(atom="H; H 1 1.", basis='631g', verbose=0)
         mf = dft.RKS(mol).set(xc='CAMB3LYP')
         mf._numint.libxc = dft.xcfun

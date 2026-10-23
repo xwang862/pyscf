@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-# Copyright 2014-2019 The PySCF Developers. All Rights Reserved.
+# Copyright 2014-2026 The PySCF Developers. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -27,6 +27,7 @@ from pyscf import lib
 from pyscf.lib import logger
 from pyscf.scf import hf
 from pyscf.scf import uhf
+from pyscf.data import nist
 from pyscf import __config__
 
 WITH_META_LOWDIN = getattr(__config__, 'scf_analyze_with_meta_lowdin', True)
@@ -155,8 +156,6 @@ def get_roothaan_fock(focka_fockb, dma_dmb, s):
 
 def get_occ(mf, mo_energy=None, mo_coeff=None):
     '''Label the occupancies for each orbital.
-    NOTE the occupancies are not assigned based on the orbital energy ordering.
-    The first N orbitals are assigned to be occupied orbitals.
 
     Examples:
 
@@ -164,7 +163,7 @@ def get_occ(mf, mo_energy=None, mo_coeff=None):
     >>> mf = scf.hf.SCF(mol)
     >>> energy = numpy.array([-10., -1., 1, -2., 0, -3])
     >>> mf.get_occ(energy)
-    array([2, 2, 2, 2, 1, 0])
+    array([2, 2, 0, 2, 1, 2])
     '''
 
     if mo_energy is None: mo_energy = mf.mo_energy
@@ -182,16 +181,22 @@ def get_occ(mf, mo_energy=None, mo_coeff=None):
         nocc, ncore = nelec
     else:
         ncore, nocc = nelec
+    if nocc > nmo:
+        raise RuntimeError('Failed to assign mo_occ. '
+                           f'Nocc ({nocc}) > Nmo ({nmo})')
     nopen = nocc - ncore
     mo_occ = _fill_rohf_occ(mo_energy, mo_ea, mo_eb, ncore, nopen)
 
-    if mf.verbose >= logger.INFO and nocc < nmo and ncore > 0:
+    if mf.verbose >= logger.INFO and 0 < nocc < nmo and ncore > 0:
         ehomo = max(mo_energy[mo_occ> 0])
         elumo = min(mo_energy[mo_occ==0])
+        gap = (elumo - ehomo) * nist.HARTREE2EV
+        mf.scf_summary['gap'] = gap
         if ehomo+1e-3 > elumo:
             logger.warn(mf, 'HOMO %.15g >= LUMO %.15g', ehomo, elumo)
         else:
-            logger.info(mf, '  HOMO = %.15g  LUMO = %.15g', ehomo, elumo)
+            logger.info(mf, '  HOMO = %.15g  LUMO = %.15g  gap/eV = %.5f',
+                        ehomo, elumo, gap)
         if nopen > 0 and mf.verbose >= logger.DEBUG:
             core_idx = mo_occ == 2
             open_idx = mo_occ == 1
@@ -443,8 +448,8 @@ This is the Gaussian fit version as described in doi:10.1063/5.0004046.''')
     get_occ = get_occ
 
     @lib.with_doc(hf.eig.__doc__)
-    def eig(self, fock, s):
-        e, c = self._eigh(fock, s)
+    def eig(self, fock, s, overwrite=False, x=None):
+        e, c = self._eigh(fock, s, overwrite, x)
         if getattr(fock, 'focka', None) is not None:
             mo_ea = numpy.einsum('pi,pi->i', c.conj(), fock.focka.dot(c)).real
             mo_eb = numpy.einsum('pi,pi->i', c.conj(), fock.fockb.dot(c)).real
@@ -471,26 +476,20 @@ This is the Gaussian fit version as described in doi:10.1063/5.0004046.''')
     energy_elec = energy_elec
 
     @lib.with_doc(uhf.get_veff.__doc__)
-    def get_veff(self, mol=None, dm=None, dm_last=0, vhf_last=0, hermi=1):
-        if mol is None: mol = self.mol
+    def get_veff(self, mol=None, dm=None, dm_last=None, vhf_last=None, hermi=1):
         if dm is None: dm = self.make_rdm1()
-        if isinstance(dm, numpy.ndarray) and dm.ndim == 2:
-            dm = numpy.array((dm*.5, dm*.5))
-
         if self._eri is not None or not self.direct_scf:
             if hasattr(dm, 'mo_occ') and numpy.ndim(dm.mo_occ) == 1:
                 mo_occa = (dm.mo_occ > 0).astype(numpy.double)
                 mo_occb = (dm.mo_occ ==2).astype(numpy.double)
                 dm = lib.tag_array(dm, mo_coeff=(dm.mo_coeff,)*2,
                                    mo_occ=(mo_occa,mo_occb))
-            vj, vk = self.get_jk(mol, dm, hermi)
-            vhf = vj[0] + vj[1] - vk
-        else:
-            ddm = dm - numpy.asarray(dm_last)
-            vj, vk = self.get_jk(mol, ddm, hermi)
-            vhf = vj[0] + vj[1] - vk
-            vhf += numpy.asarray(vhf_last)
-        return vhf
+        if dm_last is not None and dm_last.ndim == 2:
+            # When a RHF density matrix is provided as initial guess, dm_last
+            # will be this RHF-DM, with ndim == 2 in the second SCF iteration.
+            # Extend the dimension of this DM.
+            dm_last = numpy.repeat(dm_last[None]*.5, 2, axis=0)
+        return uhf.UHF.get_veff(self, mol, dm, dm_last, vhf_last, hermi)
 
     @lib.with_doc(analyze.__doc__)
     def analyze(self, verbose=None, with_meta_lowdin=WITH_META_LOWDIN,

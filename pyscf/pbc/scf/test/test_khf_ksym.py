@@ -18,7 +18,7 @@
 
 import unittest
 import numpy as np
-
+from pyscf.dft import radi
 from pyscf.pbc import gto as pbcgto
 from pyscf.pbc import scf as pscf
 from pyscf.pbc.scf import khf,kuhf
@@ -35,7 +35,7 @@ def make_primitive_cell(mesh, spin=0):
     cell.pseudo = 'gth-pade'
     cell.mesh = mesh
     cell.spin = spin
-    cell.verbose = 0
+    cell.verbose = 6
     cell.output = '/dev/null'
     cell.space_group_symmetry = True
     cell.build()
@@ -71,6 +71,15 @@ def tearDownModule():
     del cell, He, nk, kmf0, kumf0, kmf_ksymm, kumf_ksymm
 
 class KnownValues(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.original_grids = radi.ATOM_SPECIFIC_TREUTLER_GRIDS
+        radi.ATOM_SPECIFIC_TREUTLER_GRIDS = False
+
+    @classmethod
+    def tearDownClass(cls):
+        radi.ATOM_SPECIFIC_TREUTLER_GRIDS = cls.original_grids
+
     def test_krhf_gamma_center(self):
         self.assertAlmostEqual(kmf_ksymm.e_tot, kmf0.e_tot, 7)
 
@@ -128,7 +137,7 @@ class KnownValues(unittest.TestCase):
         kmf = pscf.KRHF(He, kpts=kpts).density_fit().run()
         self.assertAlmostEqual(kmf.e_tot, kmf0.e_tot, 7)
 
-    def test_krhf_mdf(self):
+    def test_krhf_mdf_high_cost(self):
         kpts0 = He.make_kpts(nk)
         kmf0 = khf.KRHF(He, kpts=kpts0).mix_density_fit().run()
 
@@ -144,7 +153,7 @@ class KnownValues(unittest.TestCase):
         kmf = pscf.KUHF(He, kpts=kpts).density_fit().run()
         self.assertAlmostEqual(kmf.e_tot, kmf0.e_tot, 7)
 
-    def test_kuhf_mdf(self):
+    def test_kuhf_mdf_high_cost(self):
         kpts0 = He.make_kpts(nk)
         kmf0 = kuhf.KUHF(He, kpts=kpts0).mix_density_fit().run()
 
@@ -318,6 +327,25 @@ class KnownValues(unittest.TestCase):
         kmf1.max_cycle=1
         kmf1.kernel(kmf1.make_rdm1())
         self.assertAlmostEqual(kmf1.e_tot, kmf.e_tot, 9)
+
+    def test_khf_newton(self):
+        kpts = cell.make_kpts(nk,space_group_symmetry=True,time_reversal_symmetry=True)
+        kmf = pscf.KRHF(cell, kpts=kpts).newton().run()
+        self.assertAlmostEqual(kmf.e_tot, kmf0.e_tot, 6)
+
+    def test_kuhf_newton(self):
+        kpts = cell.make_kpts(nk,space_group_symmetry=True,time_reversal_symmetry=True)
+        kmf = pscf.KUHF(cell, kpts=kpts).newton().run()
+        self.assertAlmostEqual(kmf.e_tot, kmf0.e_tot, 6)
+
+    def test_trs_real_orb(self):
+        from pyscf.pbc.lib.kpts_helper import is_trim
+        kpts = cell.make_kpts([2,2,1], time_reversal_symmetry=True)
+        kmf = pscf.KRHF(cell, kpts=kpts).run()
+        mask = is_trim(kmf.cell, kmf.kpts.kpts_ibz)
+        for k,mo in enumerate(kmf.mo_coeff):
+            if mask[k]:
+                self.assertAlmostEqual(abs(kmf.mo_coeff[k].imag).max(), 0, 8)
 
 if __name__ == '__main__':
     print("Full Tests for HF with k-point symmetry")

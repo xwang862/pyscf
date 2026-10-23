@@ -46,6 +46,14 @@ def tearDownModule():
 
 
 class KnownValues(unittest.TestCase):
+    def test_ucasscf(self):
+        mc = mcscf.UCASSCF(m, 4, 4)
+        mc.conv_tol = 1e-8
+        with lib.NamedTemporaryFile() as f:
+            mc.chkfile = f.name
+            mc.run()
+        self.assertAlmostEqual(mc.e_tot, -75.7460662487894, 6)
+
     def test_with_x2c_scanner(self):
         mc1 = mcscf.UCASSCF(m, 4, 4).x2c().run()
         self.assertAlmostEqual(mc1.e_tot, -75.795316854668201, 6)

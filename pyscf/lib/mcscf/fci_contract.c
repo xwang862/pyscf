@@ -21,6 +21,11 @@
 #include <string.h>
 #include <math.h>
 #include <assert.h>
+
+#ifdef HAVE_FFS
+#include <strings.h>
+#endif
+
 //#include <omp.h>
 #include "config.h"
 #include "vhf/fblas.h"
@@ -603,7 +608,9 @@ void FCImake_hdiag(double *hdiag, double *h1e, double *jdiag, double *kdiag,
 
 static int first1(uint64_t r)
 {
-#ifdef HAVE_FFS
+#if defined(__builtin_ffsll)
+        return __builtin_ffsll(r) - 1;
+#elif defined(HAVE_FFS)
         return ffsll(r) - 1;
 #else
         int n = 0;
@@ -641,6 +648,8 @@ void FCIpspace_h0tril_uhf(double *h0, double *h1e_a, double *h1e_b,
 #pragma omp for schedule(dynamic)
         for (i = 0; i < np; i++) {
         for (j = 0; j < i; j++) {
+                /* 64-bit integer to avoid integer overflow */
+                uint64_t idx = (uint64_t)i * (uint64_t)np + (uint64_t)j;
                 da = stra[i] ^ stra[j];
                 db = strb[i] ^ strb[j];
                 n1da = FCIpopcount_1(da);
@@ -661,9 +670,9 @@ void FCIpspace_h0tril_uhf(double *h0, double *h1e_a, double *h1e_b,
                                 }
                         }
                         if (FCIcre_des_sign(pi, pj, strb[j]) > 0) {
-                                h0[i*np+j] = tmp;
+                                h0[idx] = tmp;
                         } else {
-                                h0[i*np+j] = -tmp;
+                                h0[idx] = -tmp;
                         } break;
 
                         case 4:
@@ -674,10 +683,10 @@ void FCIpspace_h0tril_uhf(double *h0, double *h1e_a, double *h1e_b,
                         str1 = strb[j] ^ (1ULL<<pi) ^ (1ULL<<pj);
                         if (FCIcre_des_sign(pi, pj, strb[j])
                            *FCIcre_des_sign(pk, pl, str1) > 0) {
-                                h0[i*np+j] = g2e_bb[pi*d3+pj*d2+pk*norb+pl]
+                                h0[idx] = g2e_bb[pi*d3+pj*d2+pk*norb+pl]
                                            - g2e_bb[pi*d3+pl*d2+pk*norb+pj];
                         } else {
-                                h0[i*np+j] =-g2e_bb[pi*d3+pj*d2+pk*norb+pl]
+                                h0[idx] =-g2e_bb[pi*d3+pj*d2+pk*norb+pl]
                                            + g2e_bb[pi*d3+pl*d2+pk*norb+pj];
                         } } break;
                 case 2: switch (n1db) {
@@ -695,9 +704,9 @@ void FCIpspace_h0tril_uhf(double *h0, double *h1e_a, double *h1e_b,
                                 }
                         }
                         if (FCIcre_des_sign(pi, pj, stra[j]) > 0) {
-                                h0[i*np+j] = tmp;
+                                h0[idx] = tmp;
                         } else {
-                                h0[i*np+j] = -tmp;
+                                h0[idx] = -tmp;
                         } break;
 
                         case 2:
@@ -707,9 +716,9 @@ void FCIpspace_h0tril_uhf(double *h0, double *h1e_a, double *h1e_b,
                         pl = first1(db & strb[j]);
                         if (FCIcre_des_sign(pi, pj, stra[j])
                            *FCIcre_des_sign(pk, pl, strb[j]) > 0) {
-                                h0[i*np+j] = g2e_ab[pi*d3+pj*d2+pk*norb+pl];
+                                h0[idx] = g2e_ab[pi*d3+pj*d2+pk*norb+pl];
                         } else {
-                                h0[i*np+j] =-g2e_ab[pi*d3+pj*d2+pk*norb+pl];
+                                h0[idx] =-g2e_ab[pi*d3+pj*d2+pk*norb+pl];
                         } } break;
                 case 4: switch (n1db) {
                         case 0:
@@ -720,10 +729,10 @@ void FCIpspace_h0tril_uhf(double *h0, double *h1e_a, double *h1e_b,
                         str1 = stra[j] ^ (1ULL<<pi) ^ (1ULL<<pj);
                         if (FCIcre_des_sign(pi, pj, stra[j])
                            *FCIcre_des_sign(pk, pl, str1) > 0) {
-                                h0[i*np+j] = g2e_aa[pi*d3+pj*d2+pk*norb+pl]
+                                h0[idx] = g2e_aa[pi*d3+pj*d2+pk*norb+pl]
                                            - g2e_aa[pi*d3+pl*d2+pk*norb+pj];
                         } else {
-                                h0[i*np+j] =-g2e_aa[pi*d3+pj*d2+pk*norb+pl]
+                                h0[idx] =-g2e_aa[pi*d3+pj*d2+pk*norb+pl]
                                            + g2e_aa[pi*d3+pl*d2+pk*norb+pj];
                         }
                         } break;

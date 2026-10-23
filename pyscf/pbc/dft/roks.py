@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-# Copyright 2014-2019 The PySCF Developers. All Rights Reserved.
+# Copyright 2014-2026 The PySCF Developers. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -30,7 +30,7 @@ from pyscf import __config__
 
 
 @lib.with_doc(uks.get_veff.__doc__)
-def get_veff(ks, cell=None, dm=None, dm_last=0, vhf_last=0, hermi=1,
+def get_veff(ks, cell=None, dm=None, dm_last=None, vhf_last=None, hermi=1,
              kpt=None, kpts_band=None):
     if getattr(dm, 'mo_coeff', None) is not None:
         mo_coeff = dm.mo_coeff
@@ -42,10 +42,7 @@ def get_veff(ks, cell=None, dm=None, dm_last=0, vhf_last=0, hermi=1,
 
 
 class ROKS(rks.KohnShamDFT, rohf.ROHF):
-    '''UKS class adapted for PBCs.
-
-    This is a literal duplication of the molecular UKS class with some `mol`
-    variables replaced by `cell`.
+    '''PBC-ROKS at a single k-point (default: gamma point).
     '''
 
     get_vsap = rks.RKS.get_vsap
@@ -53,7 +50,7 @@ class ROKS(rks.KohnShamDFT, rohf.ROHF):
     get_veff = get_veff
     energy_elec = pyscf.dft.uks.energy_elec
 
-    def __init__(self, cell, kpt=numpy.zeros(3), xc='LDA,VWN',
+    def __init__(self, cell, kpt=None, xc='LDA,VWN',
                  exxdiv=getattr(__config__, 'pbc_scf_SCF_exxdiv', 'ewald')):
         rohf.ROHF.__init__(self, cell, kpt, exxdiv=exxdiv)
         rks.KohnShamDFT.__init__(self, xc)
@@ -68,22 +65,6 @@ class ROKS(rks.KohnShamDFT, rohf.ROHF):
         from pyscf.pbc import scf
         return self._transfer_attrs_(scf.ROHF(self.cell, self.kpt))
 
+    multigrid_numint = rks.RKS.multigrid_numint
+
     to_gpu = lib.to_gpu
-
-
-if __name__ == '__main__':
-    from pyscf.pbc import gto
-    cell = gto.Cell()
-    cell.unit = 'A'
-    cell.atom = 'C 0.,  0.,  0.; C 0.8917,  0.8917,  0.8917'
-    cell.a = '''0.      1.7834  1.7834
-                1.7834  0.      1.7834
-                1.7834  1.7834  0.    '''
-
-    cell.basis = 'gth-szv'
-    cell.pseudo = 'gth-pade'
-    cell.verbose = 7
-    cell.output = '/dev/null'
-    cell.build()
-    mf = ROKS(cell)
-    print(mf.kernel())

@@ -149,7 +149,7 @@ def project_to_atomic_orbitals(mol, ref_basis):
     aos = {}
     atm = gto.Mole()
     atmp = gto.Mole()
-    for symb in mol._basis.keys():
+    for symb in mol._basis:
         stdsymb = gto.mole._std_symbol(symb)
         atm._atm, atm._bas, atm._env = \
                 atm.make_env([[stdsymb,(0,0,0)]], {stdsymb:mol._basis[symb]}, [])
@@ -240,7 +240,13 @@ def project_to_atomic_orbitals(mol, ref_basis):
         if symb in mol._basis:
             ano = aos[symb]
         else:
-            ano = aos[mol.atom_pure_symbol(ia)]
+            try:
+                ano = aos[mol.atom_pure_symbol(ia)]
+            except KeyError:
+                if symb in mol._ecp and mol._ecp[symb][0] == 0:
+                    # Skip ECPs with nelec=0 (typically used for ghost atoms or custom ECPs
+                    # in QM/MM embedding); see PR #3243 for details.
+                    continue
         p0, p1 = p1, p1 + ano.shape[1]
         c[p0:p1,p0:p1] = ano
     return c
@@ -266,14 +272,15 @@ def pre_orth_ao_atm_scf(mol):
     return scipy.linalg.block_diag(*coeff)
 
 
-def orth_ao(mf_or_mol, method=ORTH_METHOD, pre_orth_ao=REF_BASIS, s=None):
+def orth_ao(mf_or_mol, method=ORTH_METHOD, pre_orth_ao=REF_BASIS, s=None, adjust_phase=True):
     '''Orthogonalize AOs
 
     Kwargs:
         method : str
             One of
             | lowdin : Symmetric orthogonalization
-            | meta-lowdin : Lowdin orth within core, valence, virtual space separately (JCTC, 10, 3784)
+            | meta-lowdin : Lowdin orth within core, valence, virtual space separately
+                            (JCTC, 10, 3784)
             | NAO
 
         pre_orth_ao: numpy.ndarray or basis str or basis dict
@@ -284,6 +291,10 @@ def orth_ao(mf_or_mol, method=ORTH_METHOD, pre_orth_ao=REF_BASIS, s=None):
             reference basis (by default ANO basis) that the projection
             coefficients are generated based on.  Skip this projection step by
             setting this variable to None.
+
+        adjust_phase : boolean
+            If set True and if real-valued orbitals, the sign of diagonal orb coeff matrix
+            is adjusted to positive. Defaul is True.
     '''
     from pyscf import scf
     from pyscf.lo import nao
@@ -325,9 +336,10 @@ def orth_ao(mf_or_mol, method=ORTH_METHOD, pre_orth_ao=REF_BASIS, s=None):
         c_orth = nao._nao_sub(mol, weight, pre_orth_ao, s)
 
     # adjust phase
-    for i in range(c_orth.shape[1]):
-        if c_orth[i,i] < 0:
-            c_orth[:,i] *= -1
+    if c_orth.dtype == numpy.float64 and adjust_phase:
+        for i in range(c_orth.shape[1]):
+            if c_orth[i,i] < 0:
+                c_orth[:,i] *= -1
     return c_orth
 
 del (ORTH_METHOD)

@@ -19,7 +19,7 @@ from pyscf import gto, dft, lib
 from pyscf import grad, hessian
 try:
     from pyscf.dispersion import dftd3, dftd4
-except ImportError:
+except (ImportError, OSError):
     dftd3 = dftd4 = None
 
 def setUpModule():
@@ -96,6 +96,15 @@ def finite_partial_diff(mf):
     return e2ref
 
 class KnownValues(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.original_grids = dft.radi.ATOM_SPECIFIC_TREUTLER_GRIDS
+        dft.radi.ATOM_SPECIFIC_TREUTLER_GRIDS = False
+
+    @classmethod
+    def tearDownClass(cls):
+        dft.radi.ATOM_SPECIFIC_TREUTLER_GRIDS = cls.original_grids
+
     def test_uks_hess_atmlst(self):
         mf = dft.UKS(mol)
         mf.xc = 'pbe0'

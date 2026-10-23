@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-# Copyright 2014-2020 The PySCF Developers. All Rights Reserved.
+# Copyright 2014-2026 The PySCF Developers. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,8 +17,8 @@
 #
 
 import unittest
-import tempfile
 import numpy
+import numpy as np
 import scipy.linalg
 from functools import reduce
 
@@ -41,7 +41,7 @@ def setUpModule():
     )
     mf = scf.GHF(mol)
     mf.conv_tol = 1e-12
-    mf.chkfile = tempfile.NamedTemporaryFile().name
+    mf.chkfile = lib.NamedTemporaryFile().name
     mf.kernel()
 
     molsym = gto.M(
@@ -57,8 +57,8 @@ def setUpModule():
     mfsym = scf.GHF(molsym).run(conv_tol=1e-10)
 
     mol1 = gto.M(atom=mol.atom, basis='631g', spin=2, verbose=0)
-    mf_r = scf.RHF(mol1).run(conv_tol=1e-10, chkfile=tempfile.NamedTemporaryFile().name)
-    mf_u = scf.RHF(mol1).run(conv_tol=1e-10, chkfile=tempfile.NamedTemporaryFile().name)
+    mf_r = scf.RHF(mol1).run(conv_tol=1e-10, chkfile=lib.NamedTemporaryFile().name)
+    mf_u = scf.RHF(mol1).run(conv_tol=1e-10, chkfile=lib.NamedTemporaryFile().name)
 
 def tearDownModule():
     global mol, mf, molsym, mfsym, mol1, mf_r, mf_u
@@ -97,6 +97,7 @@ def spin_square(mol, mo):
     return ss
 
 class KnownValues(unittest.TestCase):
+
     def test_init_guess_minao(self):
         dm = mf.get_init_guess(mol, key='minao')
         self.assertEqual(dm.shape, (48,48))
@@ -110,7 +111,7 @@ class KnownValues(unittest.TestCase):
         self.assertAlmostEqual(lib.fp(dm[24:,24:])*2, 2.7821827416174094, 7)
 
     def test_init_guess_chk(self):
-        dm = mol.GHF(chkfile=tempfile.NamedTemporaryFile().name).get_init_guess(mol, key='chkfile')
+        dm = mol.GHF(chkfile=lib.NamedTemporaryFile().name).get_init_guess(mol, key='chkfile')
         self.assertEqual(dm.shape, (48,48))
         self.assertAlmostEqual(lib.fp(dm), 1.8117584283411752, 5)
 
@@ -331,6 +332,12 @@ H     0    0.757    0.587'''
         vk = mf1.get_k(pmol, dm[0,0], hermi=0)
         self.assertAlmostEqual(abs(vj-vk-vhf2).max(), 0, 12)
 
+        vhf5 = mf1.get_veff(pmol, dm[1,0], dm_last=dm[0,0],
+                            vhf_last=vhf2, hermi=0)
+        ref = mf1.get_veff(pmol, dm[1,0], hermi=0)
+        self.assertAlmostEqual(abs(ref - vhf5).max(), 0, 12)
+        self.assertAlmostEqual(vhf5.ecoul, ref.ecoul, 12)
+
     def test_guess_orbspin(self):
         self.assertTrue(numpy.all(scf.ghf.guess_orbspin(mf.mo_coeff) == -1))
         mf1 = scf.addons.convert_to_ghf(mf_r)
@@ -399,6 +406,19 @@ I F
         # from DIRAC19. See issue #744
         ref = -11.76034990661
         self.assertAlmostEqual(mf.e_tot, ref, 9)
+
+    def test_multipoles(self):
+        mf = mol.UHF().to_ghf()
+        nao = mol.nao
+        np.random.seed(1)
+        dm = np.random.rand(nao*2, nao*2) + np.random.rand(nao*2, nao*2) * .5j
+        dm = dm + dm.conj().T
+        spatial_dm = dm[:nao,:nao] + dm[nao:,nao:]
+        ref = scf.hf.dip_moment(mol, spatial_dm)
+        assert abs(mf.dip_moment(dm=dm) - ref).max() < 1e-10
+
+        ref = scf.hf.quad_moment(mol, spatial_dm, verbose=0)
+        assert abs(mf.quad_moment(dm=dm) - ref).max() < 1e-10
 
 
 if __name__ == "__main__":

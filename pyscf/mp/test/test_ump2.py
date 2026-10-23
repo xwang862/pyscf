@@ -16,6 +16,7 @@
 import unittest
 from functools import reduce
 import numpy
+import numpy as np
 from pyscf import lib
 from pyscf import gto
 from pyscf import scf
@@ -53,7 +54,7 @@ class KnownValues(unittest.TestCase):
         self.assertAlmostEqual(pt.e_corr_os, -0.12312431898078077, 8)
 
         pt.max_memory = 1
-        pt.frozen = None
+        pt.frozen = []
         emp2, t2 = pt.kernel()
         self.assertAlmostEqual(emp2, -0.16575150552336643, 8)
         self.assertAlmostEqual(pt.e_corr_ss, -0.042627186675330754, 8)
@@ -134,6 +135,14 @@ class KnownValues(unittest.TestCase):
         pt.kernel(with_t2=False)
         self.assertAlmostEqual(pt.emp2, -0.11202141654451162, 8)
 
+        pt.frozen = 0
+        pt.kernel(with_t2=False)
+        self.assertAlmostEqual(pt.emp2, -0.16575150555077223, 8)
+
+        pt.frozen = np.array([0])
+        pt.kernel(with_t2=False)
+        self.assertAlmostEqual(pt.emp2, -0.16358835058878066, 8)
+
     def test_ump2_outcore_frozen(self):
         pt = mp.MP2(mf)
         pt.max_memory = 0
@@ -154,19 +163,20 @@ class KnownValues(unittest.TestCase):
         e = pt.kernel(with_t2=False)[0]
         self.assertAlmostEqual(e, -0.11264162733420097, 8)
 
-        #pt = mp.dfump2.DFUMP2(mf.density_fit('weigend'))
-        #pt.frozen = [1]
-        #e = pt.kernel()[0]
-        #self.assertAlmostEqual(e, -0.11264162733420097, 8)
+        pt = mp.dfump2.DFUMP2(mf.density_fit('weigend'))
+        pt.frozen = [1]
+        e = pt.kernel()[0]
+        self.assertAlmostEqual(e, -0.11264162733420097, 8)
 
-        #pt = mp.dfump2.DFUMP2(mf)
-        #pt.frozen = [1]
-        #pt.with_df = mf.density_fit('weigend').with_df
-        #e = pt.kernel()[0]
-        #self.assertAlmostEqual(e, -0.11264162733420097, 8)
+        pt = mp.dfump2.DFUMP2(mf)
+        pt.frozen = [1]
+        pt.with_df = mf.density_fit('weigend').with_df
+        e = pt.kernel()[0]
+        self.assertAlmostEqual(e, -0.11264162733420097, 8)
 
     def test_ump2_ao2mo_ovov(self):
         pt = mp.UMP2(mf)
+        pt.frozen = 0
         nocca, noccb = mol.nelec
         orboa = mf.mo_coeff[0][:,:nocca]
         orbva = mf.mo_coeff[0][:,nocca:]
@@ -272,7 +282,38 @@ class KnownValues(unittest.TestCase):
     def test_non_canonical_mp2(self):
         mf = scf.UHF(mol).run(max_cycle=1)
         pt = mp.MP2(mf)
-        self.assertAlmostEqual(pt.kernel()[0], -0.1707921460057042, 7)
+        e = pt.kernel()[0]
+        self.assertAlmostEqual(e, -0.1949781959138, 7)
+        # first-order singles (T1) of the f_ov != 0 reference
+        self.assertAlmostEqual(pt.e_corr_singles, -0.024186048914, 7)
+        # the doubles part is unchanged by the T1 treatment
+        self.assertAlmostEqual(e - pt.e_corr_singles, -0.1707921460057042, 7)
+
+    def test_non_canonical_mp2_rdm(self):
+        # T1 enters the occupied-virtual blocks of the 1-RDM linearly and via
+        # the t1.t2 cross terms, and quadratically in the occ/vir blocks
+        # (issue #1687). The full density equals ucisd.make_rdm1 with
+        # civec = amplitudes_to_cisdvec(1, t1, t2).
+        mf = scf.UHF(mol).run(max_cycle=1)
+        pt = mp.MP2(mf)
+        pt.kernel()
+        t1a, t1b = pt.t1
+        t2aa, t2ab, t2bb = pt.t2
+        dm1a, dm1b = pt.make_rdm1()
+        nocca, noccb = pt.nocc
+        crossa = (numpy.einsum('jb,ijab->ai', t1a.conj(), t2aa) +
+                  numpy.einsum('jb,ijab->ai', t1b.conj(), t2ab))
+        crossb = (numpy.einsum('jb,ijab->ai', t1b.conj(), t2bb) +
+                  numpy.einsum('jb,jiba->ai', t1a.conj(), t2ab))
+        self.assertAlmostEqual(abs(dm1a[:nocca,nocca:] - (t1a + crossa.T)).max(), 0, 9)
+        self.assertAlmostEqual(abs(dm1b[:noccb,noccb:] - (t1b + crossb.T)).max(), 0, 9)
+        pt.t1 = None
+        dm1a0, dm1b0 = pt.make_rdm1()
+        pt.t1 = (t1a, t1b)
+        self.assertAlmostEqual(abs((dm1a[:nocca,:nocca] - dm1a0[:nocca,:nocca]) +
+                                   numpy.einsum('ia,ja->ij', t1a, t1a)).max(), 0, 9)
+        self.assertAlmostEqual(abs((dm1b[:noccb,:noccb] - dm1b0[:noccb,:noccb]) +
+                                   numpy.einsum('ia,ja->ij', t1b, t1b)).max(), 0, 9)
 
 
 

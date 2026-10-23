@@ -100,25 +100,25 @@ class KnownValues(unittest.TestCase):
         g = mf.get_grad(mf.mo_coeff, mf.mo_occ)
         self.assertAlmostEqual(abs(g).max(), 0, 5)
 
-    if scf.dhf.zquatev:
-        def test_rhf(self):
-            mol = gto.M(
-                verbose = 5,
-                output = '/dev/null',
-                atom = '''
-                    O     0    0        0
-                    H     0    -0.757   0.587
-                    H     0    0.757    0.587''',
-                basis = '631g',
-            )
-            mf = scf.dhf.RHF(mol)
-            mf.with_ssss = False
-            mf.conv_tol_grad = 1e-5
-            self.assertAlmostEqual(mf.kernel(), -76.03852477545016, 8)
+    @unittest.skipIf(scf.dhf.zquatev is None, 'requires zquatev')
+    def test_rhf(self):
+        mol = gto.M(
+            verbose = 5,
+            output = '/dev/null',
+            atom = '''
+                O     0    0        0
+                H     0    -0.757   0.587
+                H     0    0.757    0.587''',
+            basis = '631g',
+        )
+        mf = scf.dhf.RHF(mol)
+        mf.with_ssss = False
+        mf.conv_tol_grad = 1e-5
+        self.assertAlmostEqual(mf.kernel(), -76.03852477545016, 8)
 
-            mf.ssss_approx = None
-            mf.conv_tol_grad = 1e-5
-            self.assertAlmostEqual(mf.kernel(), -76.03852480744785, 8)
+        mf.ssss_approx = None
+        mf.conv_tol_grad = 1e-5
+        self.assertAlmostEqual(mf.kernel(), -76.03852480744785, 8)
 
     def test_get_veff(self):
         n4c = mol.nao_2c() * 2
@@ -238,6 +238,7 @@ class KnownValues(unittest.TestCase):
         vj0 = numpy.einsum('ijkl,xlk->xij', eri1, dm)
         vk0 = numpy.einsum('ijkl,xjk->xil', eri1, dm)
 
+        mf = scf.dhf.DHF(h4)
         mf.with_breit = True
         vj1, vk1 = mf.get_jk(h4, dm, hermi=1)
         self.assertTrue(numpy.allclose(vj0, vj1))
@@ -249,11 +250,17 @@ class KnownValues(unittest.TestCase):
         n4c = erig.shape[0]
         numpy.random.seed(1)
         dm = numpy.random.random((2,n4c,n4c))+numpy.random.random((2,n4c,n4c))*1j
+        c1 = .5 / lib.param.LIGHT_SPEED
+        vj0 = -numpy.einsum('ijkl,xlk->xij', erig, dm) * c1**2
+        vk0 = -numpy.einsum('ijkl,xjk->xil', erig, dm) * c1**2
+        vj1, vk1 = scf.dhf._call_veff_gaunt_breit(h4, dm, hermi=0)
+        self.assertAlmostEqual(abs(vj0 - vj1).max(), 0, 12)
+        self.assertAlmostEqual(abs(vk0 - vk1).max(), 0, 12)
+
         dm = dm + dm.transpose(0,2,1).conj()
         c1 = .5 / lib.param.LIGHT_SPEED
         vj0 = -numpy.einsum('ijkl,xlk->xij', erig, dm) * c1**2
         vk0 = -numpy.einsum('ijkl,xjk->xil', erig, dm) * c1**2
-
         vj1, vk1 = scf.dhf._call_veff_gaunt_breit(h4, dm)
         self.assertTrue(numpy.allclose(vj0, vj1))
         self.assertTrue(numpy.allclose(vk0, vk1))
@@ -278,11 +285,17 @@ class KnownValues(unittest.TestCase):
         n4c = erig.shape[0]
         numpy.random.seed(1)
         dm = numpy.random.random((n4c,n4c))+numpy.random.random((n4c,n4c))*1j
+        c1 = .5 / lib.param.LIGHT_SPEED
+        vj0 = -numpy.einsum('ijkl,xlk->xij', erig, dm) * c1**2
+        vk0 = -numpy.einsum('ijkl,xjk->xil', erig, dm) * c1**2
+        vj1, vk1 = scf.dhf._call_veff_gaunt_breit(h4, dm, hermi=0)
+        self.assertAlmostEqual(abs(vj0 - vj1).max(), 0, 12)
+        self.assertAlmostEqual(abs(vk0 - vk1).max(), 0, 12)
+
         dm = dm + dm.T.conj()
         c1 = .5 / lib.param.LIGHT_SPEED
         vj0 = numpy.einsum('ijkl,lk->ij', erig, dm) * c1**2
         vk0 = numpy.einsum('ijkl,jk->il', erig, dm) * c1**2
-
         vj1, vk1 = scf.dhf._call_veff_gaunt_breit(h4, dm, with_breit=True)
         self.assertTrue(numpy.allclose(vj0, vj1))
         self.assertTrue(numpy.allclose(vk0, vk1))
@@ -313,6 +326,23 @@ class KnownValues(unittest.TestCase):
         e = mol.DHF().kernel()
         self.assertAlmostEqual(e, -1.066122658859047, 12)
 
+    def test_he_with_gaunt(self):
+        mol = gto.M(
+            atom=[['He', (0.,0.,0.)]],
+            basis = {
+                'He': [(0, 0, (1, 1)),
+                       (0, 0, (3, 1)),
+                       (1, 0, (1, 1)), ]})
+        method = mol.DHF()
+        energy = method.scf()
+        self.assertAlmostEqual(energy, -2.38146942868, 8)
+        method.with_gaunt = True
+        energy = method.scf()
+        self.assertAlmostEqual(energy, -2.38138339005, 8)
+        method.with_breit = True
+        energy = method.scf()
+        self.assertAlmostEqual(energy, -2.38138339005, 8)
+
 def _fill_gaunt(mol, erig):
     n2c = erig.shape[0]
     n4c = n2c * 2
@@ -324,23 +354,22 @@ def _fill_gaunt(mol, erig):
     eri0 = numpy.zeros((n4c,n4c,n4c,n4c), dtype=numpy.complex128)
     eri0[:n2c,n2c:,:n2c,n2c:] = erig # ssp1ssp2
 
-    eri2 = erig.take(idx,axis=0).take(idx,axis=1) # sps1ssp2
+    eri2 = erig[idx[:,None],idx] # sps1ssp2
     eri2[sign_mask,:] *= -1
     eri2[:,sign_mask] *= -1
     eri2 = -eri2.transpose(1,0,2,3)
     eri0[n2c:,:n2c,:n2c,n2c:] = eri2
 
-    eri2 = erig.take(idx,axis=2).take(idx,axis=3) # ssp1sps2
+    eri2 = erig[:,:,idx[:,None],idx] # ssp1sps2
     eri2[:,:,sign_mask,:] *= -1
     eri2[:,:,:,sign_mask] *= -1
     eri2 = -eri2.transpose(0,1,3,2)
     #self.assertTrue(numpy.allclose(eri0, eri2))
     eri0[:n2c,n2c:,n2c:,:n2c] = eri2
 
-    eri2 = erig.take(idx,axis=0).take(idx,axis=1)
-    eri2 = eri2.take(idx,axis=2).take(idx,axis=3) # sps1sps2
-    eri2 = eri2.transpose(1,0,2,3)
-    eri2 = eri2.transpose(0,1,3,2)
+    eri2 = erig[idx[:,None],idx]
+    eri2 = eri2[:,:,idx[:,None],idx] # sps1sps2
+    eri2 = eri2.transpose(1,0,3,2)
     eri2[sign_mask,:] *= -1
     eri2[:,sign_mask] *= -1
     eri2[:,:,sign_mask,:] *= -1

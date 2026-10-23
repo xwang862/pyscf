@@ -22,6 +22,30 @@ import itertools
 from pyscf import lib
 
 class KnownValues(unittest.TestCase):
+    def test_inplace_transpose_scale(self):
+        a = numpy.random.random((5,5))
+        acopy = a.copy()
+        with lib.with_omp_threads(4):
+            lib.transpose(a, inplace=True)
+        self.assertAlmostEqual(abs(a.T - acopy).max(), 0, 12)
+
+        a = numpy.random.random((405,405))-1j
+        acopy = a.copy()
+        lib.transpose(a, inplace=True)
+        self.assertAlmostEqual(abs(a.T - acopy).max(), 0, 12)
+        a[:] = acopy
+        lib.inplace_transpose_scale(a, 1.5)
+        self.assertAlmostEqual(abs(a.T - acopy*1.5).max(), 0, 12)
+        a = numpy.random.random((2, 405, 405))
+        acopy = a.copy()
+        with lib.with_omp_threads(1):
+            lib.transpose(a, axes=(0,2,1), inplace=True)
+        self.assertAlmostEqual(abs(a - acopy.transpose(0,2,1)).max(), 0, 12)
+        a[:] = acopy
+        with lib.with_omp_threads(4):
+            lib.transpose(a, axes=(0,2,1), inplace=True)
+        self.assertAlmostEqual(abs(a - acopy.transpose(0,2,1)).max(), 0, 12)
+
     def test_transpose(self):
         a = numpy.random.random((400,900))
         self.assertAlmostEqual(abs(a.T - lib.transpose(a)).max(), 0, 12)
@@ -88,6 +112,36 @@ class KnownValues(unittest.TestCase):
         a = numpy.zeros((0, 5))
         self.assertEqual(lib.unpack_tril(a, axis=0).shape, (0, 0, 5))
 
+    def test_unpack_tril_complex64(self):
+        # unpack_tril for dtypes other than double/complex128 goes through
+        # a pure-Python fallback branch. For HERMITIAN/ANTIHERMI fills with
+        # a complex dtype, the upper triangle must be the conjugate of the
+        # lower triangle, matching the complex128 (ctypes-accelerated)
+        # reference path.
+        numpy.random.seed(2)
+        n = 6
+        nn = n*(n+1)//2
+        idx, idy = numpy.tril_indices(n)
+        diag = (idx == idy)
+
+        # HERMITIAN requires a real diagonal.
+        tril_h = numpy.random.random(nn) + numpy.random.random(nn)*1j
+        tril_h[diag] = tril_h[diag].real
+        tril_h64 = tril_h.astype(numpy.complex64)
+        ref = lib.unpack_tril(tril_h, filltriu=lib.HERMITIAN)
+        out = lib.unpack_tril(tril_h64, filltriu=lib.HERMITIAN)
+        self.assertAlmostEqual(abs(out - out.conj().T).max(), 0, 5)
+        self.assertAlmostEqual(abs(out - ref).max(), 0, 5)
+
+        # ANTIHERMI requires a zero diagonal.
+        tril_a = numpy.random.random(nn) + numpy.random.random(nn)*1j
+        tril_a[diag] = 0
+        tril_a64 = tril_a.astype(numpy.complex64)
+        ref = lib.unpack_tril(tril_a, filltriu=lib.ANTIHERMI)
+        out = lib.unpack_tril(tril_a64, filltriu=lib.ANTIHERMI)
+        self.assertAlmostEqual(abs(out + out.conj().T).max(), 0, 5)
+        self.assertAlmostEqual(abs(out - ref).max(), 0, 5)
+
     def test_unpack_tril_integer(self):
         a = lib.unpack_tril(numpy.arange(6, dtype=numpy.int32))
         self.assertTrue(a.dtype == numpy.int32)
@@ -97,6 +151,22 @@ class KnownValues(unittest.TestCase):
         a = lib.pack_tril(numpy.arange(9, dtype=numpy.int32).reshape(3,3))
         self.assertTrue(numpy.array_equal(a, numpy.array((0,3,4,6,7,8))))
         self.assertTrue(a.dtype == numpy.int32)
+
+    def test_pack_tril_axis0(self):
+        # axis=0 packs the leading two dimensions; they must be square.
+        n = 4
+        mat = numpy.arange(n*n*3.).reshape(n, n, 3)
+        packed = lib.pack_tril(mat, axis=0)
+        self.assertEqual(packed.shape, (n*(n+1)//2, 3))
+        ref = mat[numpy.tril_indices(n)]
+        self.assertAlmostEqual(abs(packed - ref).max(), 0, 12)
+
+        # Non-square leading dimensions must raise instead of silently
+        # returning a wrong-shape / wrong-content result.
+        bad = numpy.arange(2*4*5.).reshape(2, 4, 5)
+        self.assertRaises(ValueError, lib.pack_tril, bad, axis=0)
+        bad2 = numpy.arange(5*3*4.).reshape(5, 3, 4)
+        self.assertRaises(ValueError, lib.pack_tril, bad2, axis=0)
 
     def test_unpack_row(self):
         row = numpy.arange(28.)
@@ -230,6 +300,66 @@ class KnownValues(unittest.TestCase):
         addr = lib.ndarray_pointer_2d(a)
         self.assertTrue(all(addr == a.ctypes.data + numpy.array([0, 24, 48])))
 
+    def test_omatcopy(self):
+        a = numpy.random.random((5,5))
+        b = numpy.empty_like(a)
+        lib.omatcopy(a, out=b)
+        self.assertTrue(numpy.all(a == b))
+        a = numpy.random.random((403,410)).T
+        b = numpy.empty_like(a)
+        lib.omatcopy(a, out=b)
+        self.assertTrue(numpy.all(a == b))
+
+    def test_zeros(self):
+        a = lib.zeros((100,100), dtype=numpy.double)
+        self.assertTrue(numpy.all(a == 0))
+        self.assertTrue(a.dtype == numpy.double)
+        a = lib.zeros((100,100), dtype=numpy.complex128)
+        self.assertTrue(numpy.all(a == 0))
+        self.assertTrue(a.dtype == numpy.complex128)
+        a = lib.zeros((100,100), dtype=numpy.int32)
+        self.assertTrue(numpy.all(a == 0))
+        self.assertTrue(a.dtype == numpy.int32)
+
+    def test_entrywise_mul(self):
+        a = numpy.random.random((101,100))
+        b = numpy.random.random((101,100))
+        prod = lib.entrywise_mul(a, b)
+        self.assertTrue(numpy.allclose(prod, a * b))
+        a = numpy.random.random((101,100))
+        b = numpy.random.random((101,100))
+        a = a + a*1j
+        b = b + b*1j
+        prod = lib.entrywise_mul(a, b)
+        self.assertTrue(numpy.allclose(prod, a * b))
+        # inplace test
+        lib.entrywise_mul(a, b, out=b)
+        self.assertTrue(numpy.allclose(prod, b))
+
+    def test_broadcast_mul(self):
+        a = numpy.random.random((3,101,39))
+        b = numpy.random.random((101,39))
+        testval = lib.broadcast_mul(a, b)
+        self.assertTrue(numpy.allclose(testval, a * b[None, ...]))
+
+        a = numpy.random.random((3,101,39))
+        b = numpy.random.random((101,39))
+        c = numpy.random.random((3,101,39))
+        refval = a * b[None, ...] + c
+        testval = lib.broadcast_mul(a, b, out=c)
+        self.assertTrue(numpy.allclose(testval, refval))
+
+        a = numpy.random.random((3,101,39)) + 1j * numpy.random.random((3,101,39))
+        b = numpy.random.random((101,39)) + 1j * numpy.random.random((101,39))
+        testval = lib.broadcast_mul(a, b)
+        self.assertTrue(numpy.allclose(testval, a * b[None, ...]))
+
+        a = numpy.random.random((3,101,39)) + 1j * numpy.random.random((3,101,39))
+        b = numpy.random.random((101,39)) + 1j * numpy.random.random((101,39))
+        c = numpy.random.random((3,101,39)) + 1j * numpy.random.random((3,101,39))
+        refval = a * b[None, ...] + c
+        testval = lib.broadcast_mul(a, b, out=c)
+        self.assertTrue(numpy.allclose(testval, refval))
 if __name__ == "__main__":
     print("Full Tests for numpy_helper")
     unittest.main()

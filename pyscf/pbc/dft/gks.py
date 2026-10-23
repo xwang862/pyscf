@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-# Copyright 2014-2019 The PySCF Developers. All Rights Reserved.
+# Copyright 2014-2026 The PySCF Developers. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -39,7 +39,7 @@ from pyscf.dft import gks as mol_ks
 from pyscf import __config__
 
 
-def get_veff(ks, cell=None, dm=None, dm_last=0, vhf_last=0, hermi=1,
+def get_veff(ks, cell=None, dm=None, dm_last=None, vhf_last=None, hermi=1,
              kpt=None, kpts_band=None):
     '''Coulomb + XC functional for GKS.'''
     if cell is None: cell = ks.cell
@@ -58,7 +58,7 @@ def get_veff(ks, cell=None, dm=None, dm_last=0, vhf_last=0, hermi=1,
         raise NotImplementedError
 
     # TODO GKS with multigrid method
-    if isinstance(ks.with_df, multigrid.MultiGridFFTDF):
+    if isinstance(ks._numint, multigrid.MultiGridNumInt):
         raise NotImplementedError
 
     # ndim = 2, dm.shape = (2*nao, 2*nao)
@@ -85,9 +85,20 @@ def get_veff(ks, cell=None, dm=None, dm_last=0, vhf_last=0, hermi=1,
         vxc += vj
     else:
         omega, alpha, hyb = ks._numint.rsh_and_hybrid_coeff(ks.xc, spin=cell.spin)
-        vj, vk = ks.get_jk(cell, dm, hermi, kpt, kpts_band)
-        vk *= hyb
-        if omega != 0:
+        if omega == 0:
+            vj, vk = ks.get_jk(cell, dm, hermi, kpt, kpts_band)
+            vk *= hyb
+        elif alpha == 0: # LR=0, only SR exchange
+            vj = ks.get_j(cell, dm, hermi, kpt, kpts_band)
+            vk = ks.get_k(cell, dm, hermi, kpt, kpts_band, omega=-omega)
+            vk *= hyb
+        elif hyb == 0: # SR=0, only LR exchange
+            vj = ks.get_j(cell, dm, hermi, kpt, kpts_band)
+            vk = ks.get_k(cell, dm, hermi, kpt, kpts_band, omega=omega)
+            vk *= alpha
+        else: # SR and LR exchange with different ratios
+            vj, vk = ks.get_jk(cell, dm, hermi, kpt, kpts_band)
+            vk *= hyb
             vklr = ks.get_k(cell, dm, hermi, kpt, kpts_band, omega=omega)
             vklr *= (alpha - hyb)
             vk += vklr
@@ -105,7 +116,7 @@ def get_veff(ks, cell=None, dm=None, dm_last=0, vhf_last=0, hermi=1,
     return vxc
 
 class GKS(rks.KohnShamDFT, pbcghf.GHF):
-    '''GKS class adapted for PBCs at a single k-point.
+    '''GKS class adapted for PBCs at a single k-point (default: gamma point).
 
     This is a literal duplication of the molecular GKS class with some `mol`
     variables replaced by `cell`.
@@ -116,7 +127,7 @@ class GKS(rks.KohnShamDFT, pbcghf.GHF):
     get_veff = get_veff
     energy_elec = mol_ks.energy_elec
 
-    def __init__(self, cell, kpt=numpy.zeros(3), xc='LDA,VWN',
+    def __init__(self, cell, kpt=None, xc='LDA,VWN',
                  exxdiv=getattr(__config__, 'pbc_scf_SCF_exxdiv', 'ewald')):
         pbcghf.GHF.__init__(self, cell, kpt, exxdiv=exxdiv)
         rks.KohnShamDFT.__init__(self, xc)

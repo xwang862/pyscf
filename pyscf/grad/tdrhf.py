@@ -45,6 +45,8 @@ def grad_elec(td_grad, x_y, singlet=True, atmlst=None,
     log = logger.new_logger(td_grad, verbose)
     time0 = logger.process_clock(), logger.perf_counter()
 
+    assert td_grad.base.frozen is None
+
     mol = td_grad.mol
     mf = td_grad.base._scf
     mo_coeff = mf.mo_coeff
@@ -82,7 +84,8 @@ def grad_elec(td_grad, x_y, singlet=True, atmlst=None,
     wvo += numpy.einsum('ac,ai->ci', veff0mom[nocc:,nocc:], xmy) * 2
 
     # set singlet=None, generate function for CPHF type response kernel
-    vresp = mf.gen_response(singlet=None, hermi=1)
+    vresp = mf.gen_response(singlet=None, hermi=1,
+                            with_nlc=not td_grad.base.exclude_nlc)
     def fvind(x):  # For singlet, closed shell ground state
         dm = reduce(numpy.dot, (orbv, x.reshape(nvir,nocc)*2, orbo.T))
         v1ao = vresp(dm+dm.T)
@@ -231,7 +234,7 @@ class TDSCF_GradScanner(lib.GradScanner):
     def converged(self):
         td_scanner = self.base
         return all((td_scanner._scf.converged,
-                    td_scanner.converged[self.state]))
+                    td_scanner.converged[self.state-1]))
 
 
 class Gradients(rhf_grad.GradientsBase):
@@ -254,6 +257,9 @@ class Gradients(rhf_grad.GradientsBase):
         self.state = 1  # of which the gradients to be computed.
         self.atmlst = None
         self.de = None
+
+        if getattr(td._scf, 'with_df', None):
+            raise NotImplementedError('Nuclear Gradients for DF-TDDFT')
 
     def dump_flags(self, verbose=None):
         log = logger.new_logger(self, verbose)
@@ -290,6 +296,8 @@ class Gradients(rhf_grad.GradientsBase):
                             'Gradients of ground state is computed.')
                 return self.base._scf.nuc_grad_method().kernel(atmlst=atmlst)
 
+            if self.base.xy is None:
+                self.base.run()
             xy = self.base.xy[state-1]
 
         if singlet is None: singlet = self.base.singlet
@@ -328,6 +336,3 @@ class Gradients(rhf_grad.GradientsBase):
     to_gpu = lib.to_gpu
 
 Grad = Gradients
-
-from pyscf import tdscf
-tdscf.rhf.TDA.Gradients = tdscf.rhf.TDHF.Gradients = lib.class_as_method(Gradients)

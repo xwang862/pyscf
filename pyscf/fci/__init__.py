@@ -25,11 +25,10 @@ direct_spin1_symm   Yes           No             Yes                Yes
 direct_spin0        No            Yes            Yes                Yes
 direct_spin1        No            No             Yes                Yes
 direct_uhf          No            No             Yes                No
-direct_nosym        No            No             No**               Yes
+direct_nosym        No            No             No                 Yes
 fci_dhf_slow        No            No             No***              No
 
 *  Real hermitian Hamiltonian implies (ij|kl) = (ji|kl) = (ij|lk) = (ji|lk)
-** Hamiltonian is real but not hermitian, (ij|kl) != (ji|kl) ...
 *** Hamiltonian is complex hermitian (DHF case) or real hermitian (GHF case)
 '''
 
@@ -53,7 +52,7 @@ select_ci = selected_ci  # for backward compatibility
 from pyscf.fci import selected_ci_spin0
 from pyscf.fci import selected_ci_symm
 from pyscf.fci import selected_ci_spin0_symm
-from pyscf.fci.selected_ci import SelectedCI, SCI, SCIvector
+from pyscf.fci.selected_ci import SelectedCI, SCI, SCIvector, as_SCIvector
 
 def solver(mol=None, singlet=False, symm=None):
     if mol and symm is None:

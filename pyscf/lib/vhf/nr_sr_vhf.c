@@ -1,4 +1,5 @@
 #include <stdlib.h>
+#include <stdio.h>
 #include <assert.h>
 #include <math.h>
 //#include <omp.h>
@@ -698,9 +699,9 @@ void CVHFnr_sr_direct_drv(int (*intor)(), void (*fdot)(), JKOperator **jkop,
                                                             shls_slice, ao_loc);
         }
 
-        size_t di = GTOmax_shell_dim(ao_loc, shls_slice, 4);
-        size_t cache_size = GTOmax_cache_size(intor, shls_slice, 4,
-                                              atm, natm, bas, nbas, env);
+        int64_t di = GTOmax_shell_dim(ao_loc, shls_slice, 4);
+        int64_t cache_size = GTOmax_cache_size(intor, shls_slice, 4,
+                                               atm, natm, bas, nbas, env);
         int ish0 = shls_slice[0];
         int ish1 = shls_slice[1];
         int jsh0 = shls_slice[2];
@@ -717,11 +718,17 @@ void CVHFnr_sr_direct_drv(int (*intor)(), void (*fdot)(), JKOperator **jkop,
         assert(nksh == nish);
         assert(nlsh == nish);
         int *block_loc = malloc(sizeof(int) * (nish+1));
-        uint32_t nblock = CVHFshls_block_partition(block_loc, shls_slice, ao_loc, AO_BLOCK_SIZE);
-        uint32_t nblock2 = nblock * nblock;
-        uint32_t nblock3 = nblock2 * nblock;
-        // up to 1.6 GB per thread
-        int size_limit = (200000000 - di*di*di*di*ncomp - cache_size) / n_dm;
+        // size_t to keep nblock3 = nblock^3 from overflowing for large molecules
+        // (nblock can reach ~10^3-10^4 with AO_BLOCK_SIZE=56).
+        size_t nblock = CVHFshls_block_partition(block_loc, shls_slice, ao_loc, AO_BLOCK_SIZE);
+        size_t nblock2 = nblock * nblock;
+        size_t nblock3 = nblock2 * nblock;
+        // up to 3.2 GB per thread.
+        int64_t size_limit = (400000000 - di*di*di*di*ncomp - cache_size) / n_dm;
+        if (size_limit < 0) {
+                fprintf(stderr, "Insufficient memory for caching CVHFnr_sr_direct_drv intermediates\n");
+                exit(1);
+        }
 
         size_t Nbas = nbas;
         size_t Nbas2 = Nbas * Nbas;
@@ -744,7 +751,8 @@ void CVHFnr_sr_direct_drv(int (*intor)(), void (*fdot)(), JKOperator **jkop,
         float log_cutoff = vhfopt->log_cutoff;
         float ij_cutoff, ik_cutoff, il_cutoff;
         float dm_max0, dm_max, log_dm;
-        int i, j, k, l, n, r, blk_id;
+        int i, j, k, l, n;
+        size_t r, blk_id;
         JKArray *v_priv[n_dm];
         for (i = 0; i < n_dm; i++) {
                 v_priv[i] = CVHFallocate_JKArray(jkop[i], shls_slice, ao_loc,
@@ -888,9 +896,9 @@ void CVHFnr_sr_int2e_q_cond(int (*intor)(), CINTOpt *cintopt, float *q_cond,
         float fac_guess = .5f - logf(omega2)/4;
         int ish, jsh, li, lj;
         int ij, i, j, di, dj, dij, di2, dj2;
-        float ai, aj, fi, fj, aij, a1, ci, cj;
+        float ai, aj, aij, ai_aij, a1, ci, cj;
         float xi, yi, zi, xj, yj, zj, xij, yij, zij;
-        float dx, dy, dz, r2, r, dri, drj, v, log_fac, r_guess, theta, theta_r;
+        float dx, dy, dz, r2, v, log_fac, r_guess, theta, theta_r;
         double qtmp, tmp;
         float log_qmax;
         int shls[4];
@@ -924,12 +932,11 @@ void CVHFnr_sr_int2e_q_cond(int (*intor)(), CINTOpt *cintopt, float *q_cond,
                         dy = yj - yi;
                         dz = zj - zi;
                         aij = ai + aj;
-                        fi = ai / aij;
-                        fj = aj / aij;
-                        a1 = fi * aj;
-                        xij = xi + fj * dx;
-                        yij = yi + fj * dy;
-                        zij = zi + fj * dz;
+                        ai_aij = ai / aij;
+                        a1 = ai_aij * aj;
+                        xij = xi + ai_aij * dx;
+                        yij = yi + ai_aij * dy;
+                        zij = zi + ai_aij * dz;
 
                         theta = omega2/(omega2+aij);
                         r_guess = R_GUESS_FAC / sqrtf(aij * theta);
@@ -938,10 +945,7 @@ void CVHFnr_sr_int2e_q_cond(int (*intor)(), CINTOpt *cintopt, float *q_cond,
                         log_fac = logf(ci*cj * sqrtf((2*li+1.f)*(2*lj+1.f))/(4*M_PI))
                                 + 1.5f*logf(M_PI/aij) + fac_guess;
                         r2 = dx * dx + dy * dy + dz * dz;
-                        r = sqrtf(r2);
-                        dri = fj * r + theta_r;
-                        drj = fi * r + theta_r;
-                        v = li*logf(dri) + lj*logf(drj) - a1*r2 + log_fac;
+                        v = (li+lj)*logf(MAX(theta_r, 1.f)) - a1*r2 + log_fac;
                         s_index[ish*Nbas+jsh] = v;
                         s_index[jsh*Nbas+ish] = v;
                         xij_cond[ish*Nbas+jsh] = xij;

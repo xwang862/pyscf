@@ -26,8 +26,9 @@ import scipy.linalg
 from pyscf import lib
 from pyscf import symm
 from pyscf.lib import logger
+from pyscf.data import nist
 from pyscf.scf import hf_symm
-from pyscf.scf import uhf
+from pyscf.scf import hf, uhf
 from pyscf.scf import chkfile
 from pyscf.lib.exceptions import PointGroupSymmetryError
 from pyscf import __config__
@@ -60,11 +61,11 @@ def analyze(mf, verbose=logger.DEBUG, with_meta_lowdin=WITH_META_LOWDIN,
         for i, ir in enumerate(mol.irrep_id):
             if (noccsa[i]+noccsb[i]) % 2:
                 tot_sym ^= ir
-        if mol.groupname in ('Dooh', 'Coov', 'SO3'):
-            log.note('TODO: total wave-function symmetry for %s', mol.groupname)
-        else:
+        if mol.groupname in symm.param.POINTGROUP:
             log.note('Wave-function symmetry = %s',
                      symm.irrep_id2name(mol.groupname, tot_sym))
+        else:
+            log.note('TODO: total wave-function symmetry for %s', mol.groupname)
         log.note('alpha occupancy for each irrep:  '+(' %4s'*nirrep),
                  *mol.irrep_name)
         log.note('                                 '+(' %4d'*nirrep),
@@ -200,7 +201,9 @@ def canonicalize(mf, mo_coeff, mo_occ, fock=None):
     occidxb = mo_occ[1] == 1
     viridxa = ~occidxa
     viridxb = ~occidxb
-    mo = numpy.empty_like(mo_coeff)
+    mo_a = numpy.empty_like(mo_coeff[0])
+    mo_b = numpy.empty_like(mo_coeff[1])
+    mo = [mo_a, mo_b]
     mo_e = numpy.empty(mo_occ.shape)
     s = mf.get_ovlp()
 
@@ -214,7 +217,7 @@ def canonicalize(mf, mo_coeff, mo_occ, fock=None):
                 f1 = reduce(numpy.dot, (orb.conj().T, fock, orb))
                 e, c = scipy.linalg.eigh(f1)
                 es[idx] = e
-                cs[:,idx] = numpy.dot(mo_coeff[:,idx], c)
+                cs[:,idx] = orb.dot(c)
 
         for ir in set(orbsyma):
             idx_ir = orbsyma == ir
@@ -232,7 +235,7 @@ def canonicalize(mf, mo_coeff, mo_occ, fock=None):
                 f1 = reduce(numpy.dot, (orb.conj().T, fock, orb))
                 e, c = scipy.linalg.eigh(f1)
                 es[idx] = e
-                c = numpy.dot(mo_coeff[:,idx], c)
+                c = orb.dot(c)
                 cs[:,idx] = hf_symm._symmetrize_canonicalization_(mf, e, c, s)
 
         eig_(fock[0], mo_coeff[0], occidxa, mo_e[0], mo[0])
@@ -241,8 +244,8 @@ def canonicalize(mf, mo_coeff, mo_occ, fock=None):
         eig_(fock[1], mo_coeff[1], viridxb, mo_e[1], mo[1])
         orbsyma, orbsymb = mf.get_orbsym(mo, s)
 
-    mo = (lib.tag_array(mo[0], orbsym=orbsyma),
-          lib.tag_array(mo[1], orbsym=orbsymb))
+    mo = (lib.tag_array(hf._adjust_phase_(mo[0]), orbsym=orbsyma),
+          lib.tag_array(hf._adjust_phase_(mo[1]), orbsym=orbsymb))
     return mo_e, mo
 
 def get_orbsym(mol, mo_coeff, s=None, check=False):
@@ -329,61 +332,12 @@ class SymAdaptedUHF(uhf.UHF):
         hf_symm.check_irrep_nelec(mol, self.irrep_nelec, self.nelec)
         return uhf.UHF.build(self, mol)
 
-    def eig(self, h, s):
-        mol = self.mol
-        nirrep = mol.symm_orb.__len__()
-        s = symm.symmetrize_matrix(s, mol.symm_orb)
-        ha = symm.symmetrize_matrix(h[0], mol.symm_orb)
-        hb = symm.symmetrize_matrix(h[1], mol.symm_orb)
-        cs_b = []
-        cs_a = []
-        es_b = []
-        es_a = []
-        orbsym_a = []
-        orbsym_b = []
-        if mol.groupname in ('Dooh', 'Coov'):
-            for ir in range(nirrep):
-                irrep_id = mol.irrep_id[ir]
-                irrep_1d = irrep_id in (0, 1, 4, 5)
-                irrep_2dx = irrep_id % 2 == 0
-                if irrep_1d or irrep_2dx:
-                    ea, ca = self._eigh(ha[ir], s[ir])
-                    eb, cb = self._eigh(hb[ir], s[ir])
-                    cs_a.append(ca)
-                    cs_b.append(cb)
-                    es_a.append(ea)
-                    es_b.append(eb)
-                    orbsym_a.append([mol.irrep_id[ir]] * ea.size)
-                    orbsym_b.append([mol.irrep_id[ir]] * eb.size)
+    check_linear_dependency = hf_symm.SymAdaptedRHF.check_linear_dependency
 
-                if not irrep_1d and irrep_2dx:
-                    # force 2D irreps using the same coefficients
-                    irrep_conj = irrep_id ^ 1
-                    assert mol.irrep_id[ir+1] == irrep_conj
-                    cs_a.append(ca)
-                    cs_b.append(cb)
-                    es_a.append(ea)
-                    es_b.append(eb)
-                    orbsym_a.append([irrep_conj] * ea.size)
-                    orbsym_b.append([irrep_conj] * eb.size)
-        else:
-            for ir in range(nirrep):
-                ea, ca = self._eigh(ha[ir], s[ir])
-                eb, cb = self._eigh(hb[ir], s[ir])
-                cs_a.append(ca)
-                cs_b.append(cb)
-                es_a.append(ea)
-                es_b.append(eb)
-                orbsym_a.append([mol.irrep_id[ir]] * ea.size)
-                orbsym_b.append([mol.irrep_id[ir]] * eb.size)
-
-        ea = numpy.hstack(es_a)
-        eb = numpy.hstack(es_b)
-        ca = hf_symm.so2ao_mo_coeff(mol.symm_orb, cs_a)
-        ca = lib.tag_array(ca, orbsym=numpy.hstack(orbsym_a))
-        cb = hf_symm.so2ao_mo_coeff(mol.symm_orb, cs_b)
-        cb = lib.tag_array(cb, orbsym=numpy.hstack(orbsym_b))
-        return numpy.asarray((ea,eb)), (ca,cb)
+    def eig(self, h, s, overwrite=False, x=None, symm_orb=None, irrep_id=None):
+        e_a, c_a = hf_symm.eig(self, h[0], s, False, x, symm_orb, irrep_id)
+        e_b, c_b = hf_symm.eig(self, h[1], s, False, x, symm_orb, irrep_id)
+        return numpy.stack((e_a,e_b)), (c_a, c_b)
 
     def get_grad(self, mo_coeff, mo_occ, fock=None):
         g = uhf.UHF.get_grad(self, mo_coeff, mo_occ, fock)
@@ -410,6 +364,7 @@ class SymAdaptedUHF(uhf.UHF):
 
         orbsyma, orbsymb = self.get_orbsym(mo_coeff)
         mo_occ = numpy.zeros_like(mo_energy)
+        nmo = mo_energy.shape[1]
         idx_ea_left = []
         idx_eb_left = []
         neleca_fix = nelecb_fix = 0
@@ -433,9 +388,9 @@ class SymAdaptedUHF(uhf.UHF):
                 idx_ea_left.append(ir_idxa)
                 idx_eb_left.append(ir_idxb)
 
-        nelec = self.nelec
-        neleca_float = nelec[0] - neleca_fix
-        nelecb_float = nelec[1] - nelecb_fix
+        neleca, nelecb = self.nelec
+        neleca_float = neleca - neleca_fix
+        nelecb_float = nelecb - nelecb_fix
         assert (neleca_float >= 0)
         assert (nelecb_float >= 0)
         if len(idx_ea_left) > 0:
@@ -451,46 +406,57 @@ class SymAdaptedUHF(uhf.UHF):
             occ_idx = idx_eb_left[eb_sort][:nelecb_float]
             mo_occ[1][occ_idx] = 1
 
-        vir_idx = (mo_occ[0]==0)
-        if self.verbose >= logger.INFO and numpy.count_nonzero(vir_idx) > 0:
-            noccsa = []
-            noccsb = []
-            for i, ir in enumerate(mol.irrep_id):
-                irname = mol.irrep_name[i]
-                ir_idxa = orbsyma == ir
-                ir_idxb = orbsymb == ir
-                noccsa.append(numpy.count_nonzero(mo_occ[0][ir_idxa]))
-                noccsb.append(numpy.count_nonzero(mo_occ[1][ir_idxb]))
-
-            ir_id2name = dict(zip(mol.irrep_id, mol.irrep_name))
+        vir_idx = (mo_occ[1]==0)
+        if numpy.count_nonzero(vir_idx) > 0:
             ehomo = ehomoa = max(mo_energy[0][mo_occ[0]>0 ])
-            elumo = elumoa = min(mo_energy[0][mo_occ[0]==0])
-            irhomoa = ir_id2name[orbsyma[mo_energy[0] == ehomoa][0]]
-            irlumoa = ir_id2name[orbsyma[mo_energy[0] == elumoa][0]]
-            logger.info(self, 'alpha HOMO (%s) = %.15g  LUMO (%s) = %.15g',
-                        irhomoa, ehomoa, irlumoa, elumoa)
-            if nelecb_float > 0:
+            elumo = elumob = min(mo_energy[1][mo_occ[1]==0])
+            if nelecb > 0:
                 ehomob = max(mo_energy[1][mo_occ[1]>0 ])
-                elumob = min(mo_energy[1][mo_occ[1]==0])
-                irhomob = ir_id2name[orbsymb[mo_energy[1] == ehomob][0]]
-                irlumob = ir_id2name[orbsymb[mo_energy[1] == elumob][0]]
-                logger.info(self, 'beta  HOMO (%s) = %.15g  LUMO (%s) = %.15g',
-                            irhomob, ehomob, irlumob, elumob)
-                ehomo = max(ehomoa,ehomob)
-                elumo = min(elumoa,elumob)
+                ehomo = max(ehomoa, ehomob)
+            if neleca < nmo:
+                elumoa = min(mo_energy[0][mo_occ[0]==0])
+                elumo = min(elumoa, elumob)
+            gap = (elumo - ehomo) * nist.HARTREE2EV
+            self.scf_summary['gap'] = gap
 
-            logger.debug(self, 'alpha irrep_nelec = %s', noccsa)
-            logger.debug(self, 'beta  irrep_nelec = %s', noccsb)
-            hf_symm._dump_mo_energy(mol, mo_energy[0], mo_occ[0], ehomo, elumo,
-                                    orbsyma, 'alpha-', verbose=self.verbose)
-            hf_symm._dump_mo_energy(mol, mo_energy[1], mo_occ[1], ehomo, elumo,
-                                    orbsymb, 'beta-', verbose=self.verbose)
+            if self.verbose >= logger.INFO:
+                noccsa = []
+                noccsb = []
+                for i, ir in enumerate(mol.irrep_id):
+                    irname = mol.irrep_name[i]
+                    ir_idxa = orbsyma == ir
+                    ir_idxb = orbsymb == ir
+                    noccsa.append(numpy.count_nonzero(mo_occ[0][ir_idxa]))
+                    noccsb.append(numpy.count_nonzero(mo_occ[1][ir_idxb]))
 
-            if mo_coeff is not None and self.verbose >= logger.DEBUG:
-                ovlp_ao = self.get_ovlp()
-                ss, s = self.spin_square((mo_coeff[0][:,mo_occ[0]>0],
-                                          mo_coeff[1][:,mo_occ[1]>0]), ovlp_ao)
-                logger.debug(self, 'multiplicity <S^2> = %.8g  2S+1 = %.8g', ss, s)
+                ir_id2name = dict(zip(mol.irrep_id, mol.irrep_name))
+                irhomoa = ir_id2name[orbsyma[mo_energy[0] == ehomoa][0]]
+                irlumoa = ir_id2name[orbsyma[mo_energy[0] == elumoa][0]]
+                logger.info(self, 'alpha HOMO (%s) = %.15g  LUMO (%s) = %.15g',
+                            irhomoa, ehomoa, irlumoa, elumoa)
+                if nelecb_float > 0:
+                    irhomob = ir_id2name[orbsymb[mo_energy[1] == ehomob][0]]
+                    irlumob = ir_id2name[orbsymb[mo_energy[1] == elumob][0]]
+                    logger.info(self, 'beta  HOMO (%s) = %.15g  LUMO (%s) = %.15g',
+                                irhomob, ehomob, irlumob, elumob)
+                if ehomo+1e-3 > elumo:
+                    logger.warn(self, 'HOMO %.15g >= LUMO %.15g', ehomo, elumo)
+                else:
+                    logger.info(self, '  HOMO = %.12g  LUMO = %.12g  gap/eV = %.5f',
+                                ehomo, elumo, gap)
+
+                logger.debug(self, 'alpha irrep_nelec = %s', noccsa)
+                logger.debug(self, 'beta  irrep_nelec = %s', noccsb)
+                hf_symm._dump_mo_energy(mol, mo_energy[0], mo_occ[0], ehomo, elumo,
+                                        orbsyma, 'alpha-', verbose=self.verbose)
+                hf_symm._dump_mo_energy(mol, mo_energy[1], mo_occ[1], ehomo, elumo,
+                                        orbsymb, 'beta-', verbose=self.verbose)
+
+                if mo_coeff is not None and self.verbose >= logger.DEBUG:
+                    ovlp_ao = self.get_ovlp()
+                    ss, s = self.spin_square((mo_coeff[0][:,mo_occ[0]>0],
+                                              mo_coeff[1][:,mo_occ[1]>0]), ovlp_ao)
+                    logger.debug(self, 'multiplicity <S^2> = %.8g  2S+1 = %.8g', ss, s)
         return mo_occ
 
     def _finalize(self):

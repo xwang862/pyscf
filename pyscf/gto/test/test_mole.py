@@ -13,10 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import io
 import unittest
-import tempfile
 from functools import reduce
 import numpy
+import numpy as np
 import scipy.linalg
 from pyscf import gto
 from pyscf import lib
@@ -43,7 +44,7 @@ def setUpModule():
     mol0.spin = 1
     mol0.verbose = 7
     mol0.ecp = {'O1': 'lanl2dz'}
-    ftmp = tempfile.NamedTemporaryFile()
+    ftmp = lib.NamedTemporaryFile()
     mol0.output = ftmp.name
     mol0.build()
 
@@ -71,9 +72,9 @@ C    S
       3.1639270              0.3623120*1.0
 #     1.                     0.1
 C    SP
-      7.8682724             -0.1193324*1.0          0.0689991        
-      1.8812885             -0.1608542*1.0          0.3164240        
-      0.5442493              1.1434564*1.0          0.7443083        
+      7.8682724             -0.1193324*1.0          0.0689991
+      1.8812885             -0.1608542*1.0          0.3164240
+      0.5442493              1.1434564*1.0          0.7443083
 C    SP
       0.1687144              1.0000000              1.0000000'''),
                       'H': '6-31g'}
@@ -97,6 +98,67 @@ C    SP
         mol1.x = None
         mol1.copy = None
         mol1.check_sanity()
+
+    def test_check_sanity_ecp_keys(self):
+        # Issue: the ECP sanity check compared the raw keys of .basis and .ecp,
+        # while Mole.build normalizes both with _atom_symbol. Nuclear charges or
+        # lower case symbols in .ecp therefore produced a spurious warning even
+        # though the ECP was applied.
+        def ecp_warnings(basis, ecp):
+            mol = gto.Mole()
+            mol.atom = 'Au 0 0 0; Sb 0 0 2.6'
+            mol.basis = basis
+            mol.ecp = ecp
+            mol.verbose = 4
+            mol.stdout = io.StringIO()
+            mol.build(dump_input=False)
+            msgs = [line for line in mol.stdout.getvalue().splitlines()
+                    if 'not specified' in line]
+            return mol, msgs
+
+        # def2-SVPD replaces 60 core electrons on Au and 28 on Sb
+        symbol_keys = {'Au': 'def2-SVPD', 'Sb': 'def2-SVPD'}
+        equivalent = [
+            symbol_keys,
+            {'79': 'def2-SVPD', '51': 'def2-SVPD'},   # nuclear charges
+            {79: 'def2-SVPD', 51: 'def2-SVPD'},       # integer keys
+            {'au': 'def2-SVPD', 'sb': 'def2-SVPD'},   # lower case
+            {'default': 'def2-SVPD'},                 # default entry
+        ]
+        for ecp in equivalent:
+            mol, msgs = ecp_warnings({'default': 'def2-SVPD'}, ecp)
+            self.assertEqual(msgs, [])
+            self.assertEqual(mol.nelectron, 42)
+            self.assertEqual(mol.atom_nelec_core(0), 60)
+            self.assertEqual(mol.atom_nelec_core(1), 28)
+
+        # the keys of .basis are normalized as well
+        mol, msgs = ecp_warnings({'79': 'def2-SVPD', '51': 'def2-SVPD'},
+                                 symbol_keys)
+        self.assertEqual(msgs, [])
+        self.assertEqual(mol.nelectron, 42)
+
+        # a genuinely missing ECP must still be reported
+        mol, msgs = ecp_warnings({'default': 'def2-SVPD'}, {'Sb': 'def2-SVPD'})
+        self.assertEqual(len(msgs), 1)
+        self.assertIn('ECP for Au not specified', msgs[0])
+        self.assertEqual(mol.nelectron, 102)
+
+        mol, msgs = ecp_warnings({'default': 'def2-SVPD'}, {})
+        self.assertEqual(len(msgs), 2)
+        self.assertEqual(mol.nelectron, 130)
+
+        # labelled atoms inherit the ECP of the plain element in make_ecp_env
+        mol = gto.Mole()
+        mol.atom = 'Au1 0 0 0; Au2 0 0 2.6'
+        mol.basis = {'default': 'def2-SVPD'}
+        mol.ecp = {'Au': 'def2-SVPD'}
+        mol.verbose = 4
+        mol.stdout = io.StringIO()
+        mol.build(dump_input=False)
+        self.assertEqual(mol.atom_nelec_core(0), 60)
+        self.assertEqual(mol.atom_nelec_core(1), 60)
+        self.assertNotIn('not specified', mol.stdout.getvalue())
 
     def test_nao_range(self):
         self.assertEqual(mol0.nao_nr_range(1,4), (2, 7))
@@ -256,15 +318,22 @@ C    SP
         self.assertEqual(mol1.natm, 1)
 
     def test_atom_as_file(self):
-        ftmp = tempfile.NamedTemporaryFile('w')
-        # file in xyz format
+        ftmp = lib.NamedTemporaryFile('w')
+        # file in raw format
         ftmp.write('He 0 0 0\nHe 0 0 1\n')
         ftmp.flush()
         mol1 = gto.M(atom=ftmp.name)
         self.assertEqual(mol1.natm, 2)
 
+        # file in xyz format
+        ftmp = lib.NamedTemporaryFile('w', suffix='.xyz')
+        ftmp.write('2\n\nHe 0 0 0\nHe 0 0 1\n')
+        ftmp.flush()
+        mol1 = gto.M(atom=ftmp.name)
+        self.assertEqual(mol1.natm, 2)
+
         # file in zmatrix format
-        ftmp = tempfile.NamedTemporaryFile('w')
+        ftmp = lib.NamedTemporaryFile('w', suffix='.zmat')
         ftmp.write('He\nHe 1 1.5\n')
         ftmp.flush()
         mol1 = gto.M(atom=ftmp.name)
@@ -286,6 +355,10 @@ C    SP
     def test_format_basis(self):
         mol = gto.M(atom = '''O 0 0 0; 1 0 1 0; H 0 0 1''',
                     basis = {8: 'ccpvdz'})
+        self.assertEqual(mol.nao_nr(), 14)
+
+        mol = gto.M(atom = '''O 0 0 0; 1 0 1 0; H 0 0 1''',
+                    basis = {8: 'def2-SVP'})
         self.assertEqual(mol.nao_nr(), 14)
 
         mol = gto.M(atom = '''O 0 0 0; H:1 0 1 0; H@2 0 0 1''',
@@ -375,30 +448,30 @@ C    SP
                     basis='''
 #BASIS SET: (3s) -> [2s]
 H    S
-      5.4471780              0.1562849787        
-      0.82454724             0.9046908767        
+      5.4471780              0.1562849787
+      0.82454724             0.9046908767
 H    S
-      0.18319158             1.0000000        
+      0.18319158             1.0000000
 #BASIS SET: (6s,3p) -> [3s,2p]
 C    S
-    172.2560000              0.0617669        
-     25.9109000              0.3587940        
-      5.5333500              0.7007130        
+    172.2560000              0.0617669
+     25.9109000              0.3587940
+      5.5333500              0.7007130
 C    SP
-      3.6649800             -0.3958970              0.2364600        
-      0.7705450              1.2158400              0.8606190        
+      3.6649800             -0.3958970              0.2364600
+      0.7705450              1.2158400              0.8606190
 C    SP
-      0.1958570              1.0000000              1.0000000        
+      0.1958570              1.0000000              1.0000000
 #BASIS SET: (6s,3p) -> [3s,2p]
 O    S
-    322.0370000              0.0592394        
-     48.4308000              0.3515000        
-     10.4206000              0.7076580        
+    322.0370000              0.0592394
+     48.4308000              0.3515000
+     10.4206000              0.7076580
 O    SP
-      7.4029400             -0.4044530              0.2445860        
-      1.5762000              1.2215600              0.8539550        
+      7.4029400             -0.4044530              0.2445860
+      1.5762000              1.2215600              0.8539550
 O    SP
-      0.3736840              1.0000000              1.0000000        
+      0.3736840              1.0000000              1.0000000
 ''')
         self.assertTrue(mol.nao_nr() == 22)
 
@@ -609,7 +682,7 @@ O    SP
 
     def test_dump_loads_skip(self):
         import json
-        with tempfile.NamedTemporaryFile() as tmpfile:
+        with lib.NamedTemporaryFile() as tmpfile:
             lib.chkfile.save_mol(mol0, tmpfile.name)
             mol1 = gto.Mole()
             mol1.update(tmpfile.name)
@@ -631,6 +704,10 @@ O    SP
         mol1.set_geom_(mol0.atom_coords(), inplace=False)
         mol1.set_geom_(mol0.atom_coords(), unit=1.)
         mol1.set_geom_(mol0.atom_coords(), unit='Ang', inplace=False)
+
+        r = mol1.atom_coords(unit='Ang')
+        mol1.set_geom_(r, unit='Ang')
+        assert np.array_equal(mol1.atom_coords(unit='Ang'), r)
 
     def test_apply(self):
         from pyscf import scf, mp
@@ -736,6 +813,13 @@ O    SP
         mol1.build()
         self.assertAlmostEqual(abs(mol1._symm_axes - numpy.eye(3)[[1,2,0]]).max(), 0, 9)
 
+        mol1 = gto.M(
+            atom='He 0 0 0',
+            basis='aug-cc-pvdz',
+            symmetry='SO3'
+        )
+        self.assertEqual(mol1.groupname, 'SO3')
+
     def test_symm_orb(self):
         rs = numpy.array([[.1, -.3, -.2],
                           [.3,  .1,  .8]])
@@ -794,6 +878,16 @@ O    SP
         mol1.spinor_labels(fmt='%s%s%s%s')
         mol1.spinor_labels(fmt=None)
 
+        # Create large molecule
+        mol_large = gto.M(
+            atom="\n".join([f"H {i} 0 0" for i in range(22)]),
+            basis="STO-3G"
+        )
+        self.assertEqual(mol_large.search_ao_label("0 H 1s").tolist(), [0])
+        # Sanity check that this fix does not break other edge cases
+        self.assertEqual(mol_large.search_ao_label("H 1s").tolist(), list(range(22)))
+        self.assertEqual(mol_large.search_ao_label("1s").tolist(), list(range(22)))
+
     def test_input_ecp(self):
         mol1 = gto.Mole()
         mol1.atom = mol0.atom
@@ -801,7 +895,7 @@ O    SP
         mol1.build(False, False)
         gto.basis.load_ecp('lanl08', 'O')
         gto.format_ecp({'O':'lanl08', 1:'lanl2dz'})
-        self.assertRaises(BasisNotFoundError, gto.format_ecp, {'H':'lan2ldz'})
+        self.assertRaises(RuntimeError, gto.format_ecp, {'H':'lan2ldz'})
 
     def test_condense_to_shell(self):
         mol1 = mol0.copy()
@@ -909,6 +1003,18 @@ O    SP
         v = numpy.einsum('pqk->pq', v)
         self.assertAlmostEqual(abs(vref-v).max(), 0, 12)
 
+    def test_set_rinv_origin_scalar(self):
+        # set_rinv_origin(0) is documented as a valid call (see docstring),
+        # matching the behavior of the sibling set_common_origin(0).
+        mol = mol0.copy()
+        mol.set_rinv_origin(0)
+        orig = mol._env[gto.mole.PTR_RINV_ORIG:gto.mole.PTR_RINV_ORIG+3]
+        self.assertAlmostEqual(abs(orig).max(), 0, 12)
+
+        mol.set_rinv_origin((0, 1, 0))
+        orig = mol._env[gto.mole.PTR_RINV_ORIG:gto.mole.PTR_RINV_ORIG+3]
+        self.assertAlmostEqual(abs(orig - numpy.array((0., 1., 0.))).max(), 0, 12)
+
     def test_to_uncontracted_cartesian_basis(self):
         pmol, ctr_coeff = mol0.to_uncontracted_cartesian_basis()
         c = scipy.linalg.block_diag(*ctr_coeff)
@@ -925,15 +1031,25 @@ O    SP
         from pyscf import scf, dft, ci, tdscf
         mol = gto.M(atom='He')
         self.assertEqual(mol.HF().__class__, scf.HF(mol).__class__)
-        self.assertEqual(mol.KS().__class__, dft.KS(mol).__class__)
-        self.assertEqual(mol.UKS().__class__, dft.UKS(mol).__class__)
+        self.assertEqual(mol.KS(xc='pbe').__class__, dft.KS(mol, xc='pbe').__class__)
+        self.assertEqual(mol.KS(xc='pbe').xc, dft.KS(mol, xc='pbe').xc)
+        self.assertEqual(mol.UKS(xc='pbe').__class__, dft.UKS(mol, xc='pbe').__class__)
+        self.assertEqual(mol.UKS(xc='pbe').xc, dft.UKS(mol, xc='pbe').xc)
         self.assertEqual(mol.CISD().__class__, ci.cisd.RCISD)
         self.assertEqual(mol.TDA().__class__, tdscf.rhf.TDA)
+        self.assertEqual(mol.TDA(xc='pbe0').__class__, tdscf.rks.TDA)
         self.assertEqual(mol.dTDA().__class__, tdscf.rks.dTDA)
         self.assertEqual(mol.TDBP86().__class__, tdscf.rks.TDDFTNoHybrid)
         self.assertEqual(mol.TDB3LYP().__class__, tdscf.rks.TDDFT)
         self.assertRaises(AttributeError, lambda: mol.xyz)
-        self.assertRaises(AttributeError, lambda: mol.TDxyz)
+        self.assertRaises(AttributeError, lambda: mol.TDxyz())
+
+        mol = gto.M(atom='He', symmetry=True)
+        self.assertEqual(mol.HF().__class__, scf.HF(mol).__class__)
+        self.assertEqual(mol.KS().__class__, dft.KS(mol).__class__)
+        self.assertEqual(mol.UKS().__class__, dft.UKS(mol).__class__)
+        self.assertEqual(mol.RKSpU(U_idx=['2p'], U_val=[1.]).__class__,
+                         dft.RKSpU(mol, U_idx=['2p'], U_val=[1.]).__class__)
 
     def test_ao2mo(self):
         mol = gto.M(atom='He')
@@ -942,22 +1058,22 @@ O    SP
         self.assertAlmostEqual(eri[0,0], 1.0557129427350722, 12)
 
     def test_tofile(self):
-        tmpfile = tempfile.NamedTemporaryFile()
+        tmpfile = lib.NamedTemporaryFile()
         mol = gto.M(atom=[[1  , (0.,1.,1.)],
                           ["O1", (0.,0.,0.)],
                           [1  , (1.,1.,0.)], ])
         out1 = mol.tofile(tmpfile.name, format='xyz')
         ref = '''3
 XYZ from PySCF
-H           0.00000        1.00000        1.00000
-O           0.00000        0.00000        0.00000
-H           1.00000        1.00000        0.00000
+H           0.00000000        1.00000000        1.00000000
+O           0.00000000        0.00000000        0.00000000
+H           1.00000000        1.00000000        0.00000000
 '''
         with open(tmpfile.name, 'r') as f:
             self.assertEqual(f.read(), ref)
         self.assertEqual(out1, ref[:-1])
 
-        tmpfile = tempfile.NamedTemporaryFile(suffix='.zmat')
+        tmpfile = lib.NamedTemporaryFile(suffix='.zmat')
         str1 = mol.tofile(tmpfile.name, format='zmat')
         #FIXME:self.assertEqual(mol._atom, mol.fromfile(tmpfile.name))
 
@@ -987,7 +1103,7 @@ H           1.00000        1.00000        0.00000
         print(mol.unit == 'Angstrom')
 
     def test_fromfile(self):
-        with tempfile.NamedTemporaryFile(mode='w+', suffix='.xyz') as f:
+        with lib.NamedTemporaryFile(mode='w+', suffix='.xyz') as f:
             f.write('2\n\nH 0 0 1; H 0 -1 0')
             f.flush()
             mol = gto.Mole()
@@ -1068,6 +1184,24 @@ H    P
         v0 = u.T.dot(mol.intor('int1e_nuc')).dot(u)
         v1 = mol1.intor('int1e_nuc')
         self.assertAlmostEqual(abs(v0 - v1).max(), 0, 12)
+
+    def test_to_cell(self):
+        from pyscf.dft import numint
+        mol = gto.M(atom='''
+            O   0.   0.       0.
+            H   0.   -0.757   0.587
+            H   0.   0.757    0.587''', basis='ccpvdz')
+        cell = mol.to_cell()
+        mf = mol.RHF().run()
+        dm = mf.make_rdm1()
+        a = cell.lattice_vectors()
+        edge_grids = np.vstack([
+            a * -.5,
+            a * .5,
+        ])
+        ao = numint.eval_ao(mol, edge_grids)
+        rho = numint.eval_rho(mol, ao, dm)
+        self.assertTrue(all(abs(rho) < 1e-7))
 
 if __name__ == "__main__":
     print("test mole.py")

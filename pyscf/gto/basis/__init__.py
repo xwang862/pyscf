@@ -25,11 +25,19 @@ import sys
 import re
 from os.path import join
 import importlib
+import warnings
 import pyscf
 from pyscf.gto.basis import parse_nwchem, parse_nwchem_ecp
 from pyscf.gto.basis import parse_cp2k, parse_cp2k_pp
 from pyscf.lib.exceptions import BasisNotFoundError
 from pyscf import __config__
+
+USER_BASIS_DIR = getattr(__config__, 'USER_BASIS_DIR', '')
+USER_BASIS_ALIAS = getattr(__config__, 'USER_BASIS_ALIAS', {})
+USER_GTH_ALIAS = getattr(__config__, 'USER_GTH_ALIAS', {})
+
+OPTIMIZE_CONTRACTION = getattr(__config__, 'gto_basis_parse_optimize', False)
+ENFORCE_ELEMENT_MATCH = getattr(__config__, 'gto_basis_enforce_element_match', False)
 
 ALIAS = {
     'ano'        : 'ano.dat'        ,
@@ -158,10 +166,13 @@ ALIAS = {
     'def2tzvppd' : 'def2-tzvppd.dat',
     'def2tzvpp'  : 'def2-tzvpp.dat' ,
     'def2tzvp'   : 'def2-tzvp.dat'  ,
+    'def2mtzvpp' : 'def2-mtzvpp.dat',
+    'def2mtzvp'  : 'def2-mtzvp.dat' ,
     'def2qzvpd'  : 'def2-qzvpd.dat' ,
     'def2qzvppd' : 'def2-qzvppd.dat',
     'def2qzvpp'  : 'def2-qzvpp.dat' ,
     'def2qzvp'   : 'def2-qzvp.dat'  ,
+    'qavgvszps' : 'qavg-vszps.dat' ,
     'def2svpjfit'    : 'def2-universal-jfit.dat',
     'def2svpjkfit'   : 'def2-universal-jkfit.dat',
     'def2tzvpjfit'   : 'def2-universal-jfit.dat',
@@ -183,6 +194,12 @@ ALIAS = {
     'def2qzvpri'     : 'def2-qzvp-ri.dat'    ,
     'def2qzvppri'    : 'def2-qzvpp-ri.dat'   ,
     'def2qzvppdri'   : 'def2-qzvppd-ri.dat'  ,
+    'madef2svpp'   : 'ma-def2-svpp.dat'  ,
+    'madef2svp'    : 'ma-def2-svp.dat'   ,
+    'madef2tzvpp'  : 'ma-def2-tzvpp.dat' ,
+    'madef2tzvp'   : 'ma-def2-tzvp.dat'  ,
+    'madef2qzvpp'  : 'ma-def2-qzvpp.dat' ,
+    'madef2qzvp'   : 'ma-def2-qzvp.dat'  ,
     'tzv'        : 'tzv.dat'        ,
     'weigend'     : 'def2-universal-jfit.dat',
     'weigend+etb' : 'def2-universal-jfit.dat',
@@ -236,6 +253,7 @@ ALIAS = {
     'crenbl'     : 'crenbl.dat'     ,
     'crenbs'     : 'crenbs.dat'     ,
     'lanl2dz'    : 'lanl2dz.dat'    ,
+    'ecpqvszp'  : 'ecp-q-vszp.dat' ,
     'lanl2tz'    : 'lanl2tz.dat'    ,
     'lanl08'     : 'lanl08.dat'     ,
     'sbkjc'      : 'sbkjc.dat'      ,
@@ -284,7 +302,6 @@ ALIAS = {
     'bfdv5z'     : 'bfd_v5z.dat',
     'bfd'        : 'bfd_pp.dat',
     'bfdpp'      : 'bfd_pp.dat',
-#
     'ccpcvdzf12optri': os.path.join('f12-basis', 'cc-pCVDZ-F12-OptRI.dat'),
     'ccpcvtzf12optri': os.path.join('f12-basis', 'cc-pCVTZ-F12-OptRI.dat'),
     'ccpcvqzf12optri': os.path.join('f12-basis', 'cc-pCVQZ-F12-OptRI.dat'),
@@ -306,8 +323,10 @@ ALIAS = {
 # All-electron basis designed for periodic calculations, available in Crystal
     'pobtzvp'       :  'pob-tzvp.dat',
     'pobtzvpp'      :  'pob-tzvpp.dat',
+    'pobdzvprev2'   :  'pob-dzvp-rev2.dat',
+    'pobtzvprev2'   :  'pob-tzvp-rev2.dat',
     'crystalccpvdz' :  'crystal-cc-pvdz.dat',
-# ccECP 
+# ccECP
     'ccecp'         : join('ccecp-basis', 'ccECP', 'ccECP.dat'   ),
     'ccecpccpvdz'   : join('ccecp-basis', 'ccECP', 'ccECP_cc-pVDZ.dat'),
     'ccecpccpvtz'   : join('ccecp-basis', 'ccECP', 'ccECP_cc-pVTZ.dat'),
@@ -319,7 +338,7 @@ ALIAS = {
     'ccecpaugccpvqz': join('ccecp-basis', 'ccECP', 'ccECP_aug-cc-pVQZ.dat'),
     'ccecpaugccpv5z': join('ccecp-basis', 'ccECP', 'ccECP_aug-cc-pV5Z.dat'),
     'ccecpaugccpv6z': join('ccecp-basis', 'ccECP', 'ccECP_aug-cc-pV6Z.dat'),
-# ccECP_He_core 
+# ccECP_He_core
     'ccecphe'         : join('ccecp-basis', 'ccECP_He_core', 'ccECP.dat'   ),
     'ccecpheccpvdz'   : join('ccecp-basis', 'ccECP_He_core', 'ccECP_cc-pVDZ.dat'),
     'ccecpheccpvtz'   : join('ccecp-basis', 'ccECP_He_core', 'ccECP_cc-pVTZ.dat'),
@@ -341,6 +360,30 @@ ALIAS = {
     'ccecpregaugccpvtz': join('ccecp-basis', 'ccECP_reg', 'ccECP_aug-cc-pVTZ.dat'),
     'ccecpregaugccpvqz': join('ccecp-basis', 'ccECP_reg', 'ccECP_aug-cc-pVQZ.dat'),
     'ccecpregaugccpv5z': join('ccecp-basis', 'ccECP_reg', 'ccECP_aug-cc-pV5Z.dat'),
+# ccECP_28_core (Sr, In with 28-electron Ar+3d10 core)
+    'ccecp28'            : join('ccecp-basis', 'ccECP_28_core', 'ccECP.dat'   ),
+    'ccecp28ccpvdz'      : join('ccecp-basis', 'ccECP_28_core', 'ccECP_cc-pVDZ.dat'),
+    'ccecp28ccpvtz'      : join('ccecp-basis', 'ccECP_28_core', 'ccECP_cc-pVTZ.dat'),
+    'ccecp28ccpvqz'      : join('ccecp-basis', 'ccECP_28_core', 'ccECP_cc-pVQZ.dat'),
+    'ccecp28ccpv5z'      : join('ccecp-basis', 'ccECP_28_core', 'ccECP_cc-pV5Z.dat'),
+    'ccecp28ccpv6z'      : join('ccecp-basis', 'ccECP_28_core', 'ccECP_cc-pV6Z.dat'),
+    'ccecp28augccpvdz'   : join('ccecp-basis', 'ccECP_28_core', 'ccECP_aug-cc-pVDZ.dat'),
+    'ccecp28augccpvtz'   : join('ccecp-basis', 'ccECP_28_core', 'ccECP_aug-cc-pVTZ.dat'),
+    'ccecp28augccpvqz'   : join('ccecp-basis', 'ccECP_28_core', 'ccECP_aug-cc-pVQZ.dat'),
+    'ccecp28augccpv5z'   : join('ccecp-basis', 'ccECP_28_core', 'ccECP_aug-cc-pV5Z.dat'),
+    'ccecp28augccpv6z'   : join('ccecp-basis', 'ccECP_28_core', 'ccECP_aug-cc-pV6Z.dat'),
+# ccECP_36_core (Sr with 36-electron Kr core)
+    'ccecp36'            : join('ccecp-basis', 'ccECP_36_core', 'ccECP.dat'   ),
+    'ccecp36ccpvdz'      : join('ccecp-basis', 'ccECP_36_core', 'ccECP_cc-pVDZ.dat'),
+    'ccecp36ccpvtz'      : join('ccecp-basis', 'ccECP_36_core', 'ccECP_cc-pVTZ.dat'),
+    'ccecp36ccpvqz'      : join('ccecp-basis', 'ccECP_36_core', 'ccECP_cc-pVQZ.dat'),
+    'ccecp36ccpv5z'      : join('ccecp-basis', 'ccECP_36_core', 'ccECP_cc-pV5Z.dat'),
+    'ccecp36ccpv6z'      : join('ccecp-basis', 'ccECP_36_core', 'ccECP_cc-pV6Z.dat'),
+    'ccecp36augccpvdz'   : join('ccecp-basis', 'ccECP_36_core', 'ccECP_aug-cc-pVDZ.dat'),
+    'ccecp36augccpvtz'   : join('ccecp-basis', 'ccECP_36_core', 'ccECP_aug-cc-pVTZ.dat'),
+    'ccecp36augccpvqz'   : join('ccecp-basis', 'ccECP_36_core', 'ccECP_aug-cc-pVQZ.dat'),
+    'ccecp36augccpv5z'   : join('ccecp-basis', 'ccECP_36_core', 'ccECP_aug-cc-pV5Z.dat'),
+    'ccecp36augccpv6z'   : join('ccecp-basis', 'ccECP_36_core', 'ccECP_aug-cc-pV6Z.dat'),
 #spin-orbit ECPs
     'ecpds10mdfso' : os.path.join('soecp', 'ECPDS10MDFSO.dat'),
     'ecpds28mdfso' : os.path.join('soecp', 'ECPDS28MDFSO.dat'),
@@ -373,7 +416,13 @@ ALIAS = {
     'dyallv2z' : 'dyall-basis.dyall_v2z',
     'dyallv3z' : 'dyall-basis.dyall_v3z',
     'dyallv4z' : 'dyall-basis.dyall_v4z',
+# SAP
+    'sapgraspsmall'   : 'sap_grasp_small.dat',
+    'sapgrasplarge'   : 'sap_grasp_large.dat',
 }
+
+if USER_BASIS_ALIAS.keys() & ALIAS.keys():
+    raise KeyError('USER_BASIS_ALIAS keys conflict with predefined basis sets')
 
 GTH_ALIAS = {
     'gthaugdzvp'  : 'gth-aug-dzvp.dat',
@@ -391,6 +440,8 @@ GTH_ALIAS = {
     'gthccdzvp'   : 'gth-cc-dzvp.dat',
     'gthcctzvp'   : 'gth-cc-tzvp.dat',
     'gthccqzvp'   : 'gth-cc-qzvp.dat',
+    # TODO: Remove the legacy database after verifying whether they are
+    # consistent with the latest version of BASIS_MOLOPT
     'gthszvmolopt'      : 'gth-szv-molopt.dat',
     'gthdzvpmolopt'     : 'gth-dzvp-molopt.dat',
     'gthtzvpmolopt'     : 'gth-tzvp-molopt.dat',
@@ -398,6 +449,9 @@ GTH_ALIAS = {
     'gthszvmoloptsr'    : 'gth-szv-molopt-sr.dat',
     'gthdzvpmoloptsr'   : 'gth-dzvp-molopt-sr.dat',
 }
+
+if USER_GTH_ALIAS.keys() & GTH_ALIAS.keys():
+    raise KeyError('USER_GTH_ALIAS keys conflict with predefined GTH basis sets')
 
 PP_ALIAS = {
     'gthblyp'    : 'gth-blyp.dat'   ,
@@ -413,15 +467,8 @@ PP_ALIAS = {
     'gthhfrev'   : 'gth-hf-rev.dat' ,
 }
 
-SAP_ALIAS = {
-    'sapgraspsmall'   : 'sap_grasp_small.dat',
-    'sapgrasplarge'   : 'sap_grasp_large.dat',
-}
-
 def _is_pople_basis(basis):
-    return (basis.startswith('631') or
-            basis.startswith('321') or
-            basis.startswith('431'))
+    return basis.startswith(('631', '321', '431'))
 
 _BASIS_DIR = os.path.dirname(__file__)
 _GTH_BASIS_DIR = os.path.abspath(f'{pyscf.__file__}/../pbc/gto/basis')
@@ -455,8 +502,6 @@ def _parse_pople_basis(basis, symb):
             return ALIAS[mbas]
     else:
         return tuple([ALIAS[mbas]] + convert(extension.split(',')[0]))
-
-OPTIMIZE_CONTRACTION = getattr(__config__, 'gto_basis_parse_optimize', False)
 
 def parse(string, symb=None, optimize=OPTIMIZE_CONTRACTION):
     '''Parse the basis (ECP, PP) text in NWChem or CP2K format, returns internal format
@@ -551,7 +596,7 @@ def _truncate(basis, contr_scheme, symb, split_name):
                         n_saved += n_save
             assert n_saved == n_keep, ("@{} implies {} l={} function(s), but" +
                                        "only {} in {}:{}").format(split_name[1],
-                                                                  contr_scheme[l],
+                                                                  n_keep,
                                                                   l, n_saved, symb,
                                                                   split_name[0])
     return contr_b
@@ -559,6 +604,20 @@ def _truncate(basis, contr_scheme, symb, split_name):
 optimize_contraction = parse_nwchem.optimize_contraction
 to_general_contraction = parse_nwchem.to_general_contraction
 
+def _parse_basis_str(parse_fn, input_str, symb, optimize):
+    try:
+        return parse_fn(input_str, symb, optimize=optimize)
+    except BasisNotFoundError:
+        if not ENFORCE_ELEMENT_MATCH:
+            out = parse_fn(input_str, optimize=optimize)
+            warnings.warn(
+                'The basis set string does not explicitly match the element '
+                f'{symb}. It is stilled parsed and assigned to {symb} without '
+                'enforcing element matching. If you want to enforce a strict '
+                'match between the basis set and elements, set\n'
+                '    gto_basis_enforce_element_match = True\n'
+                'in ~/.pyscf_conf.py')
+            return out
 
 def load(filename_or_basisname, symb, optimize=OPTIMIZE_CONTRACTION):
     '''Convert the basis of the given symbol to internal format
@@ -602,65 +661,84 @@ def load(filename_or_basisname, symb, optimize=OPTIMIZE_CONTRACTION):
     basis_dir = _BASIS_DIR
     if name in ALIAS:
         basmod = ALIAS[name]
+    elif name in USER_BASIS_ALIAS:
+        basmod = USER_BASIS_ALIAS[name]
+        basis_dir = USER_BASIS_DIR
     elif name in GTH_ALIAS:
+        #TODO: _load_MOLOPT(_to_MOLOPT_name(name), symb, _GTH_BASIS_DIR)
         basmod = GTH_ALIAS[name]
         fload = parse_cp2k.load
         basis_dir = _GTH_BASIS_DIR
+    elif name in USER_GTH_ALIAS:
+        basmod = USER_GTH_ALIAS[name]
+        fload = parse_cp2k.load
+        basis_dir = USER_BASIS_DIR
     elif _is_pople_basis(name):
         basmod = _parse_pople_basis(name, symb)
-    elif name in SAP_ALIAS:
-        basmod = SAP_ALIAS[name]
+    elif 'GTH' in filename_or_basisname:
+        assert contr_scheme == 'Full'
+        if '\n' in filename_or_basisname:
+            return _parse_basis_str(parse_cp2k.parse, filename_or_basisname, symb, optimize)
+        else:
+            return parse_cp2k._load_MOLOPT(filename_or_basisname, symb, _GTH_BASIS_DIR)
     else:
-        try:
-            return parse_nwchem.parse(filename_or_basisname, symb,
-                                      optimize=optimize)
-        except BasisNotFoundError:
-            pass
-        except Exception:
-            raise BasisNotFoundError(filename_or_basisname)
+        if '\n' not in filename_or_basisname:
+            from pyscf.gto.basis import bse
+            if bse.basis_set_exchange is None:
+                warnings.warn(
+                    'Basis may be available in basis-set-exchange. '
+                    'It is recommended to install basis-set-exchange: '
+                    'pip install basis-set-exchange')
+            else:
+                try:
+                    bse_obj = bse.basis_set_exchange.api.get_basis(
+                        filename_or_basisname, elements=symb)
+                except KeyError:
+                    raise BasisNotFoundError(filename_or_basisname)
+                return bse._orbital_basis(bse_obj)[0][symb]
+            raise BasisNotFoundError(f'Unknown basis format or basis name\n{filename_or_basisname}')
 
         try:
-            return parse_nwchem.parse(filename_or_basisname, optimize=optimize)
+            return _parse_basis_str(parse_nwchem.parse, filename_or_basisname,
+                                    symb, optimize)
         except BasisNotFoundError:
             pass
-        except Exception:
-            raise BasisNotFoundError(f'Invalid basis {filename_or_basisname}')
 
         try:
-            return parse_cp2k.parse(filename_or_basisname, optimize=optimize)
+            return _parse_basis_str(parse_cp2k.parse, filename_or_basisname,
+                                    symb, optimize)
         except BasisNotFoundError:
             pass
-        except Exception:
-            raise BasisNotFoundError(f'Invalid basis {filename_or_basisname}')
 
-        # Last, a trial to access Basis Set Exchange database
+        raise BasisNotFoundError(f'Unknown basis format or basis name for {filename_or_basisname}')
+
+    try:
+        if 'dat' in basmod:
+            b = fload(join(basis_dir, basmod), symb, optimize)
+        elif isinstance(basmod, (tuple, list)) and isinstance(basmod[0], str):
+            b = []
+            for f in basmod:
+                b += fload(join(basis_dir, f), symb, optimize)
+        else:
+            mod = importlib.import_module('.'+basmod, __package__)
+            b = mod.__getattribute__(symb)
+    except (BasisNotFoundError, AttributeError):
+        # When basis set is recognized but its .dat file lacks required elements (e.g., lanthanides), fallback to BSE
         from pyscf.gto.basis import bse
         if bse.basis_set_exchange is None:
-            import warnings
             warnings.warn(
                 'Basis may be available in basis-set-exchange. '
                 'It is recommended to install basis-set-exchange: '
                 'pip install basis-set-exchange')
-        else:
-            try:
-                bse_obj = bse.basis_set_exchange.api.get_basis(
-                    filename_or_basisname, elements=symb)
-            except KeyError:
-                raise BasisNotFoundError(filename_or_basisname)
-            else:
-                return bse._orbital_basis(bse_obj)[0]
-
-        raise BasisNotFoundError(f'Unknown basis format or basis name for {filename_or_basisname}')
-
-    if 'dat' in basmod:
-        b = fload(join(basis_dir, basmod), symb, optimize)
-    elif isinstance(basmod, (tuple, list)) and isinstance(basmod[0], str):
-        b = []
-        for f in basmod:
-            b += fload(join(basis_dir, f), symb, optimize)
-    else:
-        mod = importlib.import_module('.'+basmod, __package__)
-        b = mod.__getattribute__(symb)
+            raise BasisNotFoundError(
+                f'Basis set not found for {symb} in {filename_or_basisname}')
+        try:
+            bse_obj = bse.basis_set_exchange.api.get_basis(
+                filename_or_basisname, elements=symb)
+        except KeyError:
+            raise BasisNotFoundError(
+                f'Basis set not found for {symb} in {filename_or_basisname}')
+        b = bse._orbital_basis(bse_obj)[0][symb]
 
     if contr_scheme != 'Full':
         b = _truncate(b, contr_scheme, symb, split_name)
@@ -679,32 +757,50 @@ def load_ecp(filename_or_basisname, symb):
         basmod = ALIAS[name]
         return parse_nwchem_ecp.load(join(_BASIS_DIR, basmod), symb)
 
+    if '\n' not in filename_or_basisname:
+        from pyscf.gto.basis import bse
+        if bse.basis_set_exchange is None:
+            warnings.warn(
+                'ECP may be available in basis-set-exchange. '
+                'It is recommended to install basis-set-exchange: '
+                'pip install basis-set-exchange')
+        else:
+            try:
+                bse_obj = bse.basis_set_exchange.api.get_basis(
+                    filename_or_basisname, elements=symb)
+            except KeyError:
+                raise BasisNotFoundError(filename_or_basisname)
+            ecp_basis = bse._ecp_basis(bse_obj)
+            if symb not in ecp_basis:
+                raise BasisNotFoundError(
+                    f'No ECP defined for {symb} in {filename_or_basisname}')
+            return ecp_basis[symb]
+        raise RuntimeError(f'Unable to parse the input ECP data\n{filename_or_basisname}')
+
     try:
         return parse_nwchem_ecp.parse(filename_or_basisname, symb)
     except BasisNotFoundError:
         pass
-    except Exception:
-        raise BasisNotFoundError(filename_or_basisname)
 
-    try:
-        return parse_nwchem_ecp.parse(filename_or_basisname)
-    except BasisNotFoundError:
-        pass
-    except Exception:
-        raise BasisNotFoundError(f'Invalid ECP {filename_or_basisname}')
-
-    # Last, a trial to access Basis Set Exchange database
-    from pyscf.gto.basis import bse
-    if bse.basis_set_exchange is not None:
+    if not ENFORCE_ELEMENT_MATCH:
         try:
-            bse_obj = bse.basis_set_exchange.api.get_basis(
-                filename_or_basisname, elements=symb)
-        except KeyError:
-            raise BasisNotFoundError(filename_or_basisname)
-        else:
-            return bse._ecp_basis(bse_obj)[0]
+            out = parse_nwchem_ecp.parse(filename_or_basisname)
+            warnings.warn(
+                f'The ECP input does not explicitly match the element {symb}. '
+                'It is stilled parsed and assigned to {symb} without enforcing '
+                'element matching. If you want to enforce a strict match '
+                'between the ECP input and elements, set\n'
+                '    gto_basis_enforce_element_match = True\n'
+                'in ~/.pyscf_conf.py')
+            return out
+        except BasisNotFoundError:
+            pass
 
     raise BasisNotFoundError('Unknown ECP format or ECP name')
+
+# PP_NAME_PATTERN follows the convention of CP2K orbital basis and pseudo names
+# https://pierre-24.github.io/cp2k-basis/users/basis_sets_and_pseudos
+PP_NAME_PATTERN = re.compile(r'^GTH(-SOC)?-[A-Z0-9]+(-SOC)?-Q\d+$')
 
 def load_pseudo(filename_or_basisname, symb):
     '''Parses PP database file
@@ -713,17 +809,37 @@ def load_pseudo(filename_or_basisname, symb):
     if os.path.isfile(filename_or_basisname):
         return _load_external(parse_cp2k_pp, filename_or_basisname, symb)
 
+    name = filename_or_basisname.upper()
+    if re.fullmatch(PP_NAME_PATTERN, name):
+        # Note: the default *-GTH basis for Na has been changed, compared to
+        # eariler versions. The default one in earlier versions are renamed to
+        # *-GTH-q9_old in the new database (see GTH_POTENTIALS).
+        with_soc = 'SOC' in name
+        name = name.replace('-SOC', '').replace('-Q', '-q')
+        return parse_cp2k_pp._load_GTH_POTENTIALS(
+            name, symb, _GTH_PP_DIR, with_soc)
+
+    # TODO: remove the lagecy parser, except gth-hf-rev. gth-hf-rev data are not
+    # available in the GTH_POTENTIALS or POTENTIAL_UZH databases
     name, suffix = _format_pseudo_name(filename_or_basisname)
     if name in PP_ALIAS:
-        basmod = PP_ALIAS[name]
-        return parse_cp2k_pp.load(join(_GTH_PP_DIR, basmod), symb, suffix)
+        ppfile = PP_ALIAS[name]
+        return parse_cp2k_pp.load(join(_GTH_PP_DIR, ppfile), symb, suffix)
 
     try:
-        return parse_cp2k_pp.parse(filename_or_basisname)
+        return parse_cp2k_pp.parse(filename_or_basisname, symb)
     except BasisNotFoundError:
+        if not ENFORCE_ELEMENT_MATCH:
+            out = parse_cp2k_pp.parse(filename_or_basisname)
+            warnings.warn(
+                f'The pseudo string does not explicitly match the element {symb}. '
+                'It is stilled parsed and assigned to {symb} without enforcing '
+                'element matching. If you want to enforce a strict match '
+                'between the ECP input and elements, set\n'
+                '    gto_basis_enforce_element_match = True\n'
+                'in ~/.pyscf_conf.py')
+            return out
         raise
-    except Exception:
-        raise BasisNotFoundError(f'Invalid PP {filename_or_basisname}')
 
 def _load_external(module, filename_or_basisname, symb, **kwargs):
     '''Try to read basis from given file'''

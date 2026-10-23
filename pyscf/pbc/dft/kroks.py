@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-# Copyright 2014-2019 The PySCF Developers. All Rights Reserved.
+# Copyright 2014-2026 The PySCF Developers. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -30,7 +30,7 @@ from pyscf import __config__
 
 
 @lib.with_doc(kuks.get_veff.__doc__)
-def get_veff(ks, cell=None, dm=None, dm_last=0, vhf_last=0, hermi=1,
+def get_veff(ks, cell=None, dm=None, dm_last=None, vhf_last=None, hermi=1,
              kpts=None, kpts_band=None):
     if getattr(dm, 'mo_coeff', None) is not None:
         mo_coeff = dm.mo_coeff
@@ -42,14 +42,14 @@ def get_veff(ks, cell=None, dm=None, dm_last=0, vhf_last=0, hermi=1,
 
 
 class KROKS(rks.KohnShamDFT, krohf.KROHF):
-    '''RKS class adapted for PBCs with k-point sampling.
+    '''PBC-KRKS with k-point sampling (default: gamma point).
     '''
 
     get_veff = get_veff
     energy_elec = energy_elec
     get_rho = kuks.get_rho
 
-    def __init__(self, cell, kpts=np.zeros((1,3)), xc='LDA,VWN',
+    def __init__(self, cell, kpts=None, xc='LDA,VWN',
                  exxdiv=getattr(__config__, 'pbc_scf_SCF_exxdiv', 'ewald')):
         krohf.KROHF.__init__(self, cell, kpts, exxdiv=exxdiv)
         rks.KohnShamDFT.__init__(self, xc)
@@ -69,5 +69,7 @@ class KROKS(rks.KohnShamDFT, krohf.KROHF):
             out.with_df._j_only = False
             out.with_df.reset()
         return out
+
+    multigrid_numint = kuks.KUKS.multigrid_numint
 
     to_gpu = lib.to_gpu

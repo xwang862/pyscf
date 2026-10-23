@@ -1,10 +1,19 @@
-#from os.path import expanduser
-#home_dir = expanduser("~")
-#f = open(home_dir+'/.pyscf_conf.py', 'a')
-# use FFTW for fft, this requires to compile the FFTW library
-# cmake -DENABLE_FFTW=ON -DBUILD_FFTW=ON
-#f.write('pbc_tools_pbc_fft_engine=\'FFTW\'')
-#f.close()
+#!/usr/bin/env python
+
+'''
+Use the multigrid integrator to accelerate pure DFT calculations for large
+molecular systems.
+
+To enable the high-performance FFTW backend in the multigrid algorithm,
+PySCF must be compiled from source with the appropriate cmake options:
+
+    $ cmake -DENABLE_FFTW=ON -DBUILD_FFTW=ON
+
+Additionally, FFTW must be explicitly enabled in the PySCF configuration file
+(`~/.pyscf_conf.py`) by adding the following setting:
+
+    pbc_tools_pbc_fft_engine = "FFTW"
+'''
 
 import numpy
 import pyscf
@@ -12,7 +21,6 @@ from pyscf import lib
 from pyscf import pbc
 from pyscf.pbc import gto as pbcgto
 from pyscf.pbc import dft as pbcdft
-from pyscf.pbc.dft import multigrid
 
 cell=pbcgto.Cell()
 
@@ -228,11 +236,12 @@ mf=pbcdft.RKS(cell)
 #mf.xc = "LDA, VWN"
 mf.xc = "PBE,PBE"
 mf.init_guess = 'atom' # atom guess is fast
-mf.with_df = multigrid.MultiGridFFTDF2(cell)
-mf.with_df.ngrids = 4 # number of sets of grid points
+# MultiGrid attribute is assigned to the ._numint attribute of DFT classes.
+# The computational cost can be adjusted by setting the ntasks of the MultiGrid
+# instance.
+mf = mf.multigrid_numint()
+mf._numint.ntasks = 4
 mf.kernel()
 
 # Nuclear Gradients
-from pyscf.pbc.grad import rks as rks_grad
-grad = rks_grad.Gradients(mf)
-g = grad.kernel()
+grad = mf.Gradients().kernel()

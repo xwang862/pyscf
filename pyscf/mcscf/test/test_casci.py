@@ -243,6 +243,18 @@ class KnownValues(unittest.TestCase):
         mc.wfnsym = 4
         self.assertRaises(RuntimeError, mc.run)
 
+    def test_nosymhf_then_symcasci(self):
+        mf = m.view(scf.hf_symm.RHF)
+        mf.mol = molsym
+        mc = mcscf.casci_symm.CASCI(mf, 4, 4).run()
+        self.assertAlmostEqual(mc.e_tot, -108.83741684447352, 7)
+
+    def test_casci_without_initializing_scf(self):
+        mc = mol.RHF().CASCI(4, 4)
+        mc.kernel()
+        self.assertAlmostEqual(mc.e_tot, -108.83741684447352, 7)
+        mc.analyze()
+
 if __name__ == "__main__":
     print("Full Tests for CASCI")
     unittest.main()

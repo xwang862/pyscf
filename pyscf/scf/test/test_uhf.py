@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-# Copyright 2014-2019 The PySCF Developers. All Rights Reserved.
+# Copyright 2014-2026 The PySCF Developers. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -22,6 +22,25 @@ import unittest
 from pyscf import lib
 from pyscf import gto
 from pyscf import scf
+
+try:
+    from pyscf.dispersion import dftd3, dftd4
+except (ImportError, OSError):
+    dftd3 = dftd4 = None
+
+
+def make_disp_mol():
+    return gto.M(
+        atom='''
+C  -0.65830719,  0.61123287, -0.00800148
+C   0.73685281,  0.61123287, -0.00800148
+C   1.43439081,  1.81898387, -0.00800148
+C   0.73673681,  3.02749287, -0.00920048
+''',
+        basis='ccpvtz',
+        charge=1,
+        spin=1,
+        output='/dev/null')
 
 def setUpModule():
     global mol, mf, n2sym, n2mf, mol2, mf2, bak
@@ -120,6 +139,44 @@ class KnownValues(unittest.TestCase):
         dm2 = scf.uhf.UHF(mol).get_init_guess(mol, key='sap')
         self.assertAlmostEqual(lib.fp(dm2), 0.6440359527450615, 7)
 
+    def test_break_spin_symm_mix(self):
+        # H2 at equilibrium: verify DM properties of the breaksym='mix' initial guess
+        mol_h2 = gto.M(atom='H 0 0 0; H 0 0 1.4', basis='sto-3g', spin=0, verbose=0)
+        s = mol_h2.intor_symmetric('int1e_ovlp')
+
+        mf_h2 = scf.UHF(mol_h2)
+        dm = mf_h2.init_guess_by_minao(mol_h2, breaksym='mix')
+        dma, dmb = dm
+
+        # spin symmetry must be broken
+        self.assertFalse(numpy.allclose(dma, dmb))
+
+        # electron count preserved: Tr(S * DM) = N_elec per spin
+        self.assertAlmostEqual(numpy.einsum('ij,ji->', s, dma), 1.0, 5)
+        self.assertAlmostEqual(numpy.einsum('ij,ji->', s, dmb), 1.0, 5)
+
+        # DMs must be positive semidefinite (physically valid density matrices)
+        self.assertTrue(numpy.all(numpy.linalg.eigvalsh(dma) > -1e-10))
+        self.assertTrue(numpy.all(numpy.linalg.eigvalsh(dmb) > -1e-10))
+
+    def test_break_spin_symm_mix_h2_dissociation(self):
+        # At stretched H2 (well past the Coulson-Fischer point) UHF with
+        # breaksym='mix' should find a lower-energy broken-symmetry solution
+        # than RHF, with the unpaired electrons localised on separate atoms.
+        mol_h2 = gto.M(atom='H 0 0 0; H 0 0 4.0', basis='sto-3g', spin=0, verbose=0)
+
+        e_rhf = scf.RHF(mol_h2).kernel()
+
+        mf_uhf = scf.UHF(mol_h2)
+        mf_uhf.init_guess_breaksym = 'mix'
+        e_uhf = mf_uhf.kernel()
+
+        self.assertTrue(mf_uhf.converged)
+        # broken-symmetry UHF must be lower than RHF at stretched geometry
+        self.assertLess(e_uhf, e_rhf)
+        # significant spin contamination expected (<S^2> -> 1 as R -> inf)
+        self.assertGreater(mf_uhf.spin_square()[0], 0.5)
+
     def test_get_grad(self):
         g = mf2.get_grad(mf2.mo_coeff, mf2.mo_occ)
         self.assertAlmostEqual(abs(g).max(), 0, 6)
@@ -151,6 +208,24 @@ class KnownValues(unittest.TestCase):
 
     def test_scf(self):
         self.assertAlmostEqual(mf.e_tot, -76.026765673119627, 9)
+
+    @unittest.skipIf(dftd3 is None, "requires the dftd3 library")
+    def test_uhf_d3bj(self):
+        mol = make_disp_mol()
+        mf = scf.UHF(mol)
+        mf.disp = 'd3bj'
+        e_disp = mf.get_dispersion()
+        print(e_disp)
+        self.assertAlmostEqual(e_disp, -0.030566786972, 9)
+
+    @unittest.skipIf(dftd4 is None, "requires the dftd4 library")
+    def test_uhf_d4(self):
+        mol = make_disp_mol()
+        mf = scf.UHF(mol)
+        mf.disp = 'd4'
+        e_disp = mf.get_dispersion()
+        print(e_disp)
+        self.assertAlmostEqual(e_disp, -0.0096708308236, 9)
 
     def test_scf_negative_spin(self):
         mol = gto.M(atom = '''
@@ -368,6 +443,11 @@ H     0    0.757    0.587'''
         self.assertAlmostEqual(abs(vhf4-vhf3).max(), 0, 12)
         self.assertAlmostEqual(lib.fp(vhf4), -9.9614575705134953, 12)
 
+        vhf5 = mf1.get_veff(pmol, dm[:,1], dm_last=dm[:,0],
+                            vhf_last=vhf3a, hermi=0)
+        self.assertAlmostEqual(abs(vhf3b - vhf5).max(), 0, 12)
+        self.assertAlmostEqual(vhf5.ecoul, vhf3b.ecoul, 12)
+
     def test_natm_eq_0(self):
         mol = gto.M()
         mol.spin = 2
@@ -462,8 +542,7 @@ H     0    0.757    0.587'''
         mf.kernel(dm)
         self.assertAlmostEqual(mf.e_tot, -75.799022820714526, 9)
 
-        dm = mf.make_rdm1()
-        mf.kernel(dm)
+        mf.kernel()
         self.assertAlmostEqual(mf.e_tot, -75.983602246415373, 9)
 
     def test_custom_h1e(self):

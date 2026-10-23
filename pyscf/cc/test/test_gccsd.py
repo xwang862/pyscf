@@ -15,6 +15,7 @@
 
 import unittest
 import numpy
+import numpy as np
 from functools import reduce
 
 from pyscf import lib
@@ -69,6 +70,21 @@ class KnownValues(unittest.TestCase):
         gcc = gccsd.GCCSD(mf, frozen=frozen)
         ecc, t1, t2 = gcc.kernel()
         self.assertAlmostEqual(ecc, -0.3486987472235819, 6)
+
+        gcc.frozen = None
+        gcc.kernel()
+        self.assertAlmostEqual(gcc.ecc, -0.352230909546054, 7)
+        self.assertEqual(gcc.t2.shape, (16, 16, 40, 40))
+
+        gcc.frozen = 1
+        gcc.kernel()
+        self.assertAlmostEqual(gcc.ecc, -0.351276499761539, 7)
+        self.assertEqual(gcc.t2.shape, (15, 15, 40, 40))
+
+        gcc.frozen = np.array([0])
+        gcc.kernel()
+        self.assertAlmostEqual(gcc.ecc, -0.35127649976153963, 7)
+        self.assertEqual(gcc.t2.shape, (15, 15, 40, 40))
 
     def test_ERIS(self):
         gcc = gccsd.GCCSD(mf, frozen=4)
@@ -285,6 +301,7 @@ class KnownValues(unittest.TestCase):
         eri = eri + eri.transpose(1,0,3,2).conj()
         eri = eri + eri.transpose(2,3,0,1)
         eri *= .1
+        mf._eri = eri
 
         def get_jk(mol, dm, *args,**kwargs):
             vj = numpy.einsum('ijkl,lk->ij', eri, dm)
@@ -294,17 +311,19 @@ class KnownValues(unittest.TestCase):
             vj, vk = get_jk(mol, dm)
             return vj - vk
         def ao2mofn(mos):
-            return eri
+            c = mos
+            return lib.einsum('pqrs,pi,qj,rk,sl->ijkl', eri, c.conj(), c, c.conj(), c)
 
         mf.get_jk = get_jk
         mf.get_veff = get_veff
         hcore = numpy.random.random((nmo,nmo)) * .2 + numpy.random.random((nmo,nmo))* .2j
-        hcore = hcore + hcore.T.conj() + numpy.diag(range(nmo))*2
+        hcore = hcore + hcore.T.conj() + numpy.diag(numpy.arange(nmo)*2)
         mf.get_hcore = lambda *args: hcore
         mf.get_ovlp = lambda *args: numpy.eye(nmo)
         orbspin = numpy.zeros(nmo, dtype=int)
         orbspin[1::2] = 1
-        mf.mo_coeff = lib.tag_array(numpy.eye(nmo) + 0j, orbspin=orbspin)
+        u = numpy.linalg.eigh(hcore)[1]
+        mf.mo_coeff = lib.tag_array(u, orbspin=orbspin)
         mf.mo_occ = numpy.zeros(nmo)
         mf.mo_occ[:nocc] = 1
 
@@ -313,8 +332,8 @@ class KnownValues(unittest.TestCase):
         mycc.ao2mo = lambda *args, **kwargs: eris
         mycc.kernel(eris=eris)
         mycc.solve_lambda(eris=eris)
-        dm1 = mycc.make_rdm1()
-        dm2 = mycc.make_rdm2()
+        dm1 = mycc.make_rdm1(ao_repr=True)
+        dm2 = mycc.make_rdm2(ao_repr=True)
 
         e1 = numpy.einsum('ij,ji', hcore, dm1)
         e1+= numpy.einsum('ijkl,ijkl', eri, dm2) * .5
@@ -486,6 +505,36 @@ class KnownValues(unittest.TestCase):
         emp2 = mp.MP2(mf).kernel()[0]
         self.assertAlmostEqual(e, emp2, 9)
 
+    def test_complex_orbitals(self):
+        mol = gto.M(atom='''
+        O    0.   0.       0.
+        H    0.   -0.757   0.587
+        H    0.   0.757    0.587''',
+        basis='6-31g*')
+        mf = mol.RHF().run()
+        cc = mf.CCSD().run()
+        nr_ref = cc.ecc
+
+        mf = mol.GHF()
+        dm = mf.get_init_guess() + 0j
+        nao = mol.nao
+        # Mixing alpha and beta spins
+        dm[nao:,:nao] = .02j
+        dm[:nao,nao:] = -.02j
+        mf.kernel(dm0=dm)
+        # test eris_incore
+        cc = mf.CCSD().run()
+        self.assertAlmostEqual(cc.ecc, nr_ref, 6)
+
+        # test eris_outcore
+        mf._eri = None
+        cc = mf.CCSD().run()
+        self.assertAlmostEqual(cc.ecc, nr_ref, 6)
+
+        # With SOC, correlation energy is slightly different from NR ref value
+        mf = mf.x2c().run()
+        cc = mf.CCSD().run()
+        self.assertAlmostEqual(cc.ecc, -0.19527045, 6)
 
 if __name__ == "__main__":
     print("Tests for GCCSD")

@@ -15,10 +15,9 @@
 
 import unittest
 import os
-import tempfile
 import numpy
 from numpy.testing import assert_allclose
-from pyscf import lib, gto, scf
+from pyscf import lib, gto, scf, dft
 
 have_pe = False
 try:
@@ -34,7 +33,7 @@ dname = os.path.dirname(__file__)
 
 def setUpModule():
     global potf, potf2, mol, mol2, potfile, potfile2
-    potf = tempfile.NamedTemporaryFile()
+    potf = lib.NamedTemporaryFile()
     potf.write(b'''!
 @COORDINATES
 3
@@ -70,7 +69,7 @@ EXCLISTS
                 ''', basis='sto3g', verbose=7,
                 output='/dev/null')
 
-    potf2 = tempfile.NamedTemporaryFile()
+    potf2 = lib.NamedTemporaryFile()
     potf2.write(b'''! water molecule + a large, positive charge to force electron spill-out
 @COORDINATES
 4
@@ -225,6 +224,15 @@ def _exec_cppe(pe, dm, elec_only=False):
 
 @unittest.skipIf(not have_pe, "CPPE library not found.")
 class TestPolEmbed(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.original_grids = dft.radi.ATOM_SPECIFIC_TREUTLER_GRIDS
+        dft.radi.ATOM_SPECIFIC_TREUTLER_GRIDS = False
+
+    @classmethod
+    def tearDownClass(cls):
+        dft.radi.ATOM_SPECIFIC_TREUTLER_GRIDS = cls.original_grids
+
     def test_exec_cppe(self):
         pe = solvent.PE(mol, os.path.join(dname, "pna_6w.potential"))
         numpy.random.seed(2)
@@ -285,7 +293,7 @@ class TestPolEmbed(unittest.TestCase):
         self.assertAlmostEqual(mf.e_tot, -168.147494986446, 8)
 
     def test_as_scanner(self):
-        mf = mol.RHF(chkfile=tempfile.NamedTemporaryFile().name)
+        mf = mol.RHF(chkfile=lib.NamedTemporaryFile().name)
         mf_scanner = solvent.PE(mf, potfile).as_scanner()
         mf_scanner(mol)
         self.assertAlmostEqual(mf_scanner.with_solvent.e, 0.00020182314249546455, 9)
@@ -306,13 +314,13 @@ class TestPolEmbed(unittest.TestCase):
     def test_rhf_tda(self):
         # TDA with equilibrium_solvation
         mf = solvent.PE(mol.RHF(), potfile).run(conv_tol=1e-10)
-        td = solvent.PE(mf.TDA(), potfile).run(equilibrium_solvation=True)
+        td = mf.TDA(equilibrium_solvation=True).run()
         ref = numpy.array([0.1506426609354755, 0.338251407831332, 0.4471267328974609])
         self.assertAlmostEqual(abs(ref - td.e).max(), 0, 7)
 
         # TDA without equilibrium_solvation
         mf = solvent.PE(mol.RHF(), potfile).run(conv_tol=1e-10)
-        td = solvent.PE(mf.TDA(), potfile).run()
+        td = mf.TDA().run()
         ref = numpy.array([0.1506431269137912, 0.338254809044639, 0.4471487090255076])
         self.assertAlmostEqual(abs(ref - td.e).max(), 0, 7)
 

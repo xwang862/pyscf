@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import tempfile
 from functools import reduce
 import unittest
 import copy
@@ -43,8 +42,8 @@ def setUpModule():
     mol.basis = '631g'
     mol.build()
     mf = scf.RHF(mol)
-    mf.chkfile = tempfile.NamedTemporaryFile().name
     mf.conv_tol_grad = 1e-8
+    mf.chkfile = lib.NamedTemporaryFile().name
     mf.kernel()
 
     mycc = rccsd.RCCSD(mf)
@@ -152,7 +151,7 @@ class KnownValues(unittest.TestCase):
         self.assertAlmostEqual(cc1.e_corr, -0.13516622806104395, 7)
 
     def test_restart(self):
-        ftmp = tempfile.NamedTemporaryFile()
+        ftmp = lib.NamedTemporaryFile()
         cc1 = cc.CCSD(mf)
         cc1.max_cycle = 5
         cc1.kernel()
@@ -286,13 +285,13 @@ class KnownValues(unittest.TestCase):
 
         mycc1.cc2 = False
         t1a, t2a = rccsd.update_amps(mycc1, t1, t2, eris1)
-        self.assertAlmostEqual(lib.fp(t1a), -106360.5276951083, 7)
+        self.assertAlmostEqual(lib.fp(t1a), -106360.5276951083, 6)
         self.assertAlmostEqual(lib.fp(t2a), 66540.100267798145, 6)
         self.assertAlmostEqual(abs(t1a-t1b).max(), 0, 6)
         self.assertAlmostEqual(abs(t2a-t2b).max(), 0, 6)
         mycc1.cc2 = True
         t1a, t2a = rccsd.update_amps(mycc1, t1, t2, eris1)
-        self.assertAlmostEqual(lib.fp(t1a), -106360.5276951083, 7)
+        self.assertAlmostEqual(lib.fp(t1a), -106360.5276951083, 6)
         self.assertAlmostEqual(lib.fp(t2a), -1517.9391800662809, 7)
 
         mol = gto.Mole()

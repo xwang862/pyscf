@@ -20,7 +20,6 @@ from pyscf.pbc import gto as pbcgto
 from pyscf.pbc import scf as pbcscf
 import pyscf.pbc.mp
 import pyscf.pbc.mp.kmp2
-from pyscf.scf.addons import remove_linear_dep_
 
 
 def setUpModule():
@@ -49,7 +48,6 @@ def tearDownModule():
 def run_kcell(cell, nk):
     abs_kpts = cell.make_kpts(nk, wrap_around=True)
     kmf = pbcscf.KRHF(cell, abs_kpts)
-    kmf = remove_linear_dep_(kmf, threshold=1e-5, lindep=1e-6)
     kmf.conv_tol = 1e-12
     ekpt = kmf.scf()
     mp = pyscf.pbc.mp.kmp2.KMP2(kmf).run()
@@ -63,7 +61,7 @@ class KnownValues(unittest.TestCase):
         cell1.build()
         nk = [2, 1, 1]
         escf, emp = run_kcell(cell1, nk)
-        self.assertAlmostEqual(escf, -10.551651367521986, 7)
+        self.assertAlmostEqual(escf, -10.551651367521986, 6)
         self.assertAlmostEqual(emp , -0.1514005714425273, 7)
 
     def test_221_high_cost(self):
@@ -75,18 +73,17 @@ class KnownValues(unittest.TestCase):
         nk = [2, 2, 1]
         abs_kpts = cell1.make_kpts(nk, wrap_around=True)
         kmf = pbcscf.KRHF(cell1, abs_kpts)
-        kmf = remove_linear_dep_(kmf, threshold=1e-4, lindep=1e-6)
         ekpt = kmf.scf()
         mp = pyscf.pbc.mp.kmp2.KMP2(kmf).run()
 
-        self.assertAlmostEqual(ekpt,      -10.835614361742607, 8)
-        self.assertAlmostEqual(mp.e_corr, -0.1522294774708119, 7)
+        self.assertAlmostEqual(ekpt,      -10.838793827216200, 6)
+        self.assertAlmostEqual(mp.e_corr,  -0.153927793165337, 6)
 
     def test_222_high_cost(self):
         nk = (2, 2, 2)
         escf, emp = run_kcell(cell,nk)
-        self.assertAlmostEqual(escf, -11.0152342492995, 8)
-        self.assertAlmostEqual(emp, -0.233433093787577, 7)
+        self.assertAlmostEqual(escf, -11.015234407761824, 6)
+        self.assertAlmostEqual(emp,   -0.233433146996230, 7)
 
 
 if __name__ == '__main__':

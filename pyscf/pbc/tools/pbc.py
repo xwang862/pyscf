@@ -21,7 +21,8 @@ import scipy.linalg
 from pyscf import lib
 from pyscf.lib import logger
 from pyscf.gto import ATM_SLOTS, BAS_SLOTS, ATOM_OF, PTR_COORD
-from pyscf.pbc.lib.kpts_helper import get_kconserv, get_kconserv3  # noqa
+from pyscf.pbc.lib.kpts_helper import get_kconserv, get_kconserv3
+from pyscf.pbc.lib.kpts_helper import intersection
 from pyscf import __config__
 
 FFT_ENGINE = getattr(__config__, 'pbc_tools_pbc_fft_engine', 'NUMPY+BLAS')
@@ -68,10 +69,10 @@ def _ifftn_blas(g, mesh):
 
 nproc = lib.num_threads()
 
-def _fftn_wrapper(a):  # noqa
+def _fftn_wrapper(a):
     return scipy.fft.fftn(a, axes=(1,2,3), workers=nproc)
 
-def _ifftn_wrapper(a):  # noqa
+def _ifftn_wrapper(a):
     return scipy.fft.ifftn(a, axes=(1,2,3), workers=nproc)
 
 if FFT_ENGINE == 'FFTW':
@@ -105,10 +106,10 @@ if FFT_ENGINE == 'FFTW':
                ctypes.c_int(rank))
         return out
 
-    def _fftn_wrapper(a):  # noqa
+    def _fftn_wrapper(a):  # noqa: F811
         mesh = a.shape[1:]
         return _complex_fftn_fftw(a, mesh, 'fft')
-    def _ifftn_wrapper(a):  # noqa
+    def _ifftn_wrapper(a):  # noqa: F811
         mesh = a.shape[1:]
         return _complex_fftn_fftw(a, mesh, 'ifft')
 
@@ -118,9 +119,9 @@ elif FFT_ENGINE == 'PYFFTW':
         import pyfftw
         pyfftw.config.PLANNER_EFFORT = 'FFTW_MEASURE'
         pyfftw.interfaces.cache.enable()
-        def _fftn_wrapper(a):  # noqa
+        def _fftn_wrapper(a):
             return pyfftw.interfaces.numpy_fft.fftn(a, axes=(1,2,3), threads=nproc)
-        def _ifftn_wrapper(a):  # noqa
+        def _ifftn_wrapper(a):
             return pyfftw.interfaces.numpy_fft.ifftn(a, axes=(1,2,3), threads=nproc)
     except ImportError:
         print('PyFFTW not installed. SciPy fft module will be used.')
@@ -131,13 +132,13 @@ elif FFT_ENGINE == 'NUMPY+BLAS':
                 167,173,179,181,191,193,197,199,211,223,227,229,233,239,241,251,
                 257,263,269,271,277,281,283,293]
     _EXCLUDE = set(_EXCLUDE + [n*2 for n in _EXCLUDE[:30]] + [n*3 for n in _EXCLUDE[:20]])
-    def _fftn_wrapper(a):  # noqa
+    def _fftn_wrapper(a):
         mesh = a.shape[1:]
         if mesh[0] in _EXCLUDE and mesh[1] in _EXCLUDE and mesh[2] in _EXCLUDE:
             return _fftn_blas(a, mesh)
         else:
             return scipy.fft.fftn(a, axes=(1,2,3), workers=nproc)
-    def _ifftn_wrapper(a):  # noqa
+    def _ifftn_wrapper(a):
         mesh = a.shape[1:]
         if mesh[0] in _EXCLUDE and mesh[1] in _EXCLUDE and mesh[2] in _EXCLUDE:
             return _ifftn_blas(a, mesh)
@@ -145,10 +146,10 @@ elif FFT_ENGINE == 'NUMPY+BLAS':
             return scipy.fft.ifftn(a, axes=(1,2,3), workers=nproc)
 
 elif FFT_ENGINE == 'BLAS':
-    def _fftn_wrapper(a):  # noqa
+    def _fftn_wrapper(a):
         mesh = a.shape[1:]
         return _fftn_blas(a, mesh)
-    def _ifftn_wrapper(a):  # noqa
+    def _ifftn_wrapper(a):
         mesh = a.shape[1:]
         return _ifftn_blas(a, mesh)
 
@@ -233,6 +234,26 @@ def ifftk(g, mesh, expikr):
     '''
     return ifft(g, mesh) * expikr
 
+def _Gv_wrap_around(cell, Gv, k, mesh):
+    '''wrap around the high frequency k+G vectors into their lower frequency
+    counterparts. Important if you want the gamma point and k-point answers to
+    agree.
+    '''
+    b = cell.reciprocal_vectors()
+    #assert all(np.linalg.solve(b.T, k) < 1), 'k-point must be in first Brillouin zone'
+    kG = k + Gv
+    box_edge = np.einsum('i,ij->ij', mesh, b)
+    reduced_coords = np.linalg.solve(box_edge.T, kG.T).T
+    if cell.dimension >= 1:
+        kG[reduced_coords[:,0]> .5] -= box_edge[0]
+        kG[reduced_coords[:,0]<-.5] += box_edge[0]
+    if cell.dimension >= 2:
+        kG[reduced_coords[:,1]> .5] -= box_edge[1]
+        kG[reduced_coords[:,1]<-.5] += box_edge[1]
+    if cell.dimension == 3:
+        kG[reduced_coords[:,2]> .5] -= box_edge[2]
+        kG[reduced_coords[:,2]<-.5] += box_edge[2]
+    return kG
 
 def get_coulG(cell, k=np.zeros(3), exx=False, mf=None, mesh=None, Gv=None,
               wrap_around=True, omega=None, **kwargs):
@@ -243,7 +264,9 @@ def get_coulG(cell, k=np.zeros(3), exx=False, mf=None, mesh=None, Gv=None,
             k-point
         exx : bool or str
             Whether this is an exchange matrix element
-        mf : instance of :class:`SCF`
+        mf : an SCF instance or an instance to provide the `.kpts` attribute
+            The .kpts attribute is used to determine the Monkhorst-Pack k-point
+            mesh size.
 
     Returns:
         coulG : (ngrids,) ndarray
@@ -253,13 +276,14 @@ def get_coulG(cell, k=np.zeros(3), exx=False, mf=None, mesh=None, Gv=None,
         omega : float
             Enable Coulomb kernel ``erf(|omega|*r12)/r12`` if omega > 0
             and ``erfc(|omega|*r12)/r12`` if omega < 0.
-            Note this parameter is slightly different to setting cell.omega
-            for the treatment of exxdiv (at G0).  cell.omega affects Ewald
-            probe charge at G0. It is used mostly by RSH functionals for
-            the long-range part of HF exchange. This parameter is used by
+            Note this parameter is slightly different to setting cell.omega for
+            exxdiv='ewald' at G0. When cell.omega is configured, the Ewald probe
+            charge correction will be computed using the LR or SR Coulomb
+            interactions. However, when this kwarg is explicitly specified, the
+            exxdiv correction is computed with the full-range Coulomb
+            interaction (1/r12). This parameter should only be specified in the
             range-separated JK builder and range-separated DF (and other
-            range-separated integral methods) which require Ewald probe charge
-            to be computed with regular Coulomb interaction (1/r12).
+            range-separated integral methods if any).
     '''
     exxdiv = exx
     if isinstance(exx, str):
@@ -276,41 +300,74 @@ def get_coulG(cell, k=np.zeros(3), exx=False, mf=None, mesh=None, Gv=None,
     if Gv is None:
         Gv = cell.get_Gv(mesh)
 
+    if omega is None:
+        _omega = cell.omega
+    else:
+        _omega = omega
+
+    if cell.dimension == 0 and cell.low_dim_ft_type != 'inf_vacuum':
+        a = cell.lattice_vectors()
+        assert abs(np.eye(3)*a[0,0] - a).max() < 1e-6, \
+                'Must be cubic box for cell.dimension=0'
+        # ensure the sphere is completely inside the box
+        Rc = a[0,0] / 2
+
+        # The truncated Coulomb kernel is
+        #    \int_0^R e^{-iG dot r} 1/r dr^3 = 4pi/G \int_0^R sin(G r) dr
+        #        = 4pi/G^2 (1 - cos(G R))
+        # When R->infinity, the truncated Coulomb becomes the full-range
+        # Coulomb. Its kernel is 4pi/G^2. Comparing the two integrals, the
+        # divergentintegral
+        #    4pi/G^2 \int_R^\inf sin(G R) dr = \int_0^\inf - \int_R^\inf ...
+        # would give a regularized value
+        #    4pi/G^2 cos (G R)
+        # The long-range truncated Coulomb kernel
+        #    \int_0^R erf(omega r)/r dr^3 = \int_0^\inf - \int_R^\inf ...
+        #        = 4pi/G^2 exp(-G^2/(4 omega^2)) - 4pi/G \int_R^\inf erf(omega r) sin(G r) dr
+        # If erf(omega R) ~= 1 for sufficient large R, the second term is
+        # simplified to the sin(G r) regularized integral. The long range
+        # truncated Coulomb is then given by
+        #    4pi/G^2 (exp(-G^2/(4 omega^2) - cos(G R))
+        # The short range part is
+        #    4pi/G^2 (1 - exp(-G^2/(4 omega^2))
+        if (_omega != 0 and
+            abs(_omega) * Rc < 2.0): # typically, error of \int erf(omega r) sin (G r) < 1e-5
+            raise RuntimeError(
+                'In sufficient box size for the truncated range-separated '
+                'Coulomb potential in 0D case')
+
+        absG = np.linalg.norm(Gv, axis=1)
+        with np.errstate(divide='ignore',invalid='ignore'):
+            coulG = 4*np.pi/absG**2
+            coulG[0] = 0
+        if _omega == 0:
+            coulG *= 1. - np.cos(absG*Rc)
+            # G=0 term carries the charge. This special term supports the charged
+            # system for dimension=0.
+            coulG[0] = 2*np.pi*Rc**2
+        elif _omega > 0:
+            coulG *= np.exp(-.25/_omega**2 * absG**2) - np.cos(absG*Rc)
+            coulG[0] = 2*np.pi*Rc**2 - np.pi / _omega**2
+        else:
+            coulG *= 1 - np.exp(-.25/_omega**2 * absG**2)
+            coulG[0] = np.pi / _omega**2
+        return coulG
+
     if abs(k).sum() > 1e-9:
-        kG = k + Gv
+        if wrap_around:
+            # Here we 'wrap around' the high frequency k+G vectors into their lower
+            # frequency counterparts.  Important if you want the gamma point and k-point
+            # answers to agree
+            kG = _Gv_wrap_around(cell, Gv, k, mesh)
+        else:
+            kG = k + Gv
     else:
         kG = Gv
 
-    equal2boundary = None
-    if wrap_around and abs(k).sum() > 1e-9:
-        equal2boundary = np.zeros(Gv.shape[0], dtype=bool)
-        # Here we 'wrap around' the high frequency k+G vectors into their lower
-        # frequency counterparts.  Important if you want the gamma point and k-point
-        # answers to agree
-        b = cell.reciprocal_vectors()
-        box_edge = np.einsum('i,ij->ij', np.asarray(mesh)//2+0.5, b)
-        assert (all(np.linalg.solve(box_edge.T, k).round(9).astype(int)==0))
-        reduced_coords = np.linalg.solve(box_edge.T, kG.T).T.round(9)
-        on_edge = reduced_coords.astype(int)
-        if cell.dimension >= 1:
-            equal2boundary |= reduced_coords[:,0] == 1
-            equal2boundary |= reduced_coords[:,0] ==-1
-            kG[on_edge[:,0]== 1] -= 2 * box_edge[0]
-            kG[on_edge[:,0]==-1] += 2 * box_edge[0]
-        if cell.dimension >= 2:
-            equal2boundary |= reduced_coords[:,1] == 1
-            equal2boundary |= reduced_coords[:,1] ==-1
-            kG[on_edge[:,1]== 1] -= 2 * box_edge[1]
-            kG[on_edge[:,1]==-1] += 2 * box_edge[1]
-        if cell.dimension == 3:
-            equal2boundary |= reduced_coords[:,2] == 1
-            equal2boundary |= reduced_coords[:,2] ==-1
-            kG[on_edge[:,2]== 1] -= 2 * box_edge[2]
-            kG[on_edge[:,2]==-1] += 2 * box_edge[2]
-
     absG2 = np.einsum('gi,gi->g', kG, kG)
+    G0_idx = []
 
-    if getattr(mf, 'kpts', None) is not None:
+    if hasattr(mf, 'kpts'):
         kpts = mf.kpts
     else:
         kpts = k.reshape(1,3)
@@ -331,21 +388,45 @@ def get_coulG(cell, k=np.zeros(3), exx=False, mf=None, mesh=None, Gv=None,
             mf._ws_exx = precompute_exx(cell, kpts)
         exx_alpha = mf._ws_exx['alpha']
         exx_kcell = mf._ws_exx['kcell']
-        exx_q = mf._ws_exx['q']
-        exx_vq = mf._ws_exx['vq']
 
         with np.errstate(divide='ignore',invalid='ignore'):
             coulG = 4*np.pi/absG2*(1.0 - np.exp(-absG2/(4*exx_alpha**2)))
         coulG[absG2==0] = np.pi / exx_alpha**2
         # Index k+Gv into the precomputed vq and add on
         gxyz = np.dot(kG, exx_kcell.lattice_vectors().T)/(2*np.pi)
-        gxyz = gxyz.round(decimals=6).astype(int)
+        shift = (gxyz[0] + .5) % 1 - .5
+        gxyz_int = np.rint(gxyz - shift).astype(int)
+        if abs(gxyz - gxyz_int - shift).max() > 1e-6:
+            raise RuntimeError('k+G vectors are incompatible with the FFT mesh')
+
+        no_shift = abs(shift).max() < 1e-9
+        if no_shift:
+            exx_vq = mf._ws_exx['vq']
+        else:
+            key = tuple(np.round(shift, 12))
+            cache = mf._ws_exx['vq_cache']
+            if key not in cache:
+                ''' Note: A grid point on the WS boundary can have multiple degenerate r_mic.
+                    The current implementation in `precompute_exx` selects only one of them
+                    deterministically. These boundary points have zero measure in the continuous
+                    integral, so their contribution vanishes as the FFT mesh is refined. Future
+                    implementation may want to collect all degenerate r_mic's and average their
+                    phases (i.e., similar to how Wannier interpolation handles boundary images).
+                '''
+                delta = np.dot(shift, exx_kcell.reciprocal_vectors())
+                phase = np.exp(-1j * np.dot(mf._ws_exx['r_mic'], delta))
+                vG = (exx_kcell.vol / len(phase)) * fftk(
+                    mf._ws_exx['vR'], exx_kcell.mesh, phase)
+                cache[key] = vG.real.copy()
+            exx_vq = cache[key]
+
         mesh = np.asarray(exx_kcell.mesh)
-        gxyz = (gxyz + mesh)%mesh
+        gxyz = (gxyz_int + mesh)%mesh
         qidx = (gxyz[:,0]*mesh[1] + gxyz[:,1])*mesh[2] + gxyz[:,2]
-        #qidx = [np.linalg.norm(exx_q-kGi,axis=1).argmin() for kGi in kG]
-        maxqv = abs(exx_q).max(axis=0)
-        is_lt_maxqv = (abs(kG) <= maxqv).all(axis=1)
+        lower = -(mesh // 2)
+        upper = (mesh - 1) // 2
+        is_lt_maxqv = ((gxyz_int >= lower) &
+                       (gxyz_int <= upper)).all(axis=1)
         coulG = coulG.astype(exx_vq.dtype)
         coulG[is_lt_maxqv] += exx_vq[qidx[is_lt_maxqv]]
 
@@ -357,7 +438,7 @@ def get_coulG(cell, k=np.zeros(3), exx=False, mf=None, mesh=None, Gv=None,
         # error in exchange integrals
 
         G0_idx = np.where(absG2==0)[0]
-        if cell.dimension != 2 or cell.low_dim_ft_type == 'inf_vacuum':
+        if cell.dimension == 3 or cell.low_dim_ft_type == 'inf_vacuum':
             with np.errstate(divide='ignore'):
                 coulG = 4*np.pi/absG2
                 coulG[G0_idx] = 0
@@ -379,7 +460,7 @@ def get_coulG(cell, k=np.zeros(3), exx=False, mf=None, mesh=None, Gv=None,
             logger.warn(cell, 'No method for PBC dimension 1, dim-type %s.'
                         '  cell.low_dim_ft_type="inf_vacuum"  should be set.',
                         cell.low_dim_ft_type)
-            raise NotImplementedError
+            raise NotImplementedError('truncated coulG for dimension=1 is numerically inaccurate')
 
             # Carlo A. Rozzi, PRB 73, 205119 (2006)
             a = cell.lattice_vectors()
@@ -395,99 +476,223 @@ def get_coulG(cell, k=np.zeros(3), exx=False, mf=None, mesh=None, Gv=None,
                 # coulG[Gx==0] = -4*np.pi * (dr * r * scipy.special.j0(Gp*r) * np.log(r)).sum()
             if len(G0_idx) > 0:
                 coulG[G0_idx] = -np.pi*Rc**2 * (2*np.log(Rc) - 1)
-
-        # The divergent part of periodic summation of (ii|ii) integrals in
-        # Coulomb integrals were cancelled out by electron-nucleus
-        # interaction. The periodic part of (ii|ii) in exchange cannot be
-        # cancelled out by Coulomb integrals. Its leading term is calculated
-        # using Ewald probe charge (the function madelung below)
-        if cell.dimension > 0 and exxdiv == 'ewald' and len(G0_idx) > 0:
-            coulG[G0_idx] += Nk*cell.vol*madelung(cell, kpts)
-
-    if equal2boundary is not None:
-        coulG[equal2boundary] = 0
+        else:
+            raise NotImplementedError(f'dimension={cell.dimension} with '
+                                      f'low_dim_ft_type={cell.low_dim_ft_type} is not supported')
 
     # Scale the coulG kernel for attenuated Coulomb integrals.
-    # * omega is used by RangeSeparatedJKBuilder which requires ewald probe charge
+    # * kwarg omega is used by RangeSeparatedJKBuilder which requires ewald probe charge
     # being evaluated with regular Coulomb interaction (1/r12).
     # * cell.omega, which affects the ewald probe charge, is often set by
     # DFT-RSH functionals to build long-range HF-exchange for erf(omega*r12)/r12
-    if omega is not None:
-        if omega > 0:
-            # long range part
-            coulG *= np.exp(-.25/omega**2 * absG2)
-        elif omega < 0:
-            # short range part
-            coulG *= (1 - np.exp(-.25/omega**2 * absG2))
-    elif cell.omega > 0:
-        coulG *= np.exp(-.25/cell.omega**2 * absG2)
-    elif cell.omega < 0:
-        raise NotImplementedError
+    if _omega != 0 and cell.dimension != 3:
+        logger.warn(cell, 'The coulG kernel for range-separated Coulomb potential '
+                    f'for PBC {cell.dimension} is inaccurate.')
+    if _omega > 0:
+        # long range part
+        coulG *= np.exp(-.25/_omega**2 * absG2)
+    elif _omega < 0:
+        if exxdiv == 'vcut_sph' or exxdiv == 'vcut_ws':
+            raise RuntimeError(f'SR Coulomb for exxdiv={exxdiv} is not available')
+        # short range part
+        coulG *= (1 - np.exp(-.25/_omega**2 * absG2))
 
+    # For full-range Coulomb and long-range Coulomb,
+    # the divergent part of periodic summation of (ii|ii) integrals in
+    # Coulomb integrals were cancelled out by electron-nucleus
+    # interaction. The periodic part of (ii|ii) in exchange cannot be
+    # cancelled out by Coulomb integrals. Its leading term is calculated
+    # using Ewald probe charge (the function madelung below)
+    if cell.dimension > 0 and exxdiv == 'ewald' and len(G0_idx) > 0:
+        if omega is None: # Affects DFT-RSH
+            coulG[G0_idx] += Nk*cell.vol*madelung(cell, kpts)
+        else: # for RangeSeparatedJKBuilder
+            coulG[G0_idx] += Nk*cell.vol*madelung(cell, kpts, omega=0)
     return coulG
 
-def precompute_exx(cell, kpts):
+
+def precompute_exx(cell, kpts=None, precision=None, nimgs=None):
+    '''Precompute the Wigner-Seitz truncated EXX kernel.
+
+    The long-range part of the kernel is constructed with the minimum-image
+    convention and range separation of Eq. (A4) in Phys. Rev. B 87, 165122
+    (2013). The short-range part is evaluated analytically in :func:`get_coulG`.
+
+    Args:
+        cell : :class:`pyscf.pbc.gto.Cell`
+            Primitive cell.
+        kpts : (nkpts, 3) array_like
+            Complete regular k-point mesh. Defaults to the Gamma point.
+        precision : float
+            Accuracy threshold used to set the range-separation parameter ``alpha``.
+            Defaults to ``min(cell.precision, 1e-11)``, where the default value
+            1e-11 follows the PRB paper above.
+        nimgs : (3,) array_like of int
+            Initial number of lattice images searched in each direction on
+            both sides of the Born-von Karman cell. The search range is
+            automatically enlarged when needed. Defaults to [3,3,3], which
+            can be overwritten by setting the `__config__` attribute
+            "pbc_tools_pbc_vcut_ws_nimgs".
+
+    Returns:
+        dict
+            Range-separation parameter, Born-von Karman cell, reciprocal
+            vectors, and the numerical long-range kernel.
+    '''
     from pyscf.pbc import gto as pbcgto
-    from pyscf.pbc.dft import gen_grid
+    from pyscf.pbc.lo.base import get_kmesh
+
     log = lib.logger.Logger(cell.stdout, cell.verbose)
-    log.debug("# Precomputing Wigner-Seitz EXX kernel")
-    Nk = get_monkhorst_pack_size(cell, kpts)
-    log.debug("# Nk = %s", Nk)
+    log.debug('# Precomputing Wigner-Seitz EXX kernel')
+
+    cput0 = log.init_timer()
+
+    if kpts is None: kpts = np.zeros((1, 3))
+    kpts = np.reshape(kpts, (-1, 3))
+    kmesh = np.asarray(get_kmesh(cell, kpts), dtype=int)
+    scaled_kpts = cell.get_scaled_kpts(kpts - kpts[0])
+    scaled_kpts = np.rint(scaled_kpts * kmesh).astype(int) % kmesh
+    if len(np.unique(scaled_kpts, axis=0)) != len(kpts):
+        raise RuntimeError('Input k-points do not form a complete regular mesh')
+    log.debug('# kmesh = %s', kmesh)
+
+    if precision is None:
+        precision = min(cell.precision, 1e-11)
+    else:
+        precision = float(precision)
+    assert 0 < precision < 1
+
+    log.debug('# precision = %.15g', precision)
+
+    if nimgs is None:
+        nimgs = getattr(__config__, 'pbc_tools_pbc_vcut_ws_nimgs', [3, 3, 3])
+    nimgs = np.asarray(nimgs, dtype=int)
+    assert nimgs.shape == (3,)
+    assert np.all(nimgs > 0)
+
+    log.debug('# nimgs = %s', nimgs)
 
     kcell = pbcgto.Cell()
     kcell.atom = 'H 0. 0. 0.'
     kcell.spin = 1
     kcell.unit = 'B'
     kcell.verbose = 0
-    kcell.a = cell.lattice_vectors() * Nk
-    Lc = 1.0/lib.norm(np.linalg.inv(kcell.a), axis=0)
-    log.debug("# Lc = %s", Lc)
-    Rin = Lc.min() / 2.0
-    log.debug("# Rin = %s", Rin)
-    # ASE:
-    alpha = 5./Rin # sqrt(-ln eps) / Rc, eps ~ 10^{-11}
-    log.info("WS alpha = %s", alpha)
-    kcell.mesh = np.array([4*int(L*alpha*3.0) for L in Lc])  # ~ [120,120,120]
-    # QE:
-    #alpha = 3./Rin * np.sqrt(0.5)
-    #kcell.mesh = (4*alpha*np.linalg.norm(kcell.a,axis=1)).astype(int)
-    log.debug("# kcell.mesh FFT = %s", kcell.mesh)
+    kcell.a = np.einsum('xi,x->xi', cell.lattice_vectors(), kmesh)
+
+    Rin = get_ws_inradius(cell.lattice_vectors(), kmesh)
+    log.debug('# Rin = %s', Rin)
+
+    log_precision = -np.log(precision)
+    alpha = np.sqrt(log_precision) / Rin
+    log.debug('# WS alpha = %s', alpha)
+
+    Gmax = 2 * alpha * np.sqrt(log_precision)
+    kcell.mesh = cutoff_to_mesh(kcell.a, Gmax**2 * 0.5)
+    log.debug('# kcell.mesh FFT = %s', kcell.mesh)
+
     rs = kcell.get_uniform_grids(wrap_around=False)
     kngs = len(rs)
-    log.debug("# kcell kngs = %d", kngs)
-    corners_coord = lib.cartesian_prod(([0, 1], [0, 1], [0, 1]))
-    corners = np.dot(corners_coord, kcell.a)
-    #vR = np.empty(kngs)
-    #for i, rv in enumerate(rs):
-    #    # Minimum image convention to corners of kcell parallelepiped
-    #    r = lib.norm(rv-corners, axis=1).min()
-    #    if np.isclose(r, 0.):
-    #        vR[i] = 2*alpha / np.sqrt(np.pi)
-    #    else:
-    #        vR[i] = scipy.special.erf(alpha*r) / r
-    r = np.min([lib.norm(rs-c, axis=1) for c in corners], axis=0)
+    log.debug('# kcell kngs = %d', kngs)
+
+    images_coord = lib.cartesian_prod([
+        range(-n, n + 1) for n in nimgs
+    ])
+    images = np.dot(images_coord, kcell.a)
+    r = np.full(kngs, np.inf)
+    for image in images:
+        np.minimum(r, lib.norm(rs - image, axis=1), out=r)
+
+    # Determine an image search range guaranteed to be exhaustive.
+    Lc = 1. / lib.norm(np.linalg.inv(kcell.a), axis=0)
+    nimgs_ref = np.floor(r.max() / Lc).astype(int) + 1
+    log.debug('# nimgs_ref = %s', nimgs_ref)
+
+    images_ref_coord = lib.cartesian_prod([
+        range(-n, n + 1) for n in nimgs_ref
+    ])
+    r.fill(np.inf)
+    r_mic = np.empty_like(rs)
+    for image_coord in images_ref_coord:
+        image = np.dot(image_coord, kcell.a)
+        dr = rs - image
+        r1 = lib.norm(dr, axis=1)
+        mask = r1 < r
+        r[mask] = r1[mask]
+        r_mic[mask] = dr[mask]
+
     vR = scipy.special.erf(alpha*r) / (r+1e-200)
     vR[r<1e-9] = 2*alpha / np.sqrt(np.pi)
     vG = (kcell.vol/kngs) * fft(vR, kcell.mesh)
 
     if abs(vG.imag).max() > 1e-6:
-        # vG should be real in regular lattice. If imaginary part is observed,
-        # this probably means a ws cell was built from a unconventional
-        # lattice. The SR potential erfc(alpha*r) for the charge in the center
-        # of ws cell decays to the region out of ws cell. The Ewald-sum based
-        # on the minimum image convention cannot be used to build the kernel
-        # Eq (12) of PRB 87, 165122
         raise RuntimeError('Unconventional lattice was found')
 
     ws_exx = {'alpha': alpha,
               'kcell': kcell,
               'q'    : kcell.Gv,
-              'vq'   : vG.real.copy()}
-    log.debug("# Finished precomputing")
+              'vq'   : vG.real.copy(),
+              'vR'   : vR,
+              'r_mic': r_mic,
+              'vq_cache': {}}
+    log.debug('# Finished precomputing')
+
+    log.timer('Wigner-Seitz EXX precomputing', *cput0)
+
     return ws_exx
 
 
-def madelung(cell, kpts):
+def get_ws_inradius(a, kmesh):
+    ''' Wigner-Seitz inradius of the BvK superlattice.
+
+    Parameters
+    ----------
+    a : (3, 3) array_like
+        Primitive lattice vectors stored by rows.
+    kmesh : (3,) array_like of int
+        k-point mesh, e.g. (3, 3, 1).
+
+    Returns
+    -------
+    Rin : float
+        Inradius of the BvK Wigner-Seitz cell, in the same
+        length unit as `a`.
+    '''
+    from itertools import product
+
+    a = np.asarray(a, dtype=float)
+    kmesh = np.asarray(kmesh, dtype=int)
+
+    # BvK lattice vectors, stored by rows
+    A = kmesh[:, None] * a
+
+    # Metric in lattice-coordinate space:
+    # |m @ A|^2 = m @ G @ m
+    G = A @ A.T
+
+    # The shortest lattice vector cannot be longer than
+    # the shortest generating vector.
+    best2 = np.min(np.diag(G))
+
+    # If lambda_min is the smallest eigenvalue of G,
+    # m @ G @ m >= lambda_min * |m|^2.
+    # Therefore any vector shorter than our current upper
+    # bound must satisfy |m| <= sqrt(best2/lambda_min).
+    lam_min = np.linalg.eigvalsh(G)[0]
+    mmax = int(np.ceil(np.sqrt(best2 / lam_min)))
+
+    for m in product(range(-mmax, mmax + 1), repeat=3):
+        if m == (0, 0, 0):
+            continue
+
+        m = np.asarray(m)
+        r2 = m @ G @ m
+
+        best2 = min(best2, r2)
+
+    return 0.5 * np.sqrt(best2)
+
+
+def madelung(cell, kpts=None, omega=None):
     Nk = get_monkhorst_pack_size(cell, kpts)
     ecell = cell.copy(deep=False)
     ecell._atm = np.array([[1, cell._env.size, 0, 0, 0, 0]])
@@ -496,7 +701,10 @@ def madelung(cell, kpts):
     #ecell.verbose = 0
     ecell.a = a = np.einsum('xi,x->xi', cell.lattice_vectors(), Nk)
 
-    if cell.omega == 0:
+    if omega is None:
+        omega = cell.omega
+
+    if omega == 0:
         return -2*ecell.ewald()
 
     else:
@@ -506,16 +714,21 @@ def madelung(cell, kpts):
         # because the Coulomb kernel 4pi/G^2*exp(-G^2/4/omega**2) decays
         # quickly.
         precision = cell.precision
-        omega = cell.omega
         Ecut = 10.
         Ecut = np.log(16*np.pi**2/(2*omega**2*(2*Ecut)**.5) / precision + 1.) * 2*omega**2
         Ecut = np.log(16*np.pi**2/(2*omega**2*(2*Ecut)**.5) / precision + 1.) * 2*omega**2
         mesh = cutoff_to_mesh(a, Ecut)
         Gv, Gvbase, weights = ecell.get_Gv_weights(mesh)
-        wcoulG = get_coulG(ecell, Gv=Gv) * weights
+        wcoulG = get_coulG(ecell, Gv=Gv, omega=abs(omega), exxdiv=None) * weights
         SI = ecell.get_SI(mesh=mesh)
         ZSI = SI[0]
-        return 2*omega/np.pi**0.5-np.einsum('i,i,i->', ZSI.conj(), ZSI, wcoulG).real
+        e_lr = (2*abs(omega)/np.pi**0.5 -
+                np.einsum('i,i,i->', ZSI.conj(), ZSI, wcoulG).real)
+        if omega > 0:
+            return e_lr
+        else:
+            e_fr = -2*ecell.ewald() # The full-range Coulomb
+            return e_fr - e_lr
 
 
 def get_monkhorst_pack_size(cell, kpts, tol=1e-5):
@@ -558,9 +771,6 @@ def get_lattice_Ls(cell, nimgs=None, rcut=None, dimension=None, discard=True):
     scaled_atom_coords = cell.get_scaled_atom_coords()
     atom_boundary_max = scaled_atom_coords[:,:dimension].max(axis=0)
     atom_boundary_min = scaled_atom_coords[:,:dimension].min(axis=0)
-    if (np.any(atom_boundary_max > 1) or np.any(atom_boundary_min < -1)):
-        atom_boundary_max[atom_boundary_max > 1] = 1
-        atom_boundary_min[atom_boundary_min <-1] = -1
     ovlp_penalty = atom_boundary_max - atom_boundary_min
     dR = ovlp_penalty.dot(a[:dimension])
     dR_basis = np.diag(dR)
@@ -590,14 +800,28 @@ def get_lattice_Ls(cell, nimgs=None, rcut=None, dimension=None, discard=True):
                              np.arange(-bounds[2], bounds[2]+1)))
     Ls = np.dot(Ts[:,:dimension], a[:dimension])
 
-    if discard:
-        ovlp_penalty += 1e-200  # avoid /0
-        Ts_scaled = (Ts[:,:dimension] + 1e-200) / ovlp_penalty
-        ovlp_penalty_fac = 1. / abs(Ts_scaled).min(axis=1)
-        Ls_mask = np.linalg.norm(Ls, axis=1) * (1-ovlp_penalty_fac) < rcut
+    if discard and len(Ls) > 1:
+        r = cell.atom_coords()
+        rr = r[:,None] - r
+        dist_max = np.linalg.norm(rr, axis=2).max()
+        Ls_mask = np.linalg.norm(Ls, axis=1) < rcut + dist_max
         Ls = Ls[Ls_mask]
     return np.asarray(Ls, order='C')
 
+def check_lattice_sum_range(cell, Ls):
+    '''
+    Evaluates whether the lattice summation range is sufficient.
+
+    This function calculates the minimum distance between atoms in the primary
+    unit cell and atoms in lattice images *not* included in the specified
+    lattice sum vectors (Ls).
+    '''
+    Ls_full = get_lattice_Ls(cell, rcut=cell.rcut*1.5, discard=False)
+    Ls_idx = intersection(Ls_full, Ls)
+    Ls_remaining = np.setdiff1d(np.arange(len(Ls_full)), Ls_idx)
+    atom_coords = cell.atom_coords()
+    atoms_outside = (Ls_full[Ls_remaining,None] + atom_coords).reshape(-1, 3)
+    return np.linalg.norm(atoms_outside[:,None] - atom_coords, axis=2).min()
 
 def super_cell(cell, ncopy, wrap_around=False):
     '''Create an ncopy[0] x ncopy[1] x ncopy[2] supercell of the input cell
@@ -637,8 +861,7 @@ def super_cell(cell, ncopy, wrap_around=False):
     Ls = np.dot(Ts, a)
     supcell = cell.copy(deep=False)
     supcell.a = np.einsum('i,ij->ij', ncopy, a)
-    mesh = np.asarray(ncopy) * np.asarray(cell.mesh)
-    supcell.mesh = (mesh // 2) * 2 + 1
+    supcell.mesh = np.asarray(ncopy) * np.asarray(cell.mesh)
     if isinstance(cell.magmom, np.ndarray):
         supcell.magmom = cell.magmom.tolist() * np.prod(ncopy)
     else:

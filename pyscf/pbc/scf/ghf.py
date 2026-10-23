@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-# Copyright 2014-2020 The PySCF Developers. All Rights Reserved.
+# Copyright 2014-2026 The PySCF Developers. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -27,6 +27,8 @@ from pyscf.lib import logger
 import pyscf.scf.ghf as mol_ghf
 from pyscf.pbc.scf import hf as pbchf
 from pyscf.pbc.scf import addons
+from pyscf.pbc.gto.pseudo import pp_int
+from pyscf.pbc.gto.ecp import ecp_int
 from pyscf import __config__
 
 
@@ -54,7 +56,7 @@ def get_jk(mf, cell=None, dm=None, hermi=0, kpt=None, kpts_band=None,
         jk_shape = (dm.shape[0], nband, nso, nso)
 
     dmaa = dms[:,:nao,:nao]
-    dmab = dms[:,nao:,:nao]
+    dmab = dms[:,:nao,nao:]
     dmbb = dms[:,nao:,nao:]
     if with_k:
         if hermi:
@@ -98,11 +100,13 @@ def get_jk(mf, cell=None, dm=None, hermi=0, kpt=None, kpts_band=None,
     return vj, vk
 
 class GHF(pbchf.SCF):
-    '''GHF class for PBCs.
+    '''GHF class for PBCs at a single point (default: gamma point).
+
+    Set with_soc=True to add ECP and GTH pseudopotential spin-orbit terms.
     '''
     _keys = {'with_soc'}
 
-    def __init__(self, cell, kpt=np.zeros(3),
+    def __init__(self, cell, kpt=None,
                  exxdiv=getattr(__config__, 'pbc_scf_SCF_exxdiv', 'ewald')):
         pbchf.SCF.__init__(self, cell, kpt, exxdiv)
         self.with_soc = None
@@ -120,22 +124,35 @@ class GHF(pbchf.SCF):
     mulliken_meta = mol_ghf.GHF.mulliken_meta
     spin_square = mol_ghf.GHF.spin_square
     stability = mol_ghf.GHF.stability
+    gen_response = NotImplemented
 
     def get_hcore(self, cell=None, kpt=None):
+        if cell is None: cell = self.cell
+        if kpt is None: kpt = self.kpt
         hcore = pbchf.SCF.get_hcore(self, cell, kpt)
         hcore = scipy.linalg.block_diag(hcore, hcore)
         if self.with_soc:
-            raise NotImplementedError
+            if cell._pseudo:
+                vl_soc = pp_int.get_pp_soc(cell, kpt.reshape(1, 3))[0]
+                s = .5 * lib.PauliMatrices
+                vl_soc = np.einsum('sxy,spq->xpyq', 1j * s, vl_soc)
+                hcore = hcore + vl_soc.reshape(hcore.shape)
+            if cell.has_ecp_soc():
+                hcore = hcore + ecp_int(cell, kpt, intor='ECPso')
         return hcore
 
     def get_ovlp(self, cell=None, kpt=None):
         s = pbchf.SCF.get_ovlp(self, cell, kpt)
         return scipy.linalg.block_diag(s, s)
 
-    def get_veff(self, cell=None, dm=None, dm_last=0, vhf_last=0, hermi=1,
+    def get_veff(self, cell=None, dm=None, dm_last=None, vhf_last=None, hermi=1,
                  kpt=None, kpts_band=None):
+        if dm is None: dm = self.make_rdm1()
         vj, vk = self.get_jk(cell, dm, hermi, kpt, kpts_band)
         vhf = vj - vk
+        if dm.ndim == 2 and kpts_band is None:
+            ecoul = np.einsum('ij,ji->', dm, vj).real * .5
+            vhf = lib.tag_array(vhf, ecoul=ecoul)
         return vhf
 
     def get_bands(self, kpts_band, cell=None, dm=None, kpt=None):

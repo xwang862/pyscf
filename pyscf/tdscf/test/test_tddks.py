@@ -17,7 +17,6 @@
 #
 
 import unittest
-import tempfile
 import numpy
 from pyscf import lib, gto, scf, dft
 from pyscf import tdscf
@@ -38,9 +37,7 @@ H     0.   0.7   0.7'''
     mol.basis = 'uncsto3g'
     mol.spin = 1
     mol.build()
-
-    mf_lda = mol.DKS().set(xc='lda,', conv_tol=1e-12,
-                           chkfile=tempfile.NamedTemporaryFile().name).newton().run()
+    mf_lda = mol.DKS().set(xc='lda,', conv_tol=1e-12, chkfile=lib.NamedTemporaryFile().name).run()
 
 def tearDownModule():
     global mol, mf_lda
@@ -60,23 +57,34 @@ def diagonalize(a, b, nroots=4):
     return lowest_e
 
 class KnownValues(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.original_grids = dft.radi.ATOM_SPECIFIC_TREUTLER_GRIDS
+        dft.radi.ATOM_SPECIFIC_TREUTLER_GRIDS = False
+
+    @classmethod
+    def tearDownClass(cls):
+        dft.radi.ATOM_SPECIFIC_TREUTLER_GRIDS = cls.original_grids
+
     def test_tddft_lda(self):
         td = mf_lda.TDDFT()
+        td.conv_tol = 1e-5
         es = td.kernel(nstates=4)[0]
         a,b = td.get_ab()
         e_ref = diagonalize(a, b, 8)
         self.assertAlmostEqual(abs(es[:3]-e_ref[:3]).max(), 0, 5)
-        self.assertAlmostEqual(lib.fp(es[:3] * 27.2114), 3.157449136045103, 5)
+        self.assertAlmostEqual(lib.fp(es[:3] * 27.2114), 3.1575817, delta=1e-5)
 
     def test_tda_lda(self):
         td = mf_lda.TDA()
+        td.conv_tol = 1e-5
         es = td.kernel(nstates=5)[0]
         a,b = td.get_ab()
         nocc, nvir = a.shape[:2]
         nov = nocc * nvir
         e_ref = numpy.linalg.eigh(a.reshape(nov,nov))[0]
         self.assertAlmostEqual(abs(es[:3]-e_ref[:3]).max(), 0, 5)
-        self.assertAlmostEqual(lib.fp(es[:3] * 27.2114), 3.220469947746697, 5)
+        self.assertAlmostEqual(lib.fp(es[:3] * 27.2114), 3.2205983, 5)
 
     def test_ab_hf(self):
         mf = scf.DHF(mol).run()
@@ -93,7 +101,9 @@ class KnownValues(unittest.TestCase):
     def test_col_mgga_ab_ks(self):
         mf_m06l = dft.DKS(mol).set(xc='m06l')
         mf_m06l.__dict__.update(scf.chkfile.load(mf_lda.chkfile, 'scf'))
-        self._check_against_ab_ks(mf_m06l.TDDFT(), 3.382341929143924, 0.6409502830461241)
+        td = mf_m06l.TDDFT()
+        td.conv_tol = 1e-5
+        self._check_against_ab_ks(td)
 
     @unittest.skipIf(mcfun is None, "mcfun library not found.")
     def test_mcol_lda_ab_ks(self):

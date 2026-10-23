@@ -23,16 +23,18 @@ Hessian of dispersion correction for HF and DFT
 
 import numpy as np
 from pyscf.lib import logger
-from pyscf.scf.dispersion import check_disp, parse_disp
+from pyscf.scf.dispersion import check_disp, parse_disp, _make_d4_model
 
 def get_dispersion(hessobj, disp=None, with_3body=None):
     mf = hessobj.base
     mol = mf.mol
     natm = mol.natm
     h_disp = np.zeros([natm,natm,3,3])
-    disp_version = check_disp(mf, disp)
-    if not disp_version:
+    if not check_disp(mf, disp):
         return h_disp
+
+    if disp is None:
+        disp = getattr(mf, 'disp', None)
 
     try:
         from pyscf.dispersion import dftd3, dftd4
@@ -41,9 +43,9 @@ def get_dispersion(hessobj, disp=None, with_3body=None):
         raise
 
     method = getattr(mf, 'xc', 'hf')
-    method, _, disp_with_3body = parse_disp(method)
+    method, disp_version, disp_with_3body = parse_disp(method, disp)
 
-    if with_3body is not None:
+    if with_3body is None:
         with_3body = disp_with_3body
 
     if disp_version[:2].upper() == 'D3':
@@ -82,13 +84,13 @@ def get_dispersion(hessobj, disp=None, with_3body=None):
             for j in range(3):
                 coords[i,j] += eps
                 mol.set_geom_(coords, unit='Bohr')
-                d4_model = dftd4.DFTD4Dispersion(mol, xc=method, atm=with_3body)
+                d4_model = _make_d4_model(mol, method, with_3body)
                 res = d4_model.get_dispersion(grad=True)
                 g1 = res.get('gradient')
 
                 coords[i,j] -= 2.0*eps
                 mol.set_geom_(coords, unit='Bohr')
-                d4_model = dftd4.DFTD4Dispersion(mol, xc=method, atm=with_3body)
+                d4_model = _make_d4_model(mol, method, with_3body)
                 res = d4_model.get_dispersion(grad=True)
                 g2 = res.get('gradient')
 

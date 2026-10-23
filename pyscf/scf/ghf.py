@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-# Copyright 2014-2019 The PySCF Developers. All Rights Reserved.
+# Copyright 2014-2026 The PySCF Developers. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -26,6 +26,7 @@ import scipy.linalg
 from pyscf import lib
 from pyscf import gto
 from pyscf.lib import logger
+from pyscf.data import nist
 from pyscf.scf import hf
 from pyscf.scf import uhf
 from pyscf.scf import chkfile
@@ -149,18 +150,22 @@ def get_jk(mol, dm, hermi=0,
 def get_occ(mf, mo_energy=None, mo_coeff=None):
     if mo_energy is None: mo_energy = mf.mo_energy
     e_idx = numpy.argsort(mo_energy.round(9), kind='stable')
-    e_sort = mo_energy[e_idx]
     nmo = mo_energy.size
     mo_occ = numpy.zeros_like(mo_energy)
     nocc = mf.mol.nelectron
+    if 0 < nocc < nmo:
+        homo, lumo = mo_energy[e_idx[nocc-1:nocc+1]]
+        gap = (lumo - homo) * nist.HARTREE2EV
+        mf.scf_summary['gap'] = gap
+        if mf.verbose >= logger.INFO:
+            if homo+1e-3 > lumo:
+                logger.warn(mf, 'HOMO %.15g == LUMO %.15g', homo, lumo)
+            else:
+                logger.info(mf, '  HOMO = %.15g  LUMO = %.15g  gap/eV = %.5f',
+                            homo, lumo, gap)
+    elif nocc > nmo:
+        raise RuntimeError(f'Failed to assign mo_occ. Nocc ({nocc}) > Nmo ({nmo})')
     mo_occ[e_idx[:nocc]] = 1
-    if mf.verbose >= logger.INFO and nocc < nmo:
-        if e_sort[nocc-1]+1e-3 > e_sort[nocc]:
-            logger.warn(mf, 'HOMO %.15g == LUMO %.15g',
-                        e_sort[nocc-1], e_sort[nocc])
-        else:
-            logger.info(mf, '  HOMO = %.15g  LUMO = %.15g',
-                        e_sort[nocc-1], e_sort[nocc])
 
     if mf.verbose >= logger.DEBUG:
         numpy.set_printoptions(threshold=nmo)
@@ -355,6 +360,14 @@ def dip_moment(mol, dm, unit_symbol='Debye', origin=None, verbose=logger.NOTE):
     dmb = dm[nao:,nao:]
     return hf.dip_moment(mol, dma+dmb, unit=unit_symbol, verbose=verbose, origin=origin)
 
+
+def quad_moment(mol, dm, unit='DebyeAngstrom', origin=None, verbose=logger.NOTE):
+    """Quadrupole moment from the spin-summed spatial AO density."""
+    nao = mol.nao_nr()
+    dma = dm[:nao,:nao]
+    dmb = dm[nao:,nao:]
+    return hf.quad_moment(mol, dma+dmb, unit=unit, origin=origin, verbose=verbose)
+
 canonicalize = hf.canonicalize
 
 def guess_orbspin(mo_coeff):
@@ -395,11 +408,14 @@ class GHF(hf.SCF):
         hcore = hf.get_hcore(mol)
         hcore = scipy.linalg.block_diag(hcore, hcore)
 
-        if self.with_soc and mol.has_ecp_soc():
-            # The ECP SOC contribution = <|1j * s * U_SOC|>
-            s = .5 * lib.PauliMatrices
-            ecpso = numpy.einsum('sxy,spq->xpyq', -1j * s, mol.intor('ECPso'))
-            hcore = hcore + ecpso.reshape(hcore.shape)
+        if self.with_soc:
+            if mol._pseudo:
+                raise NotImplementedError
+            elif mol.has_ecp_soc():
+                # The ECP SOC integrals = <|1j * s * U_SOC|>
+                s = .5 * lib.PauliMatrices
+                ecpso = numpy.einsum('sxy,spq->xpyq', -1j * s, mol.intor('ECPso'))
+                hcore = hcore + ecpso.reshape(hcore.shape)
         return hcore
 
     def get_ovlp(self, mol=None):
@@ -467,16 +483,33 @@ employing the updated GWH rule from doi:10.1021/ja00480a005.''')
         vj, vk = get_jk(mol, dm, hermi, with_j, with_k, jkbuild, omega)
         return vj, vk
 
-    def get_veff(self, mol=None, dm=None, dm_last=0, vhf_last=0, hermi=1):
+    def get_veff(self, mol=None, dm=None, dm_last=None, vhf_last=None, hermi=1):
         if mol is None: mol = self.mol
         if dm is None: dm = self.make_rdm1()
         if self._eri is not None or not self.direct_scf:
             vj, vk = self.get_jk(mol, dm, hermi)
             vhf = vj - vk
+            if dm.ndim == 2:
+                ecoul = numpy.einsum('ij,ji->', dm, vj).real * .5
+                vhf = lib.tag_array(vhf, ecoul=ecoul)
         else:
-            ddm = numpy.asarray(dm) - numpy.asarray(dm_last)
+            ddm = numpy.asarray(dm)
+            if dm_last is not None:
+                assert vhf_last is not None
+                dm_last = numpy.asarray(dm_last)
+                ddm = ddm - dm_last
             vj, vk = self.get_jk(mol, ddm, hermi)
-            vhf = vj - vk + numpy.asarray(vhf_last)
+            vhf = vj - vk
+            if dm_last is not None:
+                vhf += vhf_last
+                if hasattr(vhf_last, 'ecoul') and dm.ndim == 2:
+                    ecoul = numpy.einsum('ij,ji->', dm_last, vj).real
+                    ecoul += numpy.einsum('ij,ji->', ddm, vj).real * .5
+                    ecoul += vhf_last.ecoul
+                    vhf = lib.tag_array(vhf, ecoul=ecoul)
+            elif dm.ndim == 2:
+                ecoul = numpy.einsum('ij,ji->', dm, vj).real * .5
+                vhf = lib.tag_array(vhf, ecoul=ecoul)
         return vhf
 
     def analyze(self, verbose=None, **kwargs):
@@ -515,6 +548,13 @@ employing the updated GWH rule from doi:10.1021/ja00480a005.''')
         if dm is None: dm = self.make_rdm1()
         return dip_moment(mol, dm, unit_symbol, origin=origin, verbose=verbose)
 
+    @lib.with_doc(hf.quad_moment.__doc__)
+    def quad_moment(self, mol=None, dm=None, unit='DebyeAngstrom', origin=None,
+                    verbose=logger.NOTE):
+        if mol is None: mol = self.mol
+        if dm is None: dm = self.make_rdm1()
+        return quad_moment(mol, dm, unit=unit, origin=origin, verbose=verbose)
+
     def convert_from_(self, mf):
         '''Create GHF object based on the RHF/UHF object'''
         tgt = mf.to_ghf()
@@ -526,7 +566,8 @@ employing the updated GWH rule from doi:10.1021/ja00480a005.''')
         return ghf_stability(self, verbose, return_status, **kwargs)
 
     def nuc_grad_method(self):
-        raise NotImplementedError
+        from pyscf.grad import ghf
+        return ghf.Gradients(self)
 
     def x2c1e(self):
         '''X2C with spin-orbit coupling effects.

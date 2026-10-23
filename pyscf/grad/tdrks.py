@@ -49,6 +49,8 @@ def grad_elec(td_grad, x_y, singlet=True, atmlst=None,
     log = logger.new_logger(td_grad, verbose)
     time0 = logger.process_clock(), logger.perf_counter()
 
+    assert td_grad.base.frozen is None
+
     mol = td_grad.mol
     mf = td_grad.base._scf
     mo_coeff = mf.mo_coeff
@@ -113,7 +115,8 @@ def grad_elec(td_grad, x_y, singlet=True, atmlst=None,
         veff0mom = numpy.zeros((nmo,nmo))
 
     # set singlet=None, generate function for CPHF type response kernel
-    vresp = mf.gen_response(singlet=None, hermi=1)
+    vresp = mf.gen_response(singlet=None, hermi=1,
+                            with_nlc=not td_grad.base.exclude_nlc)
     def fvind(x):
         dm = reduce(numpy.dot, (orbv, x.reshape(nvir,nocc)*2, orbo.T))
         v1ao = vresp(dm+dm.T)
@@ -268,6 +271,11 @@ def _contract_xc_kernel(td_grad, xc_code, dmvo, dmoo=None, with_vxc=True,
     else:
         raise NotImplementedError(f'td-rks for functional {xc_code}')
 
+    if mf.do_nlc():
+        raise NotImplementedError("TDDFT gradient with NLC contribution is not supported yet. "
+                                  "Please set exclude_nlc field of tdscf object to True, "
+                                  "which will turn off NLC contribution in the whole TDDFT calculation.")
+
     if singlet:
         for ao, mask, weight, coords \
                 in ni.block_loop(mol, grids, nao, ao_deriv, max_memory):
@@ -377,6 +385,3 @@ class Gradients(tdrhf.Gradients):
         return grad_elec(self, xy, singlet, atmlst, self.max_memory, self.verbose)
 
 Grad = Gradients
-
-from pyscf import tdscf
-tdscf.rks.TDA.Gradients = tdscf.rks.TDDFT.Gradients = lib.class_as_method(Gradients)

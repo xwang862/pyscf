@@ -17,9 +17,11 @@
 #         Timothy Berkelbach <tim.berkelbach@gmail.com>
 #
 
+import os
 import sys
 import json
 import ctypes
+import math
 import warnings
 import numpy as np
 import scipy.linalg
@@ -30,7 +32,7 @@ from pyscf.dft import radi
 from pyscf.lib import logger
 from pyscf.gto import mole
 from pyscf.gto import moleintor
-from pyscf.gto.mole import conc_env, is_au # noqa
+from pyscf.gto.mole import conc_env, is_au
 from pyscf.pbc.gto import _pbcintor
 from pyscf.pbc.gto.eval_gto import eval_gto as pbc_eval_gto
 from pyscf.pbc.tools import pbc as pbctools
@@ -96,15 +98,12 @@ def dumps(cell):
         if k in celldic:
             del (celldic[k])
     for k in celldic:
-        if isinstance(celldic[k], np.ndarray):
+        if isinstance(celldic[k], (np.ndarray, np.generic)):
             celldic[k] = celldic[k].tolist()
     celldic['atom'] = repr(cell.atom)
     celldic['basis']= repr(cell.basis)
     celldic['pseudo'] = repr(cell.pseudo)
     celldic['ecp'] = repr(cell.ecp)
-    # Explicitly convert mesh because it is often created as numpy array
-    if isinstance(cell.mesh, np.ndarray):
-        celldic['mesh'] = cell.mesh.tolist()
 
     try:
         return json.dumps(celldic)
@@ -121,6 +120,8 @@ def dumps(cell):
                     dic1[k] = list(v)
                 elif isinstance(v, dict):
                     dic1[k] = skip_value(v)
+                elif isinstance(v, np.generic):
+                    dic1[k] = v.tolist()
                 else:
                     msg =('Function cell.dumps drops attribute %s because '
                           'it is not JSON-serializable' % k)
@@ -131,7 +132,7 @@ def dumps(cell):
 def loads(cellstr):
     '''Deserialize a str containing a JSON document to a Cell object.
     '''
-    from numpy import array  # noqa
+    from numpy import array
     celldic = json.loads(cellstr)
     cell = Cell()
     cell.__dict__.update(celldic)
@@ -518,7 +519,7 @@ def get_bounding_sphere(cell, rcut):
     nimgs = np.ceil(rcut*heights_inv).astype(int)
 
     for i in range(cell.dimension, 3):
-        nimgs[i] = 1
+        nimgs[i] = 0
     return nimgs
 
 def get_Gv(cell, mesh=None, **kwargs):
@@ -556,8 +557,7 @@ def get_Gv_weights(cell, mesh=None, **kwargs):
     b = cell.reciprocal_vectors()
     weights = abs(np.linalg.det(b))
 
-    if (cell.dimension < 2 or
-        (cell.dimension == 2 and cell.low_dim_ft_type == 'inf_vacuum')):
+    if cell.dimension <= 2 and cell.low_dim_ft_type == 'inf_vacuum':
         if cell.dimension == 0:
             rx, wx = _non_uniform_Gv_base(mesh[0]//2)
             ry, wy = _non_uniform_Gv_base(mesh[1]//2)
@@ -590,13 +590,14 @@ def get_Gv_weights(cell, mesh=None, **kwargs):
     rx = np.asarray(rx, order='C')
     ry = np.asarray(ry, order='C')
     rz = np.asarray(rz, order='C')
-    fn = libpbc.get_Gv
-    fn(Gv.ctypes.data_as(ctypes.c_void_p),
-       rx.ctypes.data_as(ctypes.c_void_p),
-       ry.ctypes.data_as(ctypes.c_void_p),
-       rz.ctypes.data_as(ctypes.c_void_p),
-       mesh.ctypes.data_as(ctypes.c_void_p),
-       b.ctypes.data_as(ctypes.c_void_p))
+    libpbc.get_Gv(
+        Gv.ctypes.data_as(ctypes.c_void_p),
+        rx.ctypes.data_as(ctypes.c_void_p),
+        ry.ctypes.data_as(ctypes.c_void_p),
+        rz.ctypes.data_as(ctypes.c_void_p),
+        mesh.ctypes.data_as(ctypes.c_void_p),
+        b.ctypes.data_as(ctypes.c_void_p),
+    )
     Gv = Gv.reshape(-1, 3)
 
     # 1/cell.vol == det(b)/(2pi)^3
@@ -672,8 +673,11 @@ def get_ewald_params(cell, precision=None, mesh=None):
     if precision is None:
         precision = cell.precision
 
-    if (cell.dimension < 2 or
-          (cell.dimension == 2 and cell.low_dim_ft_type == 'inf_vacuum')):
+    if (cell.dimension == 3 or
+        (cell.dimension == 0 and cell.low_dim_ft_type != 'inf_vacuum')):
+        ew_eta = 1./cell.vol**(1./6)
+        ew_cut = _estimate_rcut(ew_eta**2, 0, 1., precision)
+    elif cell.dimension <= 2 and cell.low_dim_ft_type == 'inf_vacuum':
         # Non-uniform PW grids are used for low-dimensional ewald summation.  The cutoff
         # estimation for long range part based on exp(G^2/(4*eta^2)) does not work for
         # non-uniform grids.  Smooth model density is preferred.
@@ -685,9 +689,8 @@ def get_ewald_params(cell, precision=None, mesh=None):
         # ewovrl ~ erfc(eta*rcut) / rcut ~ e^{(-eta**2 rcut*2)} < precision
         log_precision = np.log(precision / (cell.atom_charges().sum()*16*np.pi**2))
         ew_eta = (-log_precision)**.5 / ew_cut
-    else:  # dimension == 3
-        ew_eta = 1./cell.vol**(1./6)
-        ew_cut = _estimate_rcut(ew_eta**2, 0, 1., precision)
+    else:
+        raise RuntimeError(f'dimension={cell.dimension} not supported')
     return ew_eta, ew_cut
 
 def ewald(cell, ew_eta=None, ew_cut=None):
@@ -713,6 +716,9 @@ def ewald(cell, ew_eta=None, ew_cut=None):
     if cell.dimension == 3 and cell.use_particle_mesh_ewald:
         from pyscf.pbc.gto import ewald_methods
         return ewald_methods.particle_mesh_ewald(cell, ew_eta, ew_cut)
+
+    if cell.dimension == 0 and cell.low_dim_ft_type != 'inf_vacuum':
+        return mole.classical_coulomb_energy(cell)
 
     chargs = cell.atom_charges()
 
@@ -746,25 +752,21 @@ def ewald(cell, ew_eta=None, ew_cut=None):
     # where
     #   ZS_I(G) = \sum_a Z_a exp (i G.R_a)
 
-    Gv, Gvbase, weights = cell.get_Gv_weights(mesh)
-    absG2 = np.einsum('gi,gi->g', Gv, Gv)
-    absG2[absG2==0] = 1e200
-
-    if cell.dimension != 2 or cell.low_dim_ft_type == 'inf_vacuum':
-        # TODO: truncated Coulomb for 0D. The non-uniform grids for inf-vacuum
-        # have relatively large error
+    if cell.dimension == 3 or cell.low_dim_ft_type == 'inf_vacuum':
+        Gv, Gvbase, weights = cell.get_Gv_weights(mesh)
+        absG2 = np.einsum('gi,gi->g', Gv, Gv)
+        absG2[absG2==0] = 1e200
         coulG = 4*np.pi / absG2
         coulG *= weights
 
         #:ZSI = np.einsum('i,ij->j', chargs, cell.get_SI(Gv))
-        ngrids = len(Gv)
-        ZSI = np.empty((ngrids,), dtype=np.complex128)
-        mem_avail = cell.max_memory - lib.current_memory()[0]
-        blksize = int((mem_avail*1e6 - cell.natm*24)/((3+cell.natm*2)*8))
-        blksize = min(ngrids, max(mesh[2], blksize))
-        for ig0, ig1 in lib.prange(0, ngrids, blksize):
-            np.einsum('i,ij->j', chargs, cell.get_SI(Gv[ig0:ig1]), out=ZSI[ig0:ig1])
-
+        basex, basey, basez = Gvbase
+        b = cell.reciprocal_vectors()
+        rb = np.dot(coords, b.T)
+        SIx = np.exp(-1j*np.einsum('z,g->zg', rb[:,0], basex))
+        SIy = np.exp(-1j*np.einsum('z,g->zg', rb[:,1], basey))
+        SIz = np.exp(-1j*np.einsum('z,g->zg', rb[:,2], basez))
+        ZSI = np.einsum('i,ix,iy,iz->xyz', chargs, SIx, SIy, SIz).ravel()
         ZexpG2 = ZSI * np.exp(-absG2/(4*ew_eta**2))
         ewg = .5 * np.einsum('i,i,i', ZSI.conj(), ZexpG2, coulG).real
 
@@ -789,6 +791,8 @@ def ewald(cell, ew_eta=None, ew_cut=None):
         inv_area = np.linalg.norm(np.cross(b[0], b[1]))/(2*np.pi)**2
         # Perform the reciprocal space summation over  all reciprocal vectors
         # within the x,y plane.
+        Gv, Gvbase, weights = cell.get_Gv_weights(mesh)
+        absG2 = np.einsum('gi,gi->g', Gv, Gv)
         planarG2_idx = np.logical_and(Gv[:,2] == 0, absG2 > 0.0)
         Gv = Gv[planarG2_idx]
         absG2 = absG2[planarG2_idx]
@@ -801,6 +805,13 @@ def ewald(cell, ew_eta=None, ew_cut=None):
         # Performing the G == 0 summation.
         ewg += np.einsum('i,j,ij->', chargs, chargs, gn0(ew_eta,rij[:,:,2]))
         ewg *= inv_area*0.5
+
+    elif cell.dimension == 0:
+        # The truncated Coulomb kernel 4*pi/G^2(1-cos(G*Rc)) should work for the
+        # ewg term. However, large errors may be introduced in ewovrl or ewself.
+        # For dimension=0 with truncated Coulomb, the nuclear energy can be
+        # computed directly using the mole.classical_coulomb_energy function.
+        raise RuntimeError('Ewald with truncated Coulomb')
 
     else:
         logger.warn(cell, 'No method for PBC dimension %s, dim-type %s.'
@@ -999,20 +1010,246 @@ def rcut_by_shells(cell, precision=None, rcut=0,
         ptr_pgf_radius = lib.ndarray_pointer_2d(pgf_radius).ctypes
     else:
         ptr_pgf_radius = lib.c_null_ptr()
-    fn = getattr(libpbc, 'rcut_by_shells', None)
-    try:
-        fn(shell_radius.ctypes.data_as(ctypes.c_void_p),
-           ptr_pgf_radius,
-           bas.ctypes.data_as(ctypes.c_void_p),
-           env.ctypes.data_as(ctypes.c_void_p),
-           ctypes.c_int(nbas), ctypes.c_double(rcut),
-           ctypes.c_double(precision))
-    except Exception as e:
-        raise RuntimeError(f'Failed to get shell radii.\n{e}')
+    libpbc.rcut_by_shells(
+        shell_radius.ctypes.data_as(ctypes.c_void_p),
+        ptr_pgf_radius,
+        bas.ctypes.data_as(ctypes.c_void_p),
+        env.ctypes.data_as(ctypes.c_void_p),
+        ctypes.c_int(nbas),
+        ctypes.c_double(rcut),
+        ctypes.c_double(precision),
+    )
     if return_pgf_radius:
         return shell_radius, pgf_radius
     return shell_radius
 
+def tostring(cell, format='poscar'):
+    '''Convert cell geometry to a string of the required format.
+
+    Supported output formats:
+        | poscar: VASP POSCAR
+        | xyz: Extended XYZ with Lattice information
+    '''
+    format = format.lower()
+    output = []
+    atmfmt = '%17.8f %17.8f %17.8f'
+    if format == 'poscar' or format == 'vasp' or format == 'xyz':
+        lattice_vectors = cell.lattice_vectors() * param.BOHR
+        coords = cell.atom_coords() * param.BOHR
+        if format == 'poscar' or format == 'vasp':
+            output.append('Written by PySCF, units are A')
+            output.append('1.0')
+            for lattice_vector in lattice_vectors:
+                ax, ay, az = lattice_vector
+                output.append(atmfmt % (ax, ay, az))
+            unique_atoms = dict()
+            for atom in cell.elements:
+                if atom not in unique_atoms:
+                    unique_atoms[atom] = 1
+                else:
+                    unique_atoms[atom] += 1
+            output.append(' '.join(unique_atoms))
+            output.append(' '.join(str(count) for count in unique_atoms.values()))
+            output.append('Cartesian')
+            for atom_type in unique_atoms:
+                for atom, coord in zip(cell.elements, coords):
+                    if atom == atom_type:
+                        x, y, z = coord
+                        output.append(atmfmt % (x, y, z))
+            return '\n'.join(output)
+        elif format == 'xyz':
+            output.append('%d' % cell.natm)
+            output.append('Lattice="'+' '.join(f'{ax:17.8f}' for ax in lattice_vectors.ravel())
+                +'" Properties=species:S:1:pos:R:3')
+            for i in range(cell.natm):
+                symb = cell.atom_pure_symbol(i)
+                x, y, z = coords[i]
+                output.append(('%-4s ' + atmfmt) %
+                              (symb, x, y, z))
+            return '\n'.join(output)
+    else:
+        raise NotImplementedError(f'format={format}')
+
+def tofile(cell, filename, format=None):
+    if format is None:  # Guess format based on filename
+        if filename.lower() == 'poscar':
+            format = 'poscar'
+        else:
+            format = os.path.splitext(filename)[1][1:]
+    string = tostring(cell, format)
+    with open(filename,  'w', encoding='utf-8') as f:
+        f.write(string)
+        f.write('\n')
+    return string
+
+def fromfile(filename, format=None):
+    '''Read cell geometry from a file
+    (in testing)
+
+    Supported formats:
+        | poscar: VASP POSCAR file format
+        | xyz: Extended XYZ with Lattice information
+    '''
+    if format is None:  # Guess format based on filename
+        if filename.lower() == 'poscar':
+            format = 'poscar'
+        else:
+            format = os.path.splitext(filename)[1][1:].lower()
+        if format not in ('poscar', 'vasp', 'xyz', 'cif'):
+            format = 'raw'
+    with open(filename, 'r') as f:
+        return fromstring(f.read(), format)
+
+def fromstring(string, format='poscar'):
+    '''Convert the string of the specified format to internal format
+    (in testing)
+
+    Supported formats:
+        | poscar: VASP POSCAR file format
+        | xyz: Extended XYZ with Lattice information
+
+    Returns:
+        a: Lattice vectors
+        atom: Atomic elements and xyz coordinates
+    '''
+    format = format.lower()
+    if format == 'poscar' or format == 'vasp':
+        a, elements, coords, fractional = _parse_poscar(string)
+        if fractional:
+            coords = coords.dot(a)
+        atoms = list(zip(elements, coords))
+        return a, atoms
+    elif format == 'cif':
+        a, elements, coords, fractional = _parse_cif(string)
+        if fractional:
+            coords = coords.dot(a)
+        atoms = list(zip(elements, coords))
+        return a, atoms
+    elif format == 'xyz':
+        lines = string.splitlines()
+        natm = int(lines[0])
+        lattice_vectors = lines[1].split('Lattice=')[1].split('"')[1].split()
+        a = []
+        for i in range(3):
+            a.append(" ".join(lattice_vectors[3*i:3*i+3]))
+        return '\n'.join(a), '\n'.join(lines[2:natm+2])
+    elif format == 'raw':
+        lines = string.splitlines()
+        return '\n'.join(lines[:3]), '\n'.join(lines[4:])
+    else:
+        raise NotImplementedError
+
+def _parse_poscar(string):
+    lines = string.splitlines()
+    scale = float(lines[1])
+    a = lines[2:5]
+    lattice_vectors = np.array([np.fromstring(ax, sep=' ') for ax in a])
+    lattice_vectors *= scale
+    atom_position_line = 7
+    atom_position_type = lines[atom_position_line].strip().lower()
+    if atom_position_type.startswith('s'):
+        atom_position_line += 1
+        atom_position_type = lines[atom_position_line].strip().lower()
+    if atom_position_type.startswith(('c', 'k')):
+        fractional = False
+    elif atom_position_type.startswith('d'):
+        fractional = True
+    else:
+        raise RuntimeError('Error reading VASP geometry due to '
+            f'atom position type "{atom_position_type}". Atom '
+            'positions must be Direct or Cartesian.')
+    unique_atoms = dict()
+    natm = 0
+    for atom, count in zip(lines[5].split(), lines[6].split()):
+        unique_atoms[atom] = int(count)
+        natm += int(count)
+    start = end = atom_position_line + 1
+    elements = []
+    coords = []
+    for atom_type in unique_atoms:
+        count = unique_atoms[atom_type]
+        start, end = end, end + count
+        elements.extend([atom_type] * count)
+        r = np.loadtxt(lines[start:end], usecols=(0, 1, 2), ndmin=2)
+        coords.append(r)
+    coords = np.vstack(coords)
+    assert len(coords) == len(elements)
+    return lattice_vectors, elements, coords, fractional
+
+def _parse_cif(string):
+    lines = string.splitlines()
+    in_atom_loop = False
+    cell = {}
+    atom_headers = []
+    atoms = []
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+
+        if line.startswith('_cell_'):
+            # Cell parameters
+            key, val = line.split(maxsplit=1)
+            cell[key] = val
+
+        elif line.startswith('loop_'):
+            in_atom_loop = True
+
+        elif line.startswith('_atom_site_'):
+            atom_headers.append(line)
+
+        elif in_atom_loop and atom_headers:
+            atoms.append(line)
+
+    # .split('(')[0] to handle the estimate number such as 3.44715(31)
+    a = float(cell['_cell_length_a'].split('(')[0])
+    b = float(cell['_cell_length_b'].split('(')[0])
+    c = float(cell['_cell_length_c'].split('(')[0])
+    alpha = float(cell['_cell_angle_alpha'].split('(')[0])
+    beta = float(cell['_cell_angle_beta'].split('(')[0])
+    gamma = float(cell['_cell_angle_gamma'].split('(')[0])
+    lattice_vectors = _cellpar_to_cell(a, b, c, alpha, beta, gamma)
+
+    idx_s = atom_headers.index('_atom_site_type_symbol')
+    idx_x = atom_headers.index('_atom_site_fract_x')
+    idx_y = atom_headers.index('_atom_site_fract_y')
+    idx_z = atom_headers.index('_atom_site_fract_z')
+    coords = []
+    elements = []
+    for line in atoms:
+        parts = line.split()
+        elements.append(''.join([x for x in parts[idx_s] if x.isalpha()]))
+        coords.append(parts[idx_x].split('(')[0])
+        coords.append(parts[idx_y].split('(')[0])
+        coords.append(parts[idx_z].split('(')[0])
+    coords = np.fromstring(' '.join(coords), sep=' ').reshape(-1, 3)
+    fractional = True
+    return lattice_vectors, elements, coords, fractional
+
+def _cellpar_to_cell(a, b, c, alpha, beta, gamma):
+    '''Return a 3x3 cell matrix. Angles must be in degrees.
+
+    Modified based on ASE ase.ase.geometry.cell.cellpar_to_cell function
+    '''
+    alpha = alpha / 180 * math.pi
+    beta = beta / 180 * math.pi
+    gamma = gamma / 180 * math.pi
+
+    cos_alpha = math.cos(alpha)
+    cos_beta = math.cos(beta)
+    cos_gamma = math.cos(gamma)
+    sin_gamma = math.sin(gamma)
+
+    bx = b * cos_gamma
+    by = b * sin_gamma
+    cx = c * cos_beta
+    cy = c * (cos_alpha - cos_beta * cos_gamma) / sin_gamma
+    cz = math.sqrt(max(c * c - cx * cx - cy * cy, 0))
+    lattice_vectors = np.array([
+        [a, 0, 0],
+        [bx, by, 0],
+        [cx, cy, cz]])
+    return lattice_vectors
 
 class Cell(mole.MoleBase):
     '''A Cell object holds the basic information of a crystal.
@@ -1074,12 +1311,27 @@ class Cell(mole.MoleBase):
     precision = getattr(__config__, 'pbc_gto_cell_Cell_precision', 1e-8)
     exp_to_discard = getattr(__config__, 'pbc_gto_cell_Cell_exp_to_discard', None)
 
+    fractional = False
+    dimension = 3
+    # TODO: Simple hack for now; the implementation of ewald depends on the
+    #       density-fitting class.  This determines how the ewald produces
+    #       its energy.
+    low_dim_ft_type = None
+    use_loose_rcut = False
+    use_particle_mesh_ewald = False
+    space_group_symmetry = False
+    symmorphic = False
+    lattice_symmetry = None
+
     _keys = {
         'precision', 'exp_to_discard',
         'a', 'ke_cutoff', 'pseudo', 'fractional', 'dimension', 'low_dim_ft_type',
         'space_group_symmetry', 'symmorphic', 'lattice_symmetry', 'mesh', 'rcut',
         'use_loose_rcut', 'use_particle_mesh_ewald',
     }
+
+    tostring = tostring
+    tofile = tofile
 
     def __init__(self, **kwargs):
         mole.MoleBase.__init__(self)
@@ -1088,24 +1340,26 @@ class Cell(mole.MoleBase):
         # of fourier components, with .5 * G**2 < ke_cutoff
         self.ke_cutoff = None
 
-        self.fractional = False
-        self.dimension = 3
-        # TODO: Simple hack for now; the implementation of ewald depends on the
-        #       density-fitting class.  This determines how the ewald produces
-        #       its energy.
-        self.low_dim_ft_type = None
-        self.use_loose_rcut = False
-        self.use_particle_mesh_ewald = False
-        self.space_group_symmetry = False
-        self.symmorphic = False
-        self.lattice_symmetry = None
-
 ##################################################
 # These attributes are initialized by build function if not specified
         self.mesh = None
         self.rcut = None
         for key, val in kwargs.items():
             setattr(self, key, val)
+
+    def fromstring(self, string, format='poscar'):
+        '''Update the Cell object based on the input geometry string'''
+        a, atom = fromstring(string, format)
+        self.a = a
+        self.set_geom_(atom, unit='Angstrom', inplace=True)
+        return self
+
+    def fromfile(self, filename, format=None):
+        '''Update the Cell object based on the input geometry file'''
+        a, atom = fromfile(filename, format)
+        self.a = a
+        self.set_geom_(atom, unit='Angstrom', inplace=True)
+        return self
 
     @property
     def mesh(self):
@@ -1167,51 +1421,98 @@ class Cell(mole.MoleBase):
 
         # Import all available modules. Some methods are registered to other
         # classes/modules when importing modules in __all__.
-        from pyscf.pbc import __all__  # noqa
+        from pyscf.pbc import __all__
         from pyscf.pbc import scf, dft
         from pyscf.dft import XC
 
-        for mod in (scf, dft):
-            method = getattr(mod, key, None)
-            if callable(method):
-                return method(self)
-
-        if key[0] == 'K':  # with k-point sampling
-            if 'TD' in key[:4]:
-                if key in ('KTDHF', 'KTDA'):
-                    mf = scf.KHF(self)
-                else:
-                    mf = dft.KKS(self)
-                    xc = key.split('TD', 1)[1]
-                    if xc in XC:
-                        mf.xc = xc
-                        key = 'KTDDFT'
-            elif 'CI' in key or 'CC' in key or 'MP' in key:
-                mf = scf.KHF(self)
-            else:
-                return object.__getattribute__(self, key)
-            # Remove prefix 'K' because methods are registered without the leading 'K'
-            key = key[1:]
+        attr_name = key
+        mf_xc = None
+        for mod in (dft, scf):
+            mf_method = getattr(mod, key, None)
+            if callable(mf_method):
+                key = None
+                break
         else:
-            if 'TD' in key[:3]:
-                if key in ('TDHF', 'TDA'):
-                    mf = scf.HF(self)
+            if key[0] == 'K':  # with k-point sampling
+                if 'TD' in key[:4]:
+                    if 'KTDA' in key:
+                        mf_method = 'KSCF_TO_BE_DETERMINED'
+                    elif 'KTDHF' in key:
+                        mf_method = scf.KHF
+                    else:
+                        mf_method = dft.KKS
+                        xc = key.split('TD', 1)[1]
+                        if xc in XC:
+                            mf_xc = xc
+                            key = 'KTDDFT'
+                        elif 'TDDFT' not in key:
+                            raise AttributeError(f'method {key} not supported')
+                elif 'CI' in key or 'CC' in key or 'MP' in key:
+                    mf_method = scf.KHF
                 else:
-                    mf = dft.KS(self)
-                    xc = key.split('TD', 1)[1]
-                    if xc in XC:
-                        mf.xc = xc
-                        key = 'TDDFT'
-            elif 'CI' in key or 'CC' in key or 'MP' in key:
-                mf = scf.HF(self)
+                    return object.__getattribute__(self, key)
+                # Remove prefix 'K' because methods are registered without the leading 'K'
+                key = key[1:]
             else:
-                return object.__getattribute__(self, key)
+                if 'TD' in key[:3]:
+                    if 'TDA' in key:
+                        mf_method = 'SCF_TO_BE_DETERMINED'
+                    elif 'TDHF' in key:
+                        mf_method = scf.HF
+                    else:
+                        mf_method = dft.KS
+                        xc = key.split('TD', 1)[1]
+                        if xc in XC:
+                            mf_xc = xc
+                            key = 'TDDFT'
+                        elif 'TDDFT' not in key:
+                            raise AttributeError(f'method {key} not supported')
+                elif 'CI' in key or 'CC' in key or 'MP' in key:
+                    mf_method = scf.HF
+                else:
+                    return object.__getattribute__(self, key)
 
-        method = getattr(mf, key)
+        post_mf_key = key
+        SCF_KW = {'kpt', 'kpts', 'xc', 'exxdiv',
+                  'U_idx', 'U_val', 'C_ao_lo', 'minao_ref'}
 
-        if self.nelectron != 0:
-            mf.run()
-        return method
+        def fn(*args, **kwargs):
+            if mf_xc is not None:
+                assert 'xc' not in kwargs
+                kwargs['xc'] = mf_xc
+
+            mf_kw = {}
+            remaining_kw = {}
+            for k, v in kwargs.items():
+                if k in SCF_KW:
+                    mf_kw[k] = v
+                else:
+                    remaining_kw[k] = v
+
+            if mf_method == 'SCF_TO_BE_DETERMINED':
+                if 'xc' in mf_kw:
+                    mf = dft.KS(self, **mf_kw)
+                else:
+                    mf = scf.HF(self, **mf_kw)
+            elif mf_method == 'KSCF_TO_BE_DETERMINED':
+                if 'xc' in mf_kw:
+                    mf = dft.KKS(self, **mf_kw)
+                else:
+                    mf = scf.KHF(self, **mf_kw)
+            else:
+                mf = mf_method(self, **mf_kw)
+
+            if post_mf_key is None:
+                if args:
+                    raise AttributeError(
+                        f'cell.{attr_name} function does not support positional arguments')
+                return mf.set(**remaining_kw)
+
+            post_mf = getattr(mf, post_mf_key)
+            if self.nelectron != 0:
+                mf.run()
+            return post_mf(*args, **remaining_kw)
+        return mole._MoleLazyCallAdapter(fn, attr_name)
 
     tot_electrons = tot_electrons
 
@@ -1235,10 +1536,21 @@ class Cell(mole.MoleBase):
         if not self.space_group_symmetry:
             return mesh
 
-        _, mesh1 = self.lattice_symmetry.check_mesh_symmetry(mesh=mesh,
-                                                             return_mesh=True)
+        _, mesh1 = self.lattice_symmetry.check_mesh_symmetry(
+            cell=self, mesh=mesh, return_mesh=True)
         if np.prod(mesh1) != np.prod(mesh):
             logger.debug(self, 'mesh %s is symmetrized as %s', mesh, mesh1)
+        m1size = np.prod(mesh1)
+        msize = np.prod(mesh)
+        if m1size > 8 * msize and m1size > 1000 + msize:
+            wstr = ('''WARNING!
+  Symmetrization significantly increased the mesh size,
+  from {} to {}. This might indicate a nearly symmetric input
+  structure, and it might cause memory issues. Consider symmetrizing your
+  structure, increasing the symmetry tolerance `pbc_symm_space_group_symprec`,
+  or turning off symmetry.\n\n''')
+            wstr = wstr.format(mesh, mesh1)
+            sys.stderr.write(wstr)
         return mesh1
 
     def build_lattice_symmetry(self, check_mesh_symmetry=True):
@@ -1265,6 +1577,10 @@ class Cell(mole.MoleBase):
             _mesh_from_build = self._mesh_from_build
             self.mesh = self.symmetrize_mesh()
             self._mesh_from_build = _mesh_from_build
+        # lattice_symmetry introduces circular dependency to cell
+        del self.lattice_symmetry.cell
+        if self.lattice_symmetry.spacegroup is not None:
+            del self.lattice_symmetry.spacegroup.cell
         return self
 
     @lib.with_doc(mole.format_atom.__doc__)
@@ -1351,24 +1667,20 @@ class Cell(mole.MoleBase):
         if self.a is None:
             raise RuntimeError('Lattice parameters not specified')
 
+        if self.dimension == 1 and self.low_dim_ft_type != 'inf_vacuum':
+            raise RuntimeError('Uniform grids for dimension=1 not supported')
+
         _built = self._built
         mole.MoleBase.build(self, False, parse_arg, *args, **kwargs)
 
-        exp_min = np.array([self.bas_exp(ib).min() for ib in range(self.nbas)])
-        if self.exp_to_discard is None:
-            if np.any(exp_min < 0.1):
-                sys.stderr.write('''WARNING!
-  Very diffused basis functions are found in the basis set. They may lead to severe
-  linear dependence and numerical instability.  You can set  cell.exp_to_discard=0.1
-  to remove the diffused Gaussians whose exponents are less than 0.1.\n\n''')
-        elif np.any(exp_min < self.exp_to_discard):
+        if self.exp_to_discard is not None:
             # Discard functions of small exponents in basis
             _basis = {}
             for symb, basis_now in self._basis.items():
                 basis_add = []
                 for b in basis_now:
                     l = b[0]
-                    if isinstance(b[1], int):
+                    if isinstance(b[1], (int, np.integer)):
                         kappa = b[1]
                         b_coeff = np.array(b[2:])
                     else:
@@ -1439,7 +1751,7 @@ class Cell(mole.MoleBase):
   Lattice are not in right-handed coordinate system. This can cause wrong value for some integrals.
   It's recommended to resort the lattice vectors to\na = %s\n\n''' % _a[[0,2,1]])
 
-        if self.dimension == 2 and self.low_dim_ft_type != 'inf_vacuum':
+        if self.dimension <= 2 and self.low_dim_ft_type != 'inf_vacuum':
             # check vacuum size. See Fig 1 of PRB, 73, 2015119
             #Lz_guess = self.rcut*(1+np.sqrt(2))
             Lz_guess = self.rcut * 2
@@ -1455,8 +1767,7 @@ class Cell(mole.MoleBase):
                 ke_cutoff = self.ke_cutoff
             self._mesh = pbctools.cutoff_to_mesh(_a, ke_cutoff)
 
-            if (self.dimension < 2 or
-                (self.dimension == 2 and self.low_dim_ft_type == 'inf_vacuum')):
+            if self.dimension <= 2 and self.low_dim_ft_type == 'inf_vacuum':
                 self._mesh[self.dimension:] = _mesh_inf_vaccum(self)
             self._mesh_from_build = True
 
@@ -1483,7 +1794,7 @@ class Cell(mole.MoleBase):
             if self.exp_to_discard is not None:
                 logger.info(self, 'exp_to_discard = %s', self.exp_to_discard)
             logger.info(self, 'rcut = %s (nimgs = %s)', self.rcut, self.nimgs)
-            logger.info(self, 'lattice sum = %d cells', len(self.get_lattice_Ls()))
+            #logger.info(self, 'lattice sum = %d cells', len(self.get_lattice_Ls()))
             logger.info(self, 'precision = %g', self.precision)
             logger.info(self, 'pseudo = %s', self.pseudo)
             if ke_cutoff is not None:
@@ -1557,24 +1868,27 @@ class Cell(mole.MoleBase):
                    (x, rcut_guess))
             warnings.warn(msg)
 
-    def lattice_vectors(self):
-        '''Convert the primitive lattice vectors.
-
-        Return 3x3 array in which each row represents one direction of the
-        lattice vectors (unit in Bohr)
+    def lattice_vectors(self, unit='Bohr'):
         '''
+        Return the primitive lattice vectors in 3x3 array. Each row of the
+        lattice vectors corresponds to one direction (unit in Bohr by default).
+
+        Kwargs:
+            unit : str
+                Target length unit. If provided, the lattice vectors are rescaled
+                to the specified unit.
+        '''
+        scale = mole._length_in_au(self.unit)
+        if not is_au(unit):
+            scale /= mole._length_in_au(unit)
+
         if isinstance(self.a, str):
             a = self.a.replace(';',' ').replace(',',' ').replace('\n',' ')
             a = np.asarray([float(x) for x in a.split()]).reshape(3,3)
+            a *= scale
         else:
-            a = np.asarray(self.a, dtype=np.double).reshape(3,3)
-        if isinstance(self.unit, str):
-            if is_au(self.unit):
-                return a
-            else:
-                return a/param.BOHR
-        else:
-            return a/self.unit
+            a = np.asarray(self.a, dtype=np.double).reshape(3,3) * scale
+        return a
 
     def get_scaled_atom_coords(self, a=None):
         ''' Get scaled atomic coordinates.
@@ -1593,7 +1907,7 @@ class Cell(mole.MoleBase):
             \mathbf{b_3} &= 2\pi \frac{\mathbf{a_1} \times \mathbf{a_2}}{\mathbf{a_3} \cdot (\mathbf{a_1} \times \mathbf{a_2})}
             \end{align}
 
-        '''  # noqa: E501
+        '''
         a = self.lattice_vectors()
         if self.dimension == 1:
             assert (abs(np.dot(a[0], a[1])) < 1e-9 and
@@ -1770,5 +2084,66 @@ class Cell(mole.MoleBase):
         if mol.symmetry:
             mol._build_symmetry()
         return mol
+
+    def to_gpu(self):
+        from gpu4pyscf.gto import mole
+        if hasattr(mole, 'Cell'):
+            return mole.Cell.from_cpu(self)
+        else: # Cell class is defined in gpu4pyscf 1.5 or newer
+            return self
+
+    def set_geom_(self, atoms_or_coords=None, unit=None, symmetry=None,
+                  a=None, inplace=True):
+        '''Update geometry and lattice parameters
+
+        Kwargs:
+            atoms_or_coords : list, str, or numpy.ndarray
+                When specified in list or str, it is processed as the Mole.atom
+                attribute. If inputing a (N, 3) numpy array, this array
+                represents the coordinates of the atoms in the molecule.
+            a : list, str, or numpy.ndarray
+                If specified, it is assigned to the cell.a attribute. Its data
+                format should be the same to cell.a
+            unit : str
+                The unit for the input `atoms_or_coords` and `a`. If specified,
+                cell.unit will be updated to this value. If not provided, the
+                current cell.unit will be used for the two inputs.
+            symmetry : bool
+                Whether to enable space_group_symmetry. It is a reserved input
+                argument. This functionality is not supported yet.
+            inplace : bool
+                Whether to overwrite the existing Mole object.
+        '''
+        if inplace:
+            cell = self
+        else:
+            cell = self.copy(deep=False)
+            cell._env = cell._env.copy()
+
+        if unit is not None:
+            _unit = mole._length_in_au(unit)
+            if _unit != mole._length_in_au(cell.unit):
+                if a is None:
+                    a = self.lattice_vectors(unit)
+                if atoms_or_coords is None:
+                    atoms_or_coords = self.atom_coords(unit)
+
+        if a is not None:
+            logger.info(self, 'Set new lattice vectors')
+            logger.info(self, '%s', a)
+            cell.a = a
+            if self._mesh_from_build:
+                cell.mesh = None
+            if self._rcut_from_build:
+                cell.rcut = None
+            cell._built = False
+        cell.enuc = None
+
+        if atoms_or_coords is not None:
+            cell = mole.MoleBase.set_geom_(cell, atoms_or_coords, unit, symmetry)
+
+        if not cell._built:
+            cell.build(False, False)
+        return cell
 
 del (INTEGRAL_PRECISION, WRAP_AROUND, WITH_GAMMA, EXP_DELIMITER)

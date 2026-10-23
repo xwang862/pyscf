@@ -539,7 +539,7 @@ class CASSCF_Scanner(lib.SinglePointScanner):
         self.__dict__.update(mc.__dict__)
         self._scf = mc._scf.as_scanner()
 
-    def __call__(self, mol_or_geom, **kwargs):
+    def __call__(self, mol_or_geom, mo_coeff=None, ci0=None):
         from pyscf.mcscf.addons import project_init_guess
         if isinstance(mol_or_geom, gto.MoleBase):
             mol = mol_or_geom
@@ -560,12 +560,16 @@ class CASSCF_Scanner(lib.SinglePointScanner):
         mf_scanner = self._scf
         mf_scanner(mol)
         self.mol = mol
-        if self.mo_coeff is None:
-            mo = mf_scanner.mo_coeff
+
+        if mo_coeff is None:
+            mo_coeff = self.mo_coeff
+        if mo_coeff is None:
+            mo_coeff = mf_scanner.mo_coeff
         else:
-            mo = self.mo_coeff
-        mo = project_init_guess(self, mo)
-        e_tot = self.kernel(mo, self.ci)[0]
+            mo_coeff = project_init_guess(self, mo_coeff)
+        if ci0 is None:
+            ci0 = self.ci
+        e_tot = self.kernel(mo_coeff, ci0)[0]
         return e_tot
 
 def max_stepsize_scheduler(casscf, envs):
@@ -621,7 +625,7 @@ class CASSCF(casci.CASBase):
             Max number of iterations allowd in AH solver.  Default is 30.
         ah_lindep : float, for AH solver.
             Linear dependence threshold for AH solver.  Default is 1e-14.
-        ah_start_tol : flat, for AH solver.
+        ah_start_tol : float, for AH solver.
             In AH solver, the orbital rotation is started without completely solving the AH problem.
             This value is to control the start point. Default is 2.5.
         ah_start_cycle : int, for AH solver.
@@ -846,12 +850,15 @@ To enable the solvent model for CASSCF, the following code needs to be called
             active space CI energy,
             the active space FCI wavefunction coefficients or DMRG wavefunction ID,
             the MCSCF canonical orbital coefficients,
-            the MCSCF canonical orbital coefficients.
+            the MCSCF canonical orbital energies (diagonal elements of general Fock matrix).
 
         They are attributes of mcscf object, which can be accessed by
         .e_tot, .e_cas, .ci, .mo_coeff, .mo_energy
         '''
         if mo_coeff is None:
+            if self.mo_coeff is None and self._scf.mol.nelectron > 0:
+                self._scf.run()
+                self.mo_coeff = self._scf.mo_coeff
             mo_coeff = self.mo_coeff
         else: # overwrite self.mo_coeff because it is needed in many methods of this class
             self.mo_coeff = mo_coeff
@@ -1223,9 +1230,8 @@ To enable the solvent model for CASSCF, the following code needs to be called
             if 'mo_energy' in envs:
                 mo_energy = envs['mo_energy']
 
-        chkfile.dump_mcscf(self, chk_file, 'mcscf', e_tot,
-                           mo_coeff, ncore, self.ncas, mo_occ,
-                           mo_energy, e_cas, civec, casdm1,
+        chkfile.dump_mcscf(self, chkfile=chk_file, e_tot=e_tot, mo_coeff=mo_coeff,
+                           mo_occ=mo_occ, mo_energy=mo_energy, e_cas=e_cas, ci_vector=civec, casdm1=casdm1,
                            overwrite_mol=(envs is None))
         return self
 
@@ -1286,6 +1292,7 @@ To enable the solvent model for CASSCF, the following code needs to be called
         self.max_cycle_macro = x
 
     def approx_hessian(self, auxbasis=None, with_df=None):
+        '''Approximate the orbital Hessian using density fitting integrals.'''
         from pyscf.mcscf import df
         return df.approx_hessian(self, auxbasis, with_df)
 

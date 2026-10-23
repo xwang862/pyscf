@@ -327,7 +327,7 @@ def kernel(casscf, mo_coeff, tol=1e-7, conv_tol_grad=None,
             and (norm_gorb0 < conv_tol_grad and norm_ddm < conv_tol_ddm)):
             conv = True
 
-        if dump_chk:
+        if dump_chk and casscf.chkfile:
             casscf.dump_chk(locals())
 
         if callable(callback):
@@ -383,8 +383,7 @@ class UCASSCF(ucasci.UCASBase):
     def __init__(self, mf_or_mol, ncas=0, nelecas=0, ncore=None, frozen=None):
         ucasci.UCASBase.__init__(self, mf_or_mol, ncas, nelecas, ncore)
         self.frozen = frozen
-
-        self.chkfile = self._scf.chkfile
+        self.chkfile = None
 
         self.fcisolver.max_cycle = getattr(__config__,
                                            'mcscf_umc1step_UCASSCF_fcisolver_max_cycle', 50)
@@ -764,6 +763,9 @@ class UCASSCF(ucasci.UCASBase):
         if envs is not None:
             if self.chk_ci:
                 civec = envs['fcivec']
+            e_tot = envs['e_tot']
+            e_cas = envs['e_cas']
+            casdm1 = envs['casdm1']
             if 'mo' in envs:
                 mo_coeff = envs['mo']
             else:
@@ -780,9 +782,9 @@ class UCASSCF(ucasci.UCASBase):
                 mo_occ[0,ncore[0]:nocca] = casdm1[0].diagonal()
                 mo_occ[1,ncore[1]:noccb] = casdm1[1].diagonal()
 
-        chkfile.dump_mcscf(self, self.chkfile, 'mcscf', e_tot,
-                           mo_coeff, ncore, ncas, mo_occ,
-                           mo_energy, e_cas, civec, casdm1,
+        chkfile.dump_mcscf(self, chkfile=self.chkfile, e_tot=e_tot,
+                           mo_coeff=mo_coeff, mo_occ=mo_occ,
+                           mo_energy=mo_energy, e_cas=e_cas, ci_vector=civec, casdm1=casdm1,
                            overwrite_mol=(envs is None))
         return self
 

@@ -16,8 +16,6 @@
 # Author: Qiming Sun <osirpt.sun@gmail.com>
 #
 
-import sys
-
 import numpy
 import scipy.linalg
 from pyscf import lib
@@ -46,41 +44,78 @@ class CIAHOptimizerMixin:
     _keys = {
         'conv_tol_grad', 'max_stepsize', 'max_iters', 'kf_interval',
         'kf_trust_region', 'ah_start_tol', 'ah_start_cycle', 'ah_level_shift',
-        'ah_conv_tol', 'ah_lindep', 'ah_max_cycle', 'ah_trust_region',
+        'ah_conv_tol', 'ah_lindep', 'ah_max_cycle', 'ah_trust_region', 'norb',
     }
 
-    def gen_g_hop(self, u):
-        raise NotImplementedError
+    def __init__(self, norb):
+        self.norb = norb
+
+    @property
+    def pdim(self):
+        return self.norb*(self.norb-1)//2
 
     def pack_uniq_var(self, mat):
+        mat = mat.real
         nmo = mat.shape[0]
         idx = numpy.tril_indices(nmo, -1)
         return mat[idx]
 
     def unpack_uniq_var(self, v):
-        nmo = int(numpy.sqrt(v.size*2)) + 1
+        v = v.real
+        nmo = self.norb
         idx = numpy.tril_indices(nmo, -1)
         mat = numpy.zeros((nmo,nmo))
         mat[idx] = v
         return mat - mat.conj().T
 
-    def extract_rotation(self, dr, u0=1):
+    def extract_rotation(self, dr, u0=None):
         dr = self.unpack_uniq_var(dr)
-        return numpy.dot(u0, expmat(dr))
+        u1 = expmat(dr)
+        if u0 is None:
+            return u1
+        else:
+            return self.update_rotation(u0, u1)
 
-    def get_grad(self, u):
-        raise NotImplementedError
+    def update_rotation(self, u0, u1):
+        return numpy.dot(u0, u1)
 
-    def cost_function(self, u):
-        raise NotImplementedError
+    def zero_uniq_var(self):
+        return numpy.zeros(self.pdim)
+
+    def identity_rotation(self):
+        return self.extract_rotation(self.zero_uniq_var())
+
+
+class CIAHOptimizerMixinComplex(CIAHOptimizerMixin):
+
+    @property
+    def pdim(self):
+        return self.norb*(self.norb-1)
+
+    def pack_uniq_var(self, mat):
+        nmo = mat.shape[0]
+        idx = numpy.tril_indices(nmo, -1)
+        x = mat[idx].real
+        y = mat[idx].imag
+        return numpy.hstack((x,y))
+
+    def unpack_uniq_var(self, v):
+        v = v.real
+        nmo = self.norb
+        assert( nmo*(nmo-1) == v.size )
+        nmo2 = nmo*(nmo-1)//2
+        v = v.reshape(-1)
+        x = v[:nmo2]
+        y = v[nmo2:]
+        mat = numpy.zeros((nmo,nmo), dtype=numpy.complex128)
+        idx = numpy.tril_indices(nmo, -1)
+        mat[idx] = x + y*1j
+        return mat - mat.conj().T
 
 
 def rotate_orb_cc(iah, u0, conv_tol_grad=None, verbose=logger.NOTE):
     t2m = (logger.process_clock(), logger.perf_counter())
-    if isinstance(verbose, logger.Logger):
-        log = verbose
-    else:
-        log = logger.Logger(sys.stdout, verbose)
+    log = logger.new_logger(verbose=verbose)
 
     if conv_tol_grad is None:
         conv_tol_grad = iah.conv_tol_grad
@@ -121,9 +156,9 @@ def rotate_orb_cc(iah, u0, conv_tol_grad=None, verbose=logger.NOTE):
     x0_guess = g_orb
     while True:
         stat = Statistic()
-        dr = 0
+        dr = iah.zero_uniq_var()
         ikf = 0
-        ukf = 1
+        ukf = iah.identity_rotation()
 
         for ah_conv, ihop, w, dxi, hdxi, residual, seig \
                 in davidson_cc(h_op, g_op, precond, x0_guess,
@@ -167,8 +202,8 @@ def rotate_orb_cc(iah, u0, conv_tol_grad=None, verbose=logger.NOTE):
                        norm_gorb < norm_gkf/kf_trust_region)):
                     ikf = 0
                     ukf = iah.extract_rotation(dr, ukf)
-                    dr[:] = 0
-                    g_kf1 = iah.get_grad(u0.dot(ukf))
+                    dr = iah.zero_uniq_var()
+                    g_kf1 = iah.get_grad(iah.update_rotation(u0, ukf))
                     stat.tot_kf += 1
                     norm_gkf1 = numpy.linalg.norm(g_kf1)
                     norm_dg = numpy.linalg.norm(g_kf1-g_orb)
@@ -197,7 +232,11 @@ def rotate_orb_cc(iah, u0, conv_tol_grad=None, verbose=logger.NOTE):
         t3m = log.timer('aug_hess in %d inner iters' % stat.imic, *t3m)
         u0 = (yield u, g_kf, stat)
 
+        # Separating timing of gen_g_hop from aug_hess
+        t2m = (logger.process_clock(), logger.perf_counter())
         g_kf, h_op, h_diag = iah.gen_g_hop(u0)
+        t3m = log.timer('gen h_op', *t2m)
+
         norm_gkf = numpy.linalg.norm(g_kf)
         norm_dg = numpy.linalg.norm(g_kf-g_orb)
         log.debug('    |g|= %4.3g (keyframe), |g-correction|= %4.3g',
@@ -211,10 +250,7 @@ def rotate_orb_cc(iah, u0, conv_tol_grad=None, verbose=logger.NOTE):
 def davidson_cc(h_op, g_op, precond, x0, tol=1e-10, xs=[], ax=[],
                 max_cycle=30, lindep=1e-14, dot=numpy.dot, verbose=logger.WARN):
 
-    if isinstance(verbose, logger.Logger):
-        log = verbose
-    else:
-        log = logger.Logger(sys.stdout, verbose)
+    log = logger.new_logger(verbose=verbose)
 
     toloose = numpy.sqrt(tol)
     # the first trial vector is (1,0,0,...), which is not included in xs
@@ -227,24 +263,47 @@ def davidson_cc(h_op, g_op, precond, x0, tol=1e-10, xs=[], ax=[],
     heff = numpy.zeros((max_cycle+nx+1,max_cycle+nx+1), dtype=x0.dtype)
     ovlp = numpy.eye(max_cycle+nx+1, dtype=x0.dtype)
     if nx == 0:
+        # The initial trial vector is often recycled from the last (possibly
+        # tiny) micro step of the previous macro iteration.  Feeding it
+        # unnormalized makes the subspace metric singular
+        # (seig ~ |x0|^2 < lindep), so safe_eigh discards the only expansion
+        # direction: the solver then returns an exact zero step and
+        # terminates on its first iteration before any useful direction can
+        # be added.  Normalization removes the scale pathology while keeping
+        # the direction; the generalized subspace problem is invariant to
+        # the scaling of a basis vector.
+        norm_x0 = numpy.linalg.norm(x0)
+        if norm_x0 == 0:
+            # No direction information at all; start from the gradient.
+            x0 = g_op()
+            norm_x0 = numpy.linalg.norm(x0)
+        if norm_x0 > 0:
+            x0 = x0 / norm_x0
         xs.append(x0)
         ax.append(h_op(x0))
     else:
+        # Note, the subspace H must be real even for Hessian of complex orbitals.
+        # See https://doi.org/10.1063/1.5036594 .
+        # In the case of complex orbitals, the subspace H should be constructed as
+        # a 2N x 2N real matrix, where N is the number of parameters in rotation.
+        # The extended space corresponds to the t^dagger for rotation parameters.
+        # This function only constructs one diagonal block of the Hessian matrix.
+        # This is an effective approximation to the solution from the standard Hessian.
         for i in range(1, nx+1):
             for j in range(1, i+1):
-                heff[i,j] = dot(xs[i-1].conj(), ax[j-1])
-                ovlp[i,j] = dot(xs[i-1].conj(), xs[j-1])
-            heff[1:i,i] = heff[i,1:i].conj()
-            ovlp[1:i,i] = ovlp[i,1:i].conj()
+                heff[i,j] = dot(xs[i-1].conj(), ax[j-1]).real
+                ovlp[i,j] = dot(xs[i-1].conj(), xs[j-1]).real
+            heff[1:i,i] = heff[i,1:i]
+            ovlp[1:i,i] = ovlp[i,1:i]
 
     w_t = 0
     for istep in range(max_cycle):
         g = g_op()
         nx = len(xs)
         for i in range(nx):
-            heff[i+1,0] = dot(xs[i].conj(), g)
-            heff[nx,i+1] = dot(xs[nx-1].conj(), ax[i])
-            ovlp[nx,i+1] = dot(xs[nx-1].conj(), xs[i])
+            heff[i+1,0] = dot(xs[i].conj(), g).real
+            heff[nx,i+1] = dot(xs[nx-1].conj(), ax[i]).real
+            ovlp[nx,i+1] = dot(xs[nx-1].conj(), xs[i]).real
         heff[0,:nx+1] = heff[:nx+1,0].conj()
         heff[1:nx,nx] = heff[nx,1:nx].conj()
         ovlp[1:nx,nx] = ovlp[nx,1:nx].conj()

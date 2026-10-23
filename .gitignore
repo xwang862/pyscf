@@ -5,6 +5,7 @@ __pycache__/
 # C extensions
 *.so
 *.dylib
+*.o
 
 # Distribution / packaging
 .Python
@@ -27,6 +28,7 @@ var/
 
 # Calculation examples
 *.molden
+/examples/pbc/*.png
 
 # Installer logs
 pip-log.txt
@@ -83,3 +85,7 @@ tmp/
 # IDEs
 .idea/
 .vscode/
+
+# mypy
+.mypy_cache/
+

@@ -1,4 +1,4 @@
-/* Copyright 2021- The PySCF Developers. All Rights Reserved.
+/* Copyright 2021-2025 The PySCF Developers. All Rights Reserved.
 
    Licensed under the Apache License, Version 2.0 (the "License");
     you may not use this file except in compliance with the License.
@@ -94,7 +94,10 @@ void init_rs_grid(RS_Grid** rs_grid, GridLevel_Info** gridlevel_info, int comp)
     int *mesh = gl_info->mesh;
     rg->data = (double**)malloc(sizeof(double*) * nlevels);
     for (i = 0; i < nlevels; i++) {
-        ngrid = mesh[i*3] * mesh[i*3+1] * mesh[i*3+2];
+        // Cast to size_t before multiplying so very fine meshes
+        // (mesh > ~1024 on a side) do not overflow int and silently
+        // under-size the FFT-grid allocation.
+        ngrid = (size_t)mesh[i*3] * mesh[i*3+1] * mesh[i*3+2];
         (rg->data)[i] = calloc(comp*ngrid, sizeof(double));
     }
     *rs_grid = rg;
@@ -171,7 +174,11 @@ double pgfpair_radius(int la, int lb, double zeta, double zetb, double* ra, doub
     double zetp = zeta + zetb;
     double eps = precision * precision;
 
-    if (rab[0] < RZERO && rab[1] < RZERO && rab[2] < RZERO) {
+    // Same-atom shortcut: compare the magnitude of the displacement vector,
+    // not the signed components. The previous "rab[0] < RZERO && ..." test
+    // wrongly fired on any all-negative displacement (~1/8 of periodic-image
+    // shifted pairs) and returned the wrong radius.
+    if (SQUARE(rab) < RZERO*RZERO) {
         radius = pgf_rcut(la+lb, zetp, 1., eps, radius);
         return radius;
     }
@@ -309,7 +316,7 @@ void del_task_list(TaskList** task_list)
         return;
     }
     if (tl->gridlevel_info) {
-        del_gridlevel_info(&(tl->gridlevel_info));
+        //del_gridlevel_info(&(tl->gridlevel_info));
         tl->gridlevel_info = NULL;
     }
     if (tl->tasks) {
@@ -386,12 +393,34 @@ void merge_task_list(TaskList** task_list, TaskList** task_list_loc)
 }
 
 
-int get_grid_level(GridLevel_Info* gridlevel_info, double alpha)
+int get_grid_level_cp2k(GridLevel_Info* gridlevel_info,
+                        double alpha, double beta, double precision)
 {
     int i;
     int nlevels = gridlevel_info->nlevels;
     int grid_level = nlevels - 1; //default use the most dense grid
-    double needed_cutoff = alpha * gridlevel_info->rel_cutoff;
+    double needed_cutoff = (alpha + beta) * gridlevel_info->rel_cutoff;
+    for (i = 0; i < nlevels; i++) {
+        if ((gridlevel_info->cutoff)[i] >= needed_cutoff) {
+            grid_level = i;
+            break;
+        }
+    }
+    return grid_level;
+}
+
+
+int get_grid_level(GridLevel_Info* gridlevel_info,
+                   double alpha, double beta, double precision)
+{
+    int i;
+    int nlevels = gridlevel_info->nlevels;
+    int grid_level = nlevels - 1; //default use the most dense grid
+
+    double ap = alpha + beta;
+    double tmp = alpha * beta / (ap * ap);
+    double fac = 2.8284271247461903 * pow(tmp, 0.75) / precision;
+    double needed_cutoff = log(fac) * 2 * ap / pow(gridlevel_info->rel_cutoff, 0.25);
     for (i = 0; i < nlevels; i++) {
         if ((gridlevel_info->cutoff)[i] >= needed_cutoff) {
             grid_level = i;
@@ -404,6 +433,7 @@ int get_grid_level(GridLevel_Info* gridlevel_info, double alpha)
 
 void build_task_list(TaskList** task_list, NeighborList** neighbor_list,
                      GridLevel_Info** gridlevel_info,
+                     int (*fn_get_grid_level)(),
                      int* ish_atm, int* ish_bas, double* ish_env, 
                      double* ish_rcut, double** ipgf_rcut,
                      int* jsh_atm, int* jsh_bas, double* jsh_env, 
@@ -414,12 +444,12 @@ void build_task_list(TaskList** task_list, NeighborList** neighbor_list,
     int ilevel;
     int nlevels = gl_info->nlevels;
     init_task_list(task_list, gl_info, nlevels, hermi);
-    double max_radius[nlevels];
+    double* max_radius = calloc(nlevels, sizeof(double));
     NeighborList *nl0 = *neighbor_list;
 
 #pragma omp parallel private(ilevel)
 {
-    double max_radius_loc[nlevels];
+    double* max_radius_loc = calloc(nlevels, sizeof(double));
     TaskList** task_list_loc = (TaskList**) malloc(sizeof(TaskList*));
     init_task_list(task_list_loc, gl_info, nlevels, hermi);
     NeighborPair *np0_ij;
@@ -475,7 +505,7 @@ void build_task_list(TaskList** task_list, NeighborList** neighbor_list,
                                 continue;
                             }
                             jpgf_alpha = jsh_env[jsh_alpha_of+jpgf]; 
-                            ilevel = get_grid_level(gl_info, ipgf_alpha+jpgf_alpha);
+                            ilevel = fn_get_grid_level(gl_info, ipgf_alpha, jpgf_alpha, precision);
                             radius = pgfpair_radius(li, lj, ipgf_alpha, jpgf_alpha, ish_ratm, rij, precision);
                             if (radius < RZERO) {
                                 continue;
@@ -490,21 +520,27 @@ void build_task_list(TaskList** task_list, NeighborList** neighbor_list,
     }
 
     #pragma omp critical
-    merge_task_list(task_list, task_list_loc);
+    {
+        merge_task_list(task_list, task_list_loc);
+    }
 
     nullify_task_list(task_list_loc);
     free(task_list_loc);
 
-    #pragma omp critical
     for (ilevel = 0; ilevel < nlevels; ilevel++) {
-        max_radius[ilevel] = MAX(max_radius[ilevel], max_radius_loc[ilevel]);
+        #pragma omp critical
+        {
+            max_radius[ilevel] = MAX(max_radius[ilevel], max_radius_loc[ilevel]);
+        }
     }
+    free(max_radius_loc);
 }
 
     for (ilevel = 0; ilevel < nlevels; ilevel++) {
         Task *t0 = ((*task_list)->tasks)[ilevel];
         t0->radius = max_radius[ilevel];
     }
+    free(max_radius);
 }
 
 

@@ -28,6 +28,7 @@ Ref:
 '''
 
 import os
+import sys
 import ctypes
 import warnings
 import tempfile
@@ -51,7 +52,7 @@ from pyscf import __config__
 
 OMEGA_MIN = 0.08
 INDEX_MIN = -10000
-LINEAR_DEP_THR = getattr(__config__, 'pbc_df_df_DF_lindep', 1e-9)
+LINEAR_DEP_THR = getattr(__config__, 'pbc_df_df_DF_lindep', 1e-10)
 # Threshold of steep bases and local bases
 RCUT_THRESHOLD = getattr(__config__, 'pbc_scf_rsjk_rcut_threshold', 1.0)
 
@@ -254,7 +255,12 @@ class _RSGDFBuilder(Int3cBuilder):
 
         if not self.has_long_range():
             omega = auxcell.omega
-            j2c = auxcell.pbc_intor('int2c2e', hermi=1, kpts=uniq_kpts)
+            rcut = estimate_rs_2c2e_rcut(auxcell, omega, auxcell.precision*1e-6)
+            try:
+                auxcell.rcut, rcut_backup = rcut, auxcell.rcut
+                j2c = auxcell.pbc_intor('int2c2e', hermi=1, kpts=uniq_kpts)
+            finally:
+                auxcell.rcut = rcut_backup
             if (auxcell.dimension >= 2 and omega != 0 and
                 auxcell.low_dim_ft_type != 'inf_vacuum'):
                 gamma_point_idx = member(np.zeros(3), uniq_kpts)
@@ -270,15 +276,8 @@ class _RSGDFBuilder(Int3cBuilder):
         rs_auxcell = self.rs_auxcell
         auxcell_c = rs_auxcell.compact_basis_cell()
         if auxcell_c.nbas > 0:
-            aux_exp = np.hstack(auxcell_c.bas_exps()).min()
-            if omega == 0:
-                theta = aux_exp / 2
-            else:
-                theta = 1./(2./aux_exp + omega**-2)
-            fac = 2*np.pi**3.5/auxcell.vol * aux_exp**-3 * theta**-1.5
-            rcut_sr = (np.log(fac / auxcell_c.rcut / precision + 1.) / theta)**.5
-            auxcell_c.rcut = rcut_sr
-            logger.debug1(self, 'auxcell_c  rcut_sr = %g', rcut_sr)
+            auxcell_c.rcut = estimate_rs_2c2e_rcut(auxcell_c, omega, precision)
+            logger.debug1(self, 'auxcell_c  rcut_sr = %g', auxcell_c.rcut)
             with auxcell_c.with_short_range_coulomb(omega):
                 sr_j2c = list(auxcell_c.pbc_intor('int2c2e', hermi=1, kpts=uniq_kpts))
             recontract_1d = rs_auxcell.recontract()
@@ -386,7 +385,8 @@ class _RSGDFBuilder(Int3cBuilder):
         # as cderi_file.
         fswap = lib.H5TmpFile(dir=os.path.dirname(cderi_file), prefix='.outcore_auxe2_swap')
         # Unlink swapfile to avoid trash files
-        os.unlink(fswap.filename)
+        if sys.platform != 'win32':
+            os.unlink(fswap.filename)
 
         log = logger.new_logger(self)
         cell = self.cell
@@ -416,8 +416,8 @@ class _RSGDFBuilder(Int3cBuilder):
         ao_loc = cell.ao_loc
         aux_loc = auxcell.ao_loc_nr(auxcell.cart or 'ssc' in intor)
         ish0, ish1, jsh0, jsh1, ksh0, ksh1 = shls_slice
-        i0, i1, j0, j1 = ao_loc[list(shls_slice[:4])]
-        k0, k1 = aux_loc[[ksh0, ksh1]]
+        i0, i1, j0, j1 = ao_loc[list(shls_slice[:4])].astype(np.int64)
+        k0, k1 = aux_loc[[ksh0, ksh1]].astype(np.int64)
         if aosym == 's1':
             nao_pair = (i1 - i0) * (j1 - j0)
         else:
@@ -924,13 +924,22 @@ class _RSGDFBuilder(Int3cBuilder):
         else:
             kk_idx = None
 
+        if h5py.is_hdf5(cderi_file):
+            feri = lib.H5FileWrap(cderi_file, 'a')
+            if 'kpts' in feri:
+                del feri['kpts']
+                del feri['aosym']
+            if dataname in feri:
+                log.warn(f'Overwritting {dataname} in {cderi_file}.')
+                del feri[dataname]
+        else:
+            feri = lib.H5FileWrap(cderi_file, 'w')
+        feri['kpts'] = kpts
+        feri['aosym'] = aosym
+
         fswap = self.outcore_auxe2(cderi_file, intor, aosym, comp, j_only,
                                    'j3c', shls_slice, kk_idx=kk_idx)
         cpu1 = log.timer('pass1: real space int3c2e', *cpu0)
-
-        feri = lib.H5FileWrap(cderi_file, 'w')
-        feri['kpts'] = kpts
-        feri['aosym'] = aosym
 
         if aosym == 's2':
             nao_pair = nao*(nao+1)//2
@@ -1404,10 +1413,9 @@ def _round_off_to_odd_mesh(mesh):
     # Round off mesh to the nearest odd numbers.
     # Odd number of grids is preferred because even number of grids may break
     # the conjugation symmetry between the k-points k and -k.
-    # When building the DF integral tensor in function _make_j3c, the symmetry
-    # between k and -k is used (function conj_j2c) to overcome the error
-    # caused by auxiliary basis linear dependency. More details of this
-    # problem can be found in function _make_j3c.
+    # The DF builder uses this symmetry (_conj_j2c) to keep the decomposed
+    # Coulomb metrics at k and -k consistent when the auxiliary basis is
+    # linearly dependent.
     if isinstance(mesh, (int, np.integer)):
         return (mesh // 2) * 2 + 1
     else:
@@ -1616,3 +1624,24 @@ def estimate_omega_for_ke_cutoff(cell, ke_cutoff, precision=None):
     log_rest = np.log(precision / (16*np.pi**2 * kmax**lmax))
     omega = (-.5 * ke_cutoff / log_rest)**.5
     return omega
+
+def estimate_rs_2c2e_rcut(auxcell, omega, precision=None):
+    if precision is None:
+        precision = auxcell.precision
+    ak, ck, lk = gto.most_diffuse_pgto(auxcell)
+    if omega == 0:
+        theta = ak / 2
+    else:
+        theta = 1./(omega**-2 + 2./ak)
+    norm_ang = (2*lk+1)/(4*np.pi)
+    c1 = ck**2 * norm_ang
+    fl = 2
+    fac = np.pi**2.5*c1 * theta**(lk*2-.5)
+    vol = auxcell.vol
+    rad = vol**(-1./3) * auxcell.rcut + 1
+    surface = 4*np.pi * rad**2
+    lattice_sum_factor = 2*np.pi*auxcell.rcut/(vol*theta) + surface
+    fac *= lattice_sum_factor / ak**(lk*2+3) * fl / precision
+    rcut = auxcell.rcut
+    rcut = (np.log(fac * rcut**(lk*2-1) + 1.) / theta)**.5
+    return rcut

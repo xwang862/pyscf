@@ -49,17 +49,26 @@ def grad_elec(mf_grad, mo_energy=None, mo_coeff=None, mo_occ=None, atmlst=None):
     dm0 = mf.make_rdm1(mo_coeff, mo_occ)
     dm0 = mf_grad._tag_rdm1 (dm0, mo_coeff, mo_occ)
 
+    dme0 = mf_grad.make_rdm1e(mo_energy, mo_coeff, mo_occ)
+
+    if mol._pseudo:
+        from pyscf.gto.pp_int import vpploc_nuc_grad, vppnl_nuc_grad
+        de = vpploc_nuc_grad(mol, dm0)
+        de += vppnl_nuc_grad(mol, dm0)
+    else:
+        de = numpy.zeros((mol.natm, 3))
+
     t0 = (logger.process_clock(), logger.perf_counter())
     log.debug('Computing Gradients of NR-HF Coulomb repulsion')
     vhf = mf_grad.get_veff(mol, dm0)
     log.timer('gradients of 2e part', *t0)
 
-    dme0 = mf_grad.make_rdm1e(mo_energy, mo_coeff, mo_occ)
-
     if atmlst is None:
         atmlst = range(mol.natm)
+    else:
+        de = de[atmlst]
+
     aoslices = mol.aoslice_by_atom()
-    de = numpy.zeros((len(atmlst),3))
     for k, ia in enumerate(atmlst):
         p0, p1 = aoslices [ia,2:]
         h1ao = hcore_deriv(ia)
@@ -110,9 +119,14 @@ def get_hcore(mol):
     '''Part of the nuclear gradients of core Hamiltonian'''
     h = mol.intor('int1e_ipkin', comp=3)
     if mol._pseudo:
-        NotImplementedError('Nuclear gradients for GTH PP')
+        from pyscf.pbc.gto.pseudo import pp_int
+        from pyscf.df import incore
+        fakemol = pp_int.fake_cell_vloc(mol, 0)
+        charges = fakemol.atom_charges()
+        v = incore.aux_e2(mol, fakemol, 'int3c2e_ip1', comp=3)
+        h += numpy.einsum('xpqi,i->xpq', v, -charges)
     else:
-        h+= mol.intor('int1e_ipnuc', comp=3)
+        h += mol.intor('int1e_ipnuc', comp=3)
     if mol.has_ecp():
         h += mol.intor('ECPscalar_ipnuc', comp=3)
     return -h
@@ -129,13 +143,24 @@ def hcore_generator(mf, mol=None):
             ecp_atoms = set(mol._ecpbas[:,gto.ATOM_OF])
         else:
             ecp_atoms = ()
+
+        if mol._pseudo:
+            from pyscf.pbc.gto.pseudo import pp_int
+            from pyscf.df import incore
+            fakemol = pp_int.fake_cell_vloc(mol, 0)
+            v = incore.aux_e2(mol, fakemol, 'int3c2e_ip1', comp=3).transpose(3,0,1,2)
+
+        charges = -mol.atom_charges()
         aoslices = mol.aoslice_by_atom()
         h1 = mf.get_hcore(mol)
         def hcore_deriv(atm_id):
             shl0, shl1, p0, p1 = aoslices[atm_id]
             with mol.with_rinv_at_nucleus(atm_id):
-                vrinv = mol.intor('int1e_iprinv', comp=3) # <\nabla|1/r|>
-                vrinv *= -mol.atom_charge(atm_id)
+                if mol._pseudo:
+                    vrinv = v[atm_id]
+                else:
+                    vrinv = mol.intor('int1e_iprinv', comp=3) # <\nabla|1/r|>
+                vrinv *= charges[atm_id]
                 if with_ecp and atm_id in ecp_atoms:
                     vrinv += mol.intor('ECPscalar_iprinv', comp=3)
             vrinv[:,p0:p1] += h1[:,p0:p1]
@@ -145,14 +170,8 @@ def hcore_generator(mf, mol=None):
 def get_ovlp(mol):
     return -mol.intor('int1e_ipovlp', comp=3)
 
-
-def get_jk(mol, dm):
-    '''J = ((-nabla i) j| kl) D_lk
-    K = ((-nabla i) j| kl) D_jk
-    '''
+def _calc_q_cond(mol, vhfopt):
     libcvhf = _vhf.libcvhf
-    vhfopt = _vhf._VHFOpt(mol, 'int2e_ip1', 'CVHFgrad_jk_prescreen',
-                          dmcondname='CVHFnr_dm_cond1')
     ao_loc = mol.ao_loc_nr()
     nbas = mol.nbas
     q_cond = numpy.empty((2, nbas, nbas))
@@ -167,8 +186,15 @@ def get_jk(mol, dm):
             lib.c_null_ptr(), q_cond[1].ctypes,
             ao_loc.ctypes, mol._atm.ctypes, ctypes.c_int(mol.natm),
             mol._bas.ctypes, ctypes.c_int(nbas), mol._env.ctypes)
-    vhfopt.q_cond = q_cond
+    return q_cond
 
+def get_jk(mol, dm):
+    '''J = ((-nabla i) j| kl) D_lk
+    K = ((-nabla i) j| kl) D_jk
+    '''
+    vhfopt = _vhf._VHFOpt(mol, 'int2e_ip1', 'CVHFgrad_jk_prescreen',
+                          dmcondname='CVHFnr_dm_cond1')
+    vhfopt.q_cond = _calc_q_cond(mol, vhfopt)
     intor = mol._add_suffix('int2e_ip1')
     vj, vk = _vhf.direct_mapdm(intor,  # (nabla i,j|k,l)
                                's2kl', # ip1_sph has k>=l,
@@ -176,6 +202,36 @@ def get_jk(mol, dm):
                                dm, 3, # xyz, 3 components
                                mol._atm, mol._bas, mol._env, vhfopt=vhfopt)
     return -vj, -vk
+
+def get_j(mol, dm):
+    '''
+    J = ((-nabla i) j| kl) D_lk
+    '''
+    vhfopt = _vhf._VHFOpt(mol, 'int2e_ip1', 'CVHFgrad_j_prescreen',
+                          dmcondname='CVHFnr_dm_cond1')
+    vhfopt.q_cond = _calc_q_cond(mol, vhfopt)
+    intor = mol._add_suffix('int2e_ip1')
+    vj = _vhf.direct_mapdm(intor,  # (nabla i,j|k,l)
+                           's2kl', # ip1_sph has k>=l,
+                           'lk->s1ij',
+                           dm, 3, # xyz, 3 components
+                           mol._atm, mol._bas, mol._env, vhfopt=vhfopt)
+    return -vj
+
+def get_k(mol, dm):
+    '''
+    K = ((-nabla i) j| kl) D_jk
+    '''
+    vhfopt = _vhf._VHFOpt(mol, 'int2e_ip1', 'CVHFgrad_k_prescreen',
+                          dmcondname='CVHFnr_dm_cond1')
+    vhfopt.q_cond = _calc_q_cond(mol, vhfopt)
+    intor = mol._add_suffix('int2e_ip1')
+    vk = _vhf.direct_mapdm(intor,  # (nabla i,j|k,l)
+                           's2kl', # ip1_sph has k>=l,
+                           'jk->s1il',
+                           dm, 3, # xyz, 3 components
+                           mol._atm, mol._bas, mol._env, vhfopt=vhfopt)
+    return -vk
 
 def get_veff(mf_grad, mol, dm):
     '''NR Hartree-Fock Coulomb repulsion'''
@@ -251,7 +307,6 @@ class SCF_GradScanner(lib.GradScanner):
 
     def __call__(self, mol_or_geom, **kwargs):
         if isinstance(mol_or_geom, gto.MoleBase):
-            assert mol_or_geom.__class__ == gto.Mole
             mol = mol_or_geom
         else:
             mol = self.mol.set_geom_(mol_or_geom, inplace=False)
@@ -259,13 +314,6 @@ class SCF_GradScanner(lib.GradScanner):
         self.reset(mol)
         mf_scanner = self.base
         e_tot = mf_scanner(mol)
-
-        if isinstance(mf_scanner, hf.KohnShamDFT):
-            if getattr(self, 'grids', None):
-                self.grids.reset(mol)
-            if getattr(self, 'nlcgrids', None):
-                self.nlcgrids.reset(mol)
-
         de = self.kernel(**kwargs)
         return e_tot, de
 
@@ -325,35 +373,22 @@ class GradientsBase(lib.StreamObject):
         if mol is None: mol = self.mol
         if dm is None: dm = self.base.make_rdm1()
         cpu0 = (logger.process_clock(), logger.perf_counter())
-        if omega is None:
+        with mol.with_range_coulomb(omega):
             vj, vk = get_jk(mol, dm)
-        else:
-            with mol.with_range_coulomb(omega):
-                vj, vk = get_jk(mol, dm)
         logger.timer(self, 'vj and vk', *cpu0)
         return vj, vk
 
     def get_j(self, mol=None, dm=None, hermi=0, omega=None):
         if mol is None: mol = self.mol
         if dm is None: dm = self.base.make_rdm1()
-        intor = mol._add_suffix('int2e_ip1')
-        if omega is None:
-            return -_vhf.direct_mapdm(intor, 's2kl', 'lk->s1ij', dm, 3,
-                                      mol._atm, mol._bas, mol._env)
         with mol.with_range_coulomb(omega):
-            return -_vhf.direct_mapdm(intor, 's2kl', 'lk->s1ij', dm, 3,
-                                      mol._atm, mol._bas, mol._env)
+            return get_j(mol, dm)
 
     def get_k(self, mol=None, dm=None, hermi=0, omega=None):
         if mol is None: mol = self.mol
         if dm is None: dm = self.base.make_rdm1()
-        intor = mol._add_suffix('int2e_ip1')
-        if omega is None:
-            return -_vhf.direct_mapdm(intor, 's2kl', 'jk->s1il', dm, 3,
-                                      mol._atm, mol._bas, mol._env)
         with mol.with_range_coulomb(omega):
-            return -_vhf.direct_mapdm(intor, 's2kl', 'jk->s1il', dm, 3,
-                                      mol._atm, mol._bas, mol._env)
+            return get_k(mol, dm)
 
     def get_veff(self, mol=None, dm=None):
         raise NotImplementedError
@@ -372,12 +407,16 @@ class GradientsBase(lib.StreamObject):
             solver (string) : geometry optimization solver, can be "geomeTRIC"
             (default) or "berny".
         '''
-        if solver.lower() == 'geometric':
+        solver = solver.lower()
+        if solver == 'geometric':
             from pyscf.geomopt import geometric_solver
             return geometric_solver.GeometryOptimizer(self.as_scanner())
-        elif solver.lower() == 'berny':
+        elif solver == 'berny':
             from pyscf.geomopt import berny_solver
             return berny_solver.GeometryOptimizer(self.as_scanner())
+        elif solver == 'ase':
+            from pyscf.geomopt import ase_solver
+            return ase_solver.GeometryOptimizer(self.base)
         else:
             raise RuntimeError('Unknown geometry optimization solver %s' % solver)
 
@@ -399,7 +438,10 @@ class GradientsBase(lib.StreamObject):
 
     def kernel(self, mo_energy=None, mo_coeff=None, mo_occ=None, atmlst=None):
         cput0 = (logger.process_clock(), logger.perf_counter())
-        if mo_energy is None: mo_energy = self.base.mo_energy
+        if mo_energy is None:
+            if self.base.mo_energy is None:
+                self.base.run()
+            mo_energy = self.base.mo_energy
         if mo_coeff is None: mo_coeff = self.base.mo_coeff
         if mo_occ is None: mo_occ = self.base.mo_occ
         if atmlst is None:
@@ -440,14 +482,7 @@ class GradientsBase(lib.StreamObject):
         to be split into alpha,beta in DF-ROHF subclass'''
         return lib.tag_array (dm, mo_coeff=mo_coeff, mo_occ=mo_occ)
 
-    # to_gpu can be reused only when __init__ still takes mf
-    def to_gpu(self):
-        mf = self.base.to_gpu()
-        from importlib import import_module
-        mod = import_module(self.__module__.replace('pyscf', 'gpu4pyscf'))
-        cls = getattr(mod, self.__class__.__name__)
-        obj = cls(mf)
-        return obj
+    to_gpu = lib.to_gpu
 
 # export the symbol GradientsMixin for backward compatibility.
 # GradientsMixin should be dropped in the future.

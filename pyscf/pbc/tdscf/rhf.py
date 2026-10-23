@@ -24,13 +24,14 @@ import numpy as np
 from pyscf import lib
 from pyscf.tdscf import rhf
 from pyscf.pbc import scf
+from pyscf.pbc.gto.pseudo.ppnl_velgauge import get_gth_pp_nl_velgauge_commutator
 from pyscf import __config__
 
 def get_ab(mf):
     r'''A and B matrices for TDDFT response function.
 
-    A[i,a,j,b] = \delta_{ab}\delta_{ij}(E_a - E_i) + (ia||bj)
-    B[i,a,j,b] = (ia||jb)
+    A[i,a,j,b] = \delta_{ab}\delta_{ij}(E_a - E_i) + (ai||jb)
+    B[i,a,j,b] = (ai||bj)
 
     Ref: Chem Phys Lett, 256, 454
     '''
@@ -63,7 +64,12 @@ def get_ab(mf):
 
         add_hf_(a, b, hyb)
         if omega != 0:  # For RSH
-            raise NotImplementedError
+            with mf.with_df.range_coulomb(omega) as rsh_df:
+                eri = rsh_df.ao2mo([orbo,mo,mo,mo], kpt, compact=False)
+                eri = eri.reshape(nocc,nmo,nmo,nmo)
+                k_fac = alpha - hyb
+                a -= np.einsum('ijba->iajb', eri[:nocc,:nocc,nocc:,nocc:]) * k_fac
+                b -= np.einsum('ibja->iajb', eri[:nocc,nocc:,:nocc,nocc:]) * k_fac
 
         xctype = ni._xc_type(mf.xc)
         dm0 = mf.make_rdm1(mo, mo_occ)
@@ -82,10 +88,10 @@ def get_ab(mf):
                 rho_o = lib.einsum('rp,pi->ri', ao, orbo)
                 rho_v = lib.einsum('rp,pi->ri', ao, orbv)
                 rho_ov = np.einsum('ri,ra->ria', rho_o, rho_v)
-                w_ov = np.einsum('ria,r->ria', rho_ov, wfxc) * 2
                 rho_vo = rho_ov.conj()
-                a += lib.einsum('ria,rjb->iajb', w_ov, rho_vo)
-                b += lib.einsum('ria,rjb->iajb', w_ov, rho_ov)
+                w_vo = np.einsum('ria,r->ria', rho_vo, wfxc) * 2
+                a += lib.einsum('ria,rjb->iajb', w_vo, rho_ov)
+                b += lib.einsum('ria,rjb->iajb', w_vo, rho_vo)
 
         elif xctype == 'GGA':
             ao_deriv = 1
@@ -98,10 +104,10 @@ def get_ab(mf):
                 rho_v = lib.einsum('xrp,pi->xri', ao, orbv)
                 rho_ov = np.einsum('xri,ra->xria', rho_o, rho_v[0])
                 rho_ov[1:4] += np.einsum('ri,xra->xria', rho_o[0], rho_v[1:4])
-                w_ov = np.einsum('xyr,xria->yria', wfxc, rho_ov) * 2
                 rho_vo = rho_ov.conj()
-                a += lib.einsum('xria,xrjb->iajb', w_ov, rho_vo)
-                b += lib.einsum('xria,xrjb->iajb', w_ov, rho_ov)
+                w_vo = np.einsum('xyr,xria->yria', wfxc, rho_vo) * 2
+                a += lib.einsum('xria,xrjb->iajb', w_vo, rho_ov)
+                b += lib.einsum('xria,xrjb->iajb', w_vo, rho_vo)
 
         elif xctype == 'HF':
             pass
@@ -122,20 +128,58 @@ def get_ab(mf):
                 rho_ov[1:4] += np.einsum('ri,xra->xria', rho_o[0], rho_v[1:4])
                 tau_ov = np.einsum('xri,xra->ria', rho_o[1:4], rho_v[1:4]) * .5
                 rho_ov = np.vstack([rho_ov, tau_ov[np.newaxis]])
-                w_ov = np.einsum('xyr,xria->yria', wfxc, rho_ov) * 2
                 rho_vo = rho_ov.conj()
-                a += lib.einsum('xria,xrjb->iajb', w_ov, rho_vo)
-                b += lib.einsum('xria,xrjb->iajb', w_ov, rho_ov)
+                w_vo = np.einsum('xyr,xria->yria', wfxc, rho_vo) * 2
+                a += lib.einsum('xria,xrjb->iajb', w_vo, rho_ov)
+                b += lib.einsum('xria,xrjb->iajb', w_vo, rho_vo)
     else:
         add_hf_(a, b)
 
     return a, b
 
+def transition_velocity_dipole(tdobj, xy=None):
+    '''Transition dipole moments in the velocity gauge (imaginary part only)
+    '''
+    kpt = tdobj._scf.kpt
+    ints_p = tdobj.cell.pbc_intor('int1e_ipovlp', comp=3, hermi=0, kpts=kpt)
+    if tdobj.cell.pseudo:
+        r_vnl_commutator = get_gth_pp_nl_velgauge_commutator(tdobj.cell, q=np.zeros(3), kpts=kpt)
+    else:
+        r_vnl_commutator = 0.0
+    # velocity operator = p - i[r, V_nl]
+    # Because int1e_ipovlp is ( nabla \| ) = ( \| -nabla ) = p / i, we have
+    # Im [ vel. ] = int1e_ipovlp - [ r, V_nl ].
+    # Note that the matrix of [ r_a, V_nl ] (a = 1, 2, 3) is real and anti-Hermitian.
+    velocity_operator = ints_p - r_vnl_commutator
+    v = tdobj._contract_multipole(velocity_operator, hermi=0, xy=xy)
+    return -v
+
+def oscillator_strength(tdobj, e=None, xy=None, gauge='velocity', order=0):
+    if e is None: e = tdobj.e
+
+    if gauge == 'length':
+        raise NotImplementedError
+
+    elif gauge == 'velocity':
+        trans_dip = tdobj.transition_velocity_dipole(xy)
+        f = 2./3. * np.einsum('s,sx,sx->s', 1./e, trans_dip, trans_dip.conj()).real
+
+        if order > 0:
+            raise NotImplementedError
+    else:
+        raise ValueError(f'Unknown gauge {gauge}')
+
+    lib.logger.warn(tdobj, 'You requested oscillator strengths for a periodic system.'
+                           ' Please note that they are only intended for comparison'
+                           ' with molecular calculations.')
+
+    return f
+
 class TDBase(rhf.TDBase):
     _keys = {'cell'}
 
-    def __init__(self, mf):
-        rhf.TDBase.__init__(self, mf)
+    def __init__(self, mf, frozen=None):
+        rhf.TDBase.__init__(self, mf, frozen)
         self.cell = mf.cell
 
     def get_ab(self, mf=None):
@@ -146,21 +190,22 @@ class TDBase(rhf.TDBase):
         raise NotImplementedError
 
     get_nto = rhf.TDBase.get_nto
-    analyze = lib.invalid_method('analyze')
-    oscillator_strength = lib.invalid_method('oscillator_strength')
+    transition_velocity_dipole     = transition_velocity_dipole
+    oscillator_strength            = oscillator_strength
+    analyze                        = lib.invalid_method('analyze')
     transition_dipole              = lib.invalid_method('transition_dipole')
     transition_quadrupole          = lib.invalid_method('transition_quadrupole')
     transition_octupole            = lib.invalid_method('transition_octupole')
-    transition_velocity_dipole     = lib.invalid_method('transition_velocity_dipole')
     transition_velocity_quadrupole = lib.invalid_method('transition_velocity_quadrupole')
     transition_velocity_octupole   = lib.invalid_method('transition_velocity_octupole')
     transition_magnetic_dipole     = lib.invalid_method('transition_magnetic_dipole')
     transition_magnetic_quadrupole = lib.invalid_method('transition_magnetic_quadrupole')
+    photoabsorption_cross_section  = lib.invalid_method('photoabsorption_cross_section')
 
 
 class TDA(TDBase):
 
-    init_guess = rhf.TDA.init_guess
+    get_init_guess = rhf.TDA.get_init_guess
     kernel = rhf.TDA.kernel
     _gen_vind = rhf.TDA.gen_vind
 
@@ -179,7 +224,7 @@ CIS = TDA
 
 class TDHF(TDBase):
 
-    init_guess = rhf.TDHF.init_guess
+    get_init_guess = rhf.TDHF.get_init_guess
     kernel = rhf.TDHF.kernel
     _gen_vind = rhf.TDHF.gen_vind
     gen_vind = TDA.gen_vind

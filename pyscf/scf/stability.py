@@ -31,7 +31,7 @@ from functools import reduce
 from pyscf import lib
 from pyscf.lib import logger
 from pyscf.scf import hf, hf_symm, uhf_symm
-from pyscf.scf import _response_functions  # noqa
+from pyscf.scf import _response_functions
 from pyscf.soscf import newton_ah
 from pyscf import __config__
 
@@ -198,6 +198,7 @@ def ghf_stability(mf, verbose=None, return_status=False,
     '''
     log = logger.new_logger(mf, verbose)
     with_symmetry = True
+    # Hessian might be incorrect. see https://github.com/pyscf/pyscf/issues/2591
     g, hop, hdiag = newton_ah.gen_g_hop_ghf(mf, mf.mo_coeff, mf.mo_occ)
     hdiag *= 2
     stable = True

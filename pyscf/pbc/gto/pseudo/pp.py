@@ -25,10 +25,10 @@ For GTH/HGH PPs, see:
 
 import numpy as np
 import scipy.linalg
-import scipy.special
 from pyscf import lib
 from pyscf.gto import mole
 from pyscf.pbc.gto.pseudo import pp_int
+from pyscf.lib import Ylm
 
 def get_alphas(cell):
     '''alpha parameters from the non-divergent Hartree+Vloc G=0 term.
@@ -123,7 +123,7 @@ def get_gth_projG(cell, Gvs):
         h_ia = []
         proj_ia = []
         for l,proj in enumerate(pp[5:]):
-            rl, nl, hl = proj
+            rl, nl, hl = proj[:3]
             h_ia.append( np.array(hl) )
             proj_ia_l = []
             for m in range(-l,l+1):
@@ -203,16 +203,6 @@ def Ylm_real(l,m,theta,phi):
     else: # m == 0
         return Ylabsm.real
 
-def Ylm(l,m,theta,phi):
-    '''
-    Spherical harmonics; returns a complex number
-
-    Note the "convention" for theta and phi:
-    http://docs.scipy.org/doc/scipy-0.14.0/reference/generated/scipy.special.sph_harm.html
-    '''
-    #return scipy.special.sph_harm(m=m,n=l,theta=phi,phi=theta)
-    return scipy.special.sph_harm(m,l,phi,theta)
-
 def cart2polar(rvec):
     # The rows of rvec are the 3-component vectors
     # i.e. rvec is N x 3
@@ -267,7 +257,7 @@ def get_pp(cell, kpt=np.zeros(3)):
             continue
         pp = cell._pseudo[symb]
         for l, proj in enumerate(pp[5:]):
-            rl, nl, hl = proj
+            rl, nl, hl = proj[:3]
             if nl > 0:
                 hl = np.asarray(hl)
                 fakemol._bas[0,mole.ANG_OF] = l

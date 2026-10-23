@@ -16,8 +16,8 @@
 # Author: Qiming Sun <osirpt.sun@gmail.com>
 #
 
+import io
 import unittest
-import tempfile
 import numpy
 from pyscf import lib, gto, scf, dft
 from pyscf import tdscf
@@ -48,16 +48,14 @@ H     0.   0.7   0.7'''
     mol.spin = 1
     mol.build()
 
-    mf_lda = mol.GKS().set(xc='lda,', conv_tol=1e-12,
-                           chkfile=tempfile.NamedTemporaryFile().name).newton().run()
+    mf_lda = mol.GKS().set(xc='lda,', conv_tol=1e-12, chkfile=lib.NamedTemporaryFile().name).newton().run()
     mcol_lda = None
     if mcfun is not None:
-        mcol_lda = mol.GKS().set(xc='lda,', conv_tol=1e-12,
-                                 collinear='mcol', chkfile=tempfile.NamedTemporaryFile().name)
+        mcol_lda = mol.GKS().set(xc='lda,', conv_tol=1e-12, chkfile=lib.NamedTemporaryFile().name,
+                                  collinear='mcol')
         mcol_lda._numint.spin_samples = 6
         mcol_lda = mcol_lda.run()
-    mf_bp86 = molsym.GKS().set(xc='bp86', conv_tol=1e-12,
-                               chkfile=tempfile.NamedTemporaryFile().name).run()
+    mf_bp86 = molsym.GKS().set(xc='bp86', conv_tol=1e-12, chkfile=lib.NamedTemporaryFile().name).run()
 
 def tearDownModule():
     global mol, molsym, mf_bp86, mf_lda, mcol_lda
@@ -77,6 +75,15 @@ def diagonalize(a, b, nroots=4):
     return lowest_e
 
 class KnownValues(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.original_grids = dft.radi.ATOM_SPECIFIC_TREUTLER_GRIDS
+        dft.radi.ATOM_SPECIFIC_TREUTLER_GRIDS = False
+
+    @classmethod
+    def tearDownClass(cls):
+        dft.radi.ATOM_SPECIFIC_TREUTLER_GRIDS = cls.original_grids
+
     def test_tddft_lda(self):
         td = mf_lda.TDDFT()
         es = td.kernel(nstates=4)[0]
@@ -196,6 +203,73 @@ class KnownValues(unittest.TestCase):
         es = td.kernel()[0]
         self.assertAlmostEqual(lib.fp(es), 0.45050838461527387, 6)
 
+    def test_set_frozen(self):
+        td = mf_bp86.TDA()
+        td.frozen = 4
+        mask = td.get_frozen_mask()
+        self.assertEqual(mask.sum(), 22)
+        td.set_frozen()
+        mask = td.get_frozen_mask()
+        self.assertEqual(mask.sum(), 24)
+        td.frozen = [0,1]
+        mask = td.get_frozen_mask()
+        self.assertEqual(mask.sum(), 24)
+
+    def test_transition_moments(self):
+        # The singlets of a closed-shell GHF reproduce RHF, and the triplets
+        # carry no transition moment. All excited states are solved for, so
+        # that every singlet is found.
+        h2o = gto.M(atom='O 0 0 0; H 0 -.757 .587; H 0 .757 .587',
+                    basis='sto-3g', verbose=0)
+        rmf = scf.RHF(h2o).run(conv_tol=1e-11)
+        gmf = scf.GHF(h2o).run(conv_tol=1e-11)
+        nocc = numpy.count_nonzero(rmf.mo_occ > 0)
+        nsinglet = nocc * (rmf.mo_occ.size - nocc)
+        nstates = nsinglet * 4  # singlets and the three triplet components
+        for method in ('TDA', 'TDHF'):
+            rtd = getattr(rmf, method)().run(nstates=nsinglet)
+            gtd = getattr(gmf, method)().set(conv_tol=1e-9).run(nstates=nstates)
+            self.assertEqual(gtd.e.size, nstates)
+            f_ghf = gtd.oscillator_strength()
+            singlets = [numpy.argmin(abs(gtd.e - e)) for e in rtd.e]
+            self.assertAlmostEqual(abs(gtd.e[singlets] - rtd.e).max(), 0, 7)
+            self.assertAlmostEqual(abs(f_ghf[singlets] - rtd.oscillator_strength()).max(), 0, 7)
+            triplets = numpy.setdiff1d(numpy.arange(nstates), singlets)
+            self.assertEqual(triplets.size, nsinglet * 3)
+            self.assertAlmostEqual(abs(f_ghf[triplets]).max(), 0, 9)
+            self.assertAlmostEqual(abs(abs(gtd.transition_velocity_dipole()[singlets]) -
+                                       abs(rtd.transition_velocity_dipole())).max(), 0, 6)
+            self.assertAlmostEqual(abs(abs(gtd.transition_magnetic_dipole()[singlets]) -
+                                       abs(rtd.transition_magnetic_dipole())).max(), 0, 6)
+
+        # A GHF singlet splits each NTO weight of RHF between alpha and beta
+        rtd = rmf.TDA().run(nstates=nsinglet)
+        gtd = gmf.TDA().set(conv_tol=1e-9).run(nstates=nstates)
+        w_rhf = rtd.get_nto(1, verbose=0)[0]
+        w_ghf, nto = gtd.get_nto(numpy.argmin(abs(gtd.e - rtd.e[0])) + 1, verbose=0)
+        self.assertAlmostEqual(abs(w_ghf[:4].reshape(2,2).sum(axis=1) - w_rhf[:2]).max(), 0, 7)
+        self.assertEqual(nto.shape, gmf.mo_coeff.shape)
+
+        # Open-shell GHF reproduces UHF
+        ion = gto.M(atom='O 0 0 0; H 0 -.757 .587; H 0 .757 .587', basis='sto-3g',
+                    charge=1, spin=1, verbose=0)
+        gmf = scf.GHF(ion).run(conv_tol=1e-11)
+        nocc = numpy.count_nonzero(gmf.mo_occ > 0)
+        utd = scf.UHF(ion).run(conv_tol=1e-11).TDA().run(nstates=3)
+        gtd = gmf.TDA().set(conv_tol=1e-9).run(nstates=nocc*(gmf.mo_occ.size-nocc))
+        idx = [numpy.argmin(abs(gtd.e - e)) for e in utd.e]
+        self.assertAlmostEqual(abs(gtd.e[idx] - utd.e).max(), 0, 6)
+        self.assertAlmostEqual(abs(gtd.oscillator_strength()[idx] -
+                                   utd.oscillator_strength()).max(), 0, 7)
+
+    def test_analyze(self):
+        td = mf_bp86.TDA().run(nstates=4)
+        td.verbose = 4
+        td.stdout = io.StringIO()
+        td.analyze()
+        out = td.stdout.getvalue()
+        self.assertEqual(out.count('Excited State'), 4)
+        self.assertIn('Transition magnetic dipole moments', out)
 
 if __name__ == "__main__":
     print("Full Tests for TD-GKS")

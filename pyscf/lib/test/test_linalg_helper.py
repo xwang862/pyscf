@@ -146,6 +146,30 @@ class KnownValues(unittest.TestCase):
         c = linalg_helper.krylov(aop, b, lindep=1e-14)
         self.assertAlmostEqual(abs(ref - c).max(), 0, 7)
 
+    def test_krylov_near_dependent_roots(self):
+        tol = 1e-9
+        lindep = max(tol**2, numpy.finfo(float).eps)
+        a = numpy.diag([.1, .2])
+        b = numpy.array([[1., 0.], [1., 3e-8]])
+
+        aop = lambda x: x.dot(a.T)
+        c = linalg_helper.krylov(aop, b, tol=tol, lindep=lindep)
+        residual = abs(aop(c) + c - b).max()
+        self.assertLess(residual, tol)
+
+    def test_krylov_zero_force(self):
+        numpy.random.seed(10)
+        n = 2
+        a = numpy.random.rand(n,n) * .1
+        a = a.dot(a.T)
+        a_diag = numpy.random.rand(n)
+        b = numpy.zeros((3, n))
+        a -= numpy.eye(n)
+
+        aop = lambda x: (a.dot(x.T).T/a_diag)
+        c = linalg_helper.krylov(aop, b/a_diag, max_cycle=18, lindep=1e-15)
+        self.assertAlmostEqual(abs(c).max(), 0, 9)
+
     def test_dgeev(self):
         numpy.random.seed(12)
         n = 100

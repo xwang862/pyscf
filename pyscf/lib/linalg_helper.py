@@ -23,12 +23,12 @@ Extension to scipy.linalg module
 import sys
 import inspect
 import warnings
-from functools import reduce
 import numpy
 import scipy.linalg
 from pyscf.lib import logger
 from pyscf.lib import numpy_helper
 from pyscf.lib import misc
+from pyscf.lib.exceptions import LinearDependencyError
 from pyscf import __config__
 
 SAFE_EIGH_LINDEP = getattr(__config__, 'lib_linalg_helper_safe_eigh_lindep', 1e-15)
@@ -79,7 +79,7 @@ def safe_eigh(h, s, lindep=SAFE_EIGH_LINDEP):
     mask = seig >= lindep
     t = t[:,mask] * (1/numpy.sqrt(seig[mask]))
     if t.size > 0:
-        heff = reduce(numpy.dot, (t.T.conj(), h, t))
+        heff = t.conj().T.dot(h).dot(t)
         w, v = scipy.linalg.eigh(heff)
         v = numpy.dot(t, v)
     else:
@@ -129,7 +129,7 @@ def eigh_by_blocks(h, s=None, labels=None):
     >>> from pyscf import gto, lib, symm
     >>> mol = gto.M(atom='H 0 0 0; H 0 0 1', basis='ccpvdz', symmetry=True)
     >>> c = numpy.hstack(mol.symm_orb)
-    >>> vnuc_so = reduce(numpy.dot, (c.T, mol.intor('int1e_nuc_sph'), c))
+    >>> vnuc_so = c.T.dot(mol.intor('int1e_nuc_sph')).dot(c)
     >>> orbsym = symm.label_orb_symm(mol, mol.irrep_name, mol.symm_orb, c)
     >>> lib.eigh_by_blocks(vnuc_so, labels=orbsym)
     (array([-4.50766885, -1.80666351, -1.7808565 , -1.7808565 , -1.74189134,
@@ -146,7 +146,7 @@ def eigh_by_blocks(h, s=None, labels=None):
         p0 = 0
         for label in set(labels):
             idx = labels == label
-            e, c = scipy.linalg.eigh(h[idx][:,idx])
+            e, c = scipy.linalg.eigh(h[idx[:,None],idx])
             cs[idx,p0:p0+e.size] = c
             es.append(e)
             p0 = p0 + e.size
@@ -154,7 +154,7 @@ def eigh_by_blocks(h, s=None, labels=None):
         p0 = 0
         for label in set(labels):
             idx = labels == label
-            e, c = scipy.linalg.eigh(h[idx][:,idx], s[idx][:,idx])
+            e, c = scipy.linalg.eigh(h[idx[:,None],idx], s[idx[:,None],idx])
             cs[idx,p0:p0+e.size] = c
             es.append(e)
             p0 = p0 + e.size
@@ -373,7 +373,7 @@ def davidson1(aop, x0, precond, tol=1e-12, max_cycle=50, max_space=12,
     if isinstance(verbose, logger.Logger):
         log = verbose
     else:
-        log = logger.Logger(sys.stdout, verbose)
+        log = logger.Logger(misc.StreamObject.stdout, verbose)
 
     if tol_residual is None:
         toloose = numpy.sqrt(tol)
@@ -441,7 +441,7 @@ def davidson1(aop, x0, precond, tol=1e-12, max_cycle=50, max_space=12,
 
         axt = aop(xt)
         for k, xi in enumerate(xt):
-            xs.append(xt[k])
+            xs.append(xi)
             ax.append(axt[k])
         rnow = len(xt)
         head, space = space, space+rnow
@@ -598,7 +598,7 @@ def pick_real_eigs(w, v, nroots, envs):
     abs_imag = abs(w.imag)
     # Grab `nroots` number of e with small(est) imaginary components
     max_imag_tol = max(threshold, numpy.sort(abs_imag)[min(w.size,nroots)-1])
-    real_idx = numpy.where((abs_imag <= max_imag_tol))[0]
+    real_idx = numpy.where(abs_imag <= max_imag_tol)[0]
     nbelow_thresh = numpy.count_nonzero(abs_imag[real_idx] < threshold)
     if nbelow_thresh < nroots and w.size >= nroots:
         warnings.warn('Only %d eigenvalues (out of %3d requested roots) with imaginary part < %4.3g.\n'
@@ -747,7 +747,7 @@ def davidson_nosym1(aop, x0, precond, tol=1e-12, max_cycle=50, max_space=20,
     if isinstance(verbose, logger.Logger):
         log = verbose
     else:
-        log = logger.Logger(sys.stdout, verbose)
+        log = logger.Logger(misc.StreamObject.stdout, verbose)
 
     if tol_residual is None:
         toloose = numpy.sqrt(tol)
@@ -804,7 +804,7 @@ def davidson_nosym1(aop, x0, precond, tol=1e-12, max_cycle=50, max_space=20,
 
         axt = aop(xt)
         for k, xi in enumerate(xt):
-            xs.append(xt[k])
+            xs.append(xi)
             ax.append(axt[k])
         rnow = len(xt)
         head, space = space, space+rnow
@@ -916,8 +916,8 @@ def davidson_nosym1(aop, x0, precond, tol=1e-12, max_cycle=50, max_space=20,
     if numpy.any(enorm):
         warnings.warn("{:d} davidson root{_s}: {} {_has} very small norm{_s}: {}".format(
             enorm.sum(),
-            ", ".join("#{:d}".format(i) for i in numpy.argwhere(enorm)[:, 0]),
-            ", ".join("{:.3e}".format(i) for i in xnorm[enorm]),
+            ", ".join(f"#{i:d}" for i in numpy.argwhere(enorm)[:, 0]),
+            ", ".join(f"{i:.3e}" for i in xnorm[enorm]),
             _s='s' if enorm.sum() > 1 else "",
             _has="have" if enorm.sum() > 1 else "has a",
         ))
@@ -1058,7 +1058,7 @@ def dgeev1(abop, x0, precond, type=1, tol=1e-12, max_cycle=50, max_space=12,
     if isinstance(verbose, logger.Logger):
         log = verbose
     else:
-        log = logger.Logger(sys.stdout, verbose)
+        log = logger.Logger(misc.StreamObject.stdout, verbose)
 
     if tol_residual is None:
         toloose = numpy.sqrt(tol) * 1e-2
@@ -1104,7 +1104,7 @@ def dgeev1(abop, x0, precond, type=1, tol=1e-12, max_cycle=50, max_space=12,
         if type > 1:
             axt = abop(bxt)[0]
         for k, xi in enumerate(xt):
-            xs.append(xt[k])
+            xs.append(xi)
             ax.append(axt[k])
             bx.append(bxt[k])
         rnow = len(xt)
@@ -1279,10 +1279,13 @@ def krylov(aop, b, x0=None, tol=1e-10, max_cycle=30, dot=numpy.dot,
 
     if nroots > 1:
         # Not exactly QR, vectors are orthogonal but not normalized
-        x1, rmat = _qr(x1, dot)
+        x1, rmat = _qr(x1, dot, lindep)
         x1 *= rmat.diagonal()[:,None]
         innerprod = (rmat.diagonal().real ** 2).tolist()
-        max_innerprod = max(innerprod)
+        if innerprod:
+            max_innerprod = max(innerprod)
+        else:
+            max_innerprod = 0
     else:
         max_innerprod = dot(x1[0].conj(), x1[0]).real
         innerprod = [max_innerprod]
@@ -1320,7 +1323,7 @@ def krylov(aop, b, x0=None, tol=1e-10, max_cycle=30, dot=numpy.dot,
         axt = None
 
         if nroots > 1:
-            x1, rmat = _qr(x1, dot)
+            x1, rmat = _qr(x1, dot, lindep)
             x1 *= rmat.diagonal()[:,None]
             innerprod1 = rmat.diagonal().real ** 2
         else:
@@ -1506,9 +1509,7 @@ def _normalize_xt_(xt, xs, threshold, dot):
     return out, norm_min
 
 
-class LinearDependenceError(RuntimeError):
-    pass
-
+LinearDependenceError = LinearDependencyError
 
 class _Xlist(list):
     def __init__(self):

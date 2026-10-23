@@ -23,3 +23,9 @@ class PointGroupSymmetryError(RuntimeError):
 
 class WfnSymmetryError(RuntimeError):
     pass
+
+class LinearDependencyError(RuntimeError):
+    pass
+
+class DeprecationWarning(UserWarning):
+    pass

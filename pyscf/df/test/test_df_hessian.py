@@ -17,7 +17,6 @@
 
 import os
 import unittest
-import tempfile
 import numpy
 from pyscf import lib
 from pyscf import gto
@@ -47,6 +46,38 @@ class KnownValues(unittest.TestCase):
         href = scf.RHF(mol).run().Hessian().kernel()
         h1 = scf.RHF(mol).density_fit().run().Hessian().kernel()
         self.assertAlmostEqual(abs(href - h1).max(), 0, 3)
+
+    def test_hess_in_range_coulomb_context(self):
+        # omega set on mol has to reach the metric (P|Q) as well as the
+        # 3-center integrals (P|uv), as for the gradients in issue #3434
+        omega = 0.3
+        mf = scf.RHF(mol).density_fit().run()
+        hobj = mf.Hessian()
+        with mf.with_df.range_coulomb(omega):
+            eref = hobj.partial_hess_elec()
+            h1ref = numpy.asarray(hobj.make_h1(mf.mo_coeff, mf.mo_occ))
+        with mol.with_range_coulomb(omega):
+            e1 = hobj.partial_hess_elec()
+            h1 = numpy.asarray(hobj.make_h1(mf.mo_coeff, mf.mo_occ))
+        self.assertAlmostEqual(abs(eref - e1).max(), 0, 9)
+        self.assertAlmostEqual(abs(h1ref - h1).max(), 0, 9)
+
+    def test_uhf_hess_in_range_coulomb_context(self):
+        omega = 0.3
+        mol1 = mol.copy()
+        mol1.charge = 1
+        mol1.spin = 1
+        mol1.build()
+        mf = scf.UHF(mol1).density_fit().run()
+        hobj = mf.Hessian()
+        with mf.with_df.range_coulomb(omega):
+            eref = hobj.partial_hess_elec()
+            h1ref = numpy.asarray(hobj.make_h1(mf.mo_coeff, mf.mo_occ))
+        with mol1.with_range_coulomb(omega):
+            e1 = hobj.partial_hess_elec()
+            h1 = numpy.asarray(hobj.make_h1(mf.mo_coeff, mf.mo_occ))
+        self.assertAlmostEqual(abs(eref - e1).max(), 0, 9)
+        self.assertAlmostEqual(abs(h1ref - h1).max(), 0, 9)
 
     def test_rks_lda_hess(self):
         href = mol.RKS.run(xc='lda,vwn').Hessian().kernel()
@@ -88,6 +119,14 @@ class KnownValues(unittest.TestCase):
         df_h = mol.UKS.density_fit().run(xc='camb3lyp').Hessian()
         df_h.auxbasis_response = 2
         h1 = df_h.kernel()
+        self.assertAlmostEqual(abs(href - h1).max(), 0, 4)
+
+    def test_uks_lda_hess(self):
+        href = mol.UKS.run(xc='svwn').Hessian().kernel()
+        mf = mol.UKS(xc='svwn').density_fit().run()
+        df_hess = mf.Hessian()
+        df_hess.auxbasis_response = 2
+        h1 = df_hess.kernel()
         self.assertAlmostEqual(abs(href - h1).max(), 0, 4)
 
 if __name__ == "__main__":

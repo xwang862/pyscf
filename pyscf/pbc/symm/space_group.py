@@ -43,7 +43,7 @@ def transform_rot(op, a, b, allow_non_integer=False):
             Basis vectors of :math:`\mathbf{b}` basis system (row-major).
         allow_non_integer : bool
             Whether to allow non-integer rotation matrix in the new basis system.
-            Defualt value is False.
+            Default value is False.
 
     Returns:
         A (3,3) array
@@ -79,7 +79,7 @@ def transform_trans(op, a, b):
     return np.dot(op, P.T)
 
 
-class SPGElement():
+class SPGElement:
     '''
     Matrix representation of space group operations
 
@@ -93,7 +93,7 @@ class SPGElement():
     '''
     def __init__(self,
                  rot=np.eye(3, dtype=np.int32),
-                 trans=np.zeros((3)), dimension=3):
+                 trans=np.zeros(3), dimension=3):
         self.rot = np.asarray(rot)
         self.trans = np.asarray(trans)
         self.dimension = dimension

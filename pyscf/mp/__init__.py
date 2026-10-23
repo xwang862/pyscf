@@ -20,8 +20,12 @@ from pyscf import scf
 from pyscf.mp import mp2
 from pyscf.mp import dfmp2
 from pyscf.mp import ump2
+from pyscf.mp import dfump2
+from pyscf.mp import dfromp2
+from pyscf.mp import romp2
 from pyscf.mp import gmp2
 from pyscf.mp import dfgmp2
+from pyscf.mp import cabs
 
 def MP2(mf, frozen=None, mo_coeff=None, mo_occ=None):
     if mf.istype('UHF'):
@@ -38,6 +42,10 @@ def RMP2(mf, frozen=None, mo_coeff=None, mo_occ=None):
     if mf.istype('UHF'):
         raise RuntimeError('RMP2 cannot be used with UHF method.')
     elif mf.istype('ROHF'):
+        if mo_coeff is None and mo_occ is None:
+            if getattr(mf, 'with_df', None):
+                return dfromp2.DFROMP2(mf, frozen)
+            return romp2.ROMP2(mf, frozen)
         lib.logger.warn(mf, 'RMP2 method does not support ROHF method. ROHF object '
                         'is converted to UHF object and UMP2 method is called.')
         return UMP2(mf, frozen, mo_coeff, mo_occ)
@@ -58,11 +66,29 @@ def UMP2(mf, frozen=None, mo_coeff=None, mo_occ=None):
         mf = mf.to_uhf()
 
     if getattr(mf, 'with_df', None):
-        #raise NotImplementedError('DF-UMP2')
-        return ump2.UMP2(mf, frozen, mo_coeff, mo_occ)
+        return dfump2.DFUMP2(mf, frozen, mo_coeff, mo_occ)
     else:
         return ump2.UMP2(mf, frozen, mo_coeff, mo_occ)
 UMP2.__doc__ = ump2.UMP2.__doc__
+
+def ROMP2(mf, frozen=None, mo_coeff=None, mo_occ=None):
+    '''Semi-canonical ROMP2 for ROHF/ROKS references.
+
+    With a density-fitting mean-field object (or the ``with_df`` attribute),
+    this returns the DF-ROMP2 object; otherwise the 4-center-integral ROMP2
+    object is returned.
+    '''
+    mf = mf.remove_soscf()
+    if not mf.istype('ROHF'):
+        raise RuntimeError('ROMP2 requires an ROHF (or ROKS) reference.')
+    if mo_coeff is not None or mo_occ is not None:
+        raise NotImplementedError('ROMP2 does not support custom mo_coeff/'
+                                  'mo_occ. The ROHF orbitals are always '
+                                  'semi-canonicalized.')
+    if getattr(mf, 'with_df', None):
+        return dfromp2.DFROMP2(mf, frozen)
+    return romp2.ROMP2(mf, frozen)
+ROMP2.__doc__ = dfromp2.DFROMP2.__doc__
 
 def GMP2(mf, frozen=None, mo_coeff=None, mo_occ=None):
     mf = mf.remove_soscf()

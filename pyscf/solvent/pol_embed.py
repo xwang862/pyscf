@@ -49,12 +49,13 @@ import cppe
 from packaging.version import parse as _parse_version
 min_version = '0.3.1'
 if _parse_version(cppe.__version__) < _parse_version(min_version):
-    raise ModuleNotFoundError("cppe version {} is required at least. "
-                              "Version {} was found.".format(min_version, cppe.__version__))
+    raise ModuleNotFoundError(f"cppe version {min_version} is required at least. "
+                              f"Version {cppe.__version__} was found.")
 
 from pyscf import lib
 from pyscf.lib import logger
 from pyscf import gto
+from pyscf import scf
 from pyscf import df
 from pyscf.solvent import _attach_solvent
 from pyscf.data import elements
@@ -84,14 +85,54 @@ def pe_for_post_scf(method, solvent_obj, dm=None):
         solvent_obj = PolEmbed(method.mol, solvent_obj)
     return _attach_solvent._for_post_scf(method, solvent_obj, dm)
 
-@lib.with_doc(_attach_solvent._for_tdscf.__doc__)
-def pe_for_tdscf(method, solvent_obj, dm=None):
-    scf_solvent = getattr(method._scf, 'with_solvent', None)
-    assert scf_solvent is None or isinstance(scf_solvent, PolEmbed)
+def pe_for_tdscf(method, solvent_obj=None, dm=None, equilibrium_solvation=False):
+    assert hasattr(method._scf, 'with_solvent')
+    if solvent_obj is None:
+        if isinstance(method, _attach_solvent._Solvation):
+            return method
+        solvent_obj = method._scf.with_solvent.copy()
+        solvent_obj.equilibrium_solvation = equilibrium_solvation
 
-    if not isinstance(solvent_obj, PolEmbed):
-        solvent_obj = PolEmbed(method.mol, solvent_obj)
-    return _attach_solvent._for_tdscf(method, solvent_obj, dm)
+    if isinstance(method, _attach_solvent._Solvation):
+        method = method.copy()
+        method.with_solvent = solvent_obj
+        return method
+
+    if dm is not None:
+        solvent_obj.e, solvent_obj.v = solvent_obj.kernel(dm)
+        solvent_obj.frozen = True
+        if solvent_obj.equilibrium_solvation:
+            raise RuntimeError(
+                '"frozen" solvent model conflicts to the assumption of equilibrium solvation.')
+
+    sol_td = TDSCFWithSolvent(method, solvent_obj)
+    name = solvent_obj.__class__.__name__ + method.__class__.__name__
+    return lib.set_class(sol_td, (TDSCFWithSolvent, method.__class__), name)
+
+class TDSCFWithSolvent(_attach_solvent.TDSCFWithSolvent):
+    def gen_response(self, *args, **kwargs):
+        # vind computes the response in gas-phase
+        vind = self._scf.undo_solvent().gen_response(
+            *args, with_nlc=not self.exclude_nlc, **kwargs)
+
+        with_solvent = self.with_solvent
+        is_uhf = isinstance(self._scf, scf.uhf.UHF)
+        singlet = kwargs.get('singlet', True)
+        singlet = singlet or singlet is None
+        def vind_with_solvent(dm1):
+            v = vind(dm1)
+            if with_solvent.equilibrium_solvation:
+                if is_uhf:
+                    v += with_solvent._B_dot_x(dm1[0]+dm1[1])
+                elif singlet:
+                    v += with_solvent._B_dot_x(dm1)
+                else:
+                    pass
+            return v
+        return vind_with_solvent
+
+    get_ab = NotImplemented
+    nuc_grad_method = NotImplemented
 
 
 # data from https://doi.org/10.1021/acs.jctc.9b01162
@@ -217,6 +258,10 @@ class PolEmbed(lib.StreamObject):
         self.v = None
         self._dm = None
 
+    def build(self):
+        # To make API compatible with the implementations of other solvent models
+        return self
+
     def dump_flags(self, verbose=None):
         logger.info(self, '******** %s flags ********', self.__class__)
         options = self.cppe_state.options
@@ -244,14 +289,12 @@ class PolEmbed(lib.StreamObject):
         '''Reset mol and clean up relevant attributes for scanner mode'''
         if mol is not None:
             self.mol = mol
-        self.cppe_state = self._create_cppe_state(mol)
+        self.cppe_state = self._create_cppe_state(self.mol)
         self.potentials = self.cppe_state.potentials
         self.V_es = None
         return self
 
     def kernel(self, dm, elec_only=False):
-        '''
-        '''
         if not (isinstance(dm, numpy.ndarray) and dm.ndim == 2):
             # spin-traced DM for UHF or ROHF
             dm = dm[0] + dm[1]
@@ -451,7 +494,7 @@ if __name__ == '__main__':
            1        0.000000   -0.935307   -1.082500
                 ''', basis='sto3g')
     mf = mol.RHF()
-    with tempfile.NamedTemporaryFile() as f:
+    with lib.NamedTemporaryFile() as f:
         f.write(b'''!
 @COORDINATES
 3

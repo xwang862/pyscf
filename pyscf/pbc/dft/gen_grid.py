@@ -69,11 +69,21 @@ class UniformGrids(lib.StreamObject):
         self.cell = cell
         self.stdout = cell.stdout
         self.verbose = cell.verbose
-        self.mesh = cell.mesh
+        self._mesh = None
         self.non0tab = None
 
         self._coords = None
         self._weights = None
+
+    @property
+    def mesh(self):
+        # Follow the current cell unless a grid mesh was explicitly assigned.
+        if self._mesh is None:
+            return self.cell.mesh
+        return self._mesh
+    @mesh.setter
+    def mesh(self, value):
+        self._mesh = value
 
     @property
     def coords(self):
@@ -98,6 +108,10 @@ class UniformGrids(lib.StreamObject):
     def weights(self, x):
         self._weights = x
 
+    @property
+    def size(self):
+        return np.prod(self.mesh)
+
     def build(self, cell=None, with_non0tab=False):
         if cell is None:
             cell = self.cell
@@ -113,6 +127,9 @@ class UniformGrids(lib.StreamObject):
     def reset(self, cell=None):
         if cell is not None:
             self.cell = cell
+        self.non0tab = None
+        self._coords = None
+        self._weights = None
         return self
 
     def dump_flags(self, verbose=None):
@@ -157,8 +174,9 @@ def get_becke_grids(cell, atom_grid={}, radi_method=dft.radi.gauss_chebyshev,
         dimension = cell.dimension
     else:
         dimension = 3
-    rcut = pbc_eval_gto._estimate_rcut(cell)
-    Ls = pbc_eval_gto.get_lattice_Ls(cell, rcut=rcut.max())
+
+    rcut = pbc_eval_gto._estimate_rcut(cell).max()
+    Ls = pbc_eval_gto.get_lattice_Ls(cell, rcut=rcut)
 
     atm_coords = Ls.reshape(-1,1,3) + cell.atom_coords()
     atom_grids_tab = gen_atomic_grids(cell, atom_grid, radi_method, level, prune)

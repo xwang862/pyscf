@@ -20,7 +20,7 @@ from pyscf import scf, dft
 from pyscf.solvent import smd
 
 def setUpModule():
-    global mol, epsilon, lebedev_order
+    global mol, epsilon
     mol = gto.Mole()
     mol.atom = '''
 O       0.0000000000    -0.0000000000     0.1174000000
@@ -30,7 +30,6 @@ H       0.7570000000     0.0000000000    -0.4696000000
     mol.basis = 'def2-tzvpp'
     mol.output = '/dev/null'
     mol.build()
-    lebedev_order = 29
 
 def tearDownModule():
     global mol
@@ -46,7 +45,6 @@ def _check_smd(atom, e_ref, solvent='water'):
     smdobj = smd.SMD(mol)
     smdobj.solvent = solvent
     smdobj.sasa_ng = 590
-    smdobj.lebedev_order = 29
     e_cds = smdobj.get_cds() * 627.509 # in kcal/mol
     mol.stdout.close()
     assert numpy.abs(e_cds - e_ref) < 1e-3
@@ -228,6 +226,52 @@ H -0.595 -0.476 -0.824
     '''
         _check_smd(atom, 2.1279, solvent='water')
         _check_smd(atom, -0.9778, solvent='toluene')
+
+class NamedSolvent(unittest.TestCase):
+    def test_solvent_name_matching(self):
+        for name, ref in (('Water', 'water'),
+                          ('THF', 'tetrahydrofuran'),
+                          ('hexane', 'n-hexane')):
+            self.assertEqual(smd.SMD(mol, solvent=name).solvent, ref)
+            self.assertEqual(mol.RHF().SMD(name).with_solvent.solvent, ref)
+
+    def test_unknown_solvent(self):
+        self.assertRaises(RuntimeError, smd.SMD, mol, 'unobtainium')
+
+    def test_default_solvent(self):
+        smdobj = smd.SMD(mol)
+        self.assertEqual(smdobj.solvent, '')
+        self.assertIsNone(smdobj.eps)
+
+class OpticalDielectric(unittest.TestCase):
+    def test_eps_optical_from_solvent_db(self):
+        # issue #3372
+        for solvent in ('water', 'toluene', 'methanol', 'tetrahydrofuran'):
+            smdobj = smd.SMD(mol, solvent=solvent)
+            n = smd.solvent_db[solvent][0]
+            self.assertAlmostEqual(smdobj.get_eps_optical(), n**2, 12)
+
+    def test_eps_optical_from_sol_desc(self):
+        smdobj = smd.SMD(mol)
+        smdobj.sol_desc = smd.solvent_db['toluene']
+        self.assertAlmostEqual(smdobj.get_eps_optical(), 1.4961**2, 12)
+
+    def test_eps_optical_overwrite(self):
+        smdobj = smd.SMD(mol, solvent='toluene')
+        smdobj.eps_optical = 1.78
+        self.assertAlmostEqual(smdobj.get_eps_optical(), 1.78, 12)
+
+    def test_eps_optical_from_solvent_name_matching(self):
+        smdobj = smd.SMD(mol, solvent='DMSO')
+        self.assertEqual(smdobj.solvent, 'dimethylsulfoxide')
+        n = smd.solvent_db['dimethylsulfoxide'][0]
+        self.assertAlmostEqual(smdobj.get_eps_optical(), n**2, 12)
+
+    def test_eps_optical_unknown_solvent(self):
+        # n is unknown. The value of water is assumed.
+        smdobj = smd.SMD(mol)
+        smdobj.eps = 2.3741
+        self.assertAlmostEqual(smdobj.get_eps_optical(), 1.78, 12)
 
 if __name__ == "__main__":
     print("Full Tests for SMDs")

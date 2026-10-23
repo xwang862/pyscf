@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-# Copyright 2014-2019 The PySCF Developers. All Rights Reserved.
+# Copyright 2014-2026 The PySCF Developers. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -32,8 +32,9 @@ from pyscf.pbc.scf import khf
 from pyscf.pbc.scf import uhf as pbcuhf
 from pyscf import lib
 from pyscf.lib import logger
+from pyscf.data import nist
 from pyscf.pbc.scf import addons
-from pyscf.pbc.scf import chkfile  # noqa
+from pyscf.pbc.scf import chkfile
 from pyscf import __config__
 
 PRE_ORTH_METHOD = getattr(__config__, 'pbc_scf_analyze_pre_orth_method', 'ANO')
@@ -49,7 +50,7 @@ def make_rdm1(mo_coeff_kpts, mo_occ_kpts, **kwargs):
     Returns:
         dm_kpts : (2, nkpts, nao, nao) ndarray
     '''
-    nkpts = len(mo_occ_kpts[0])
+    nkpts = len(mo_coeff_kpts[0])
     nao, nmo = mo_coeff_kpts[0][0].shape
     def make_dm(mos, occs):
         return [np.dot(mos[k]*occs[k], mos[k].T.conj()) for k in range(nkpts)]
@@ -108,16 +109,18 @@ def get_fermi(mf, mo_energy_kpts=None, mo_occ_kpts=None):
     if mo_energy_kpts is None: mo_energy_kpts = mf.mo_energy
     if mo_occ_kpts is None: mo_occ_kpts = mf.mo_occ
 
-    # mo_energy_kpts and mo_occ_kpts are k-point UHF quantities
-    assert (mo_energy_kpts[0][0].ndim == 1)
-    assert (mo_occ_kpts[0][0].ndim == 1)
+    assert mo_energy_kpts[0][0].ndim == 1
+    assert mo_occ_kpts[0][0].ndim == 1
 
-    nocca = sum(mo_occ.sum() for mo_occ in mo_occ_kpts[0])
-    noccb = sum(mo_occ.sum() for mo_occ in mo_occ_kpts[1])
+    if isinstance(mo_occ_kpts[0], np.ndarray):
+        nocca = mo_occ_kpts[0].sum()
+        noccb = mo_occ_kpts[1].sum()
+    else:
+        nocca = sum(mo_occ.sum() for mo_occ in mo_occ_kpts[0])
+        noccb = sum(mo_occ.sum() for mo_occ in mo_occ_kpts[1])
     # nocc may not be perfect integer when smearing is enabled
     nocca = int(nocca.round(3))
     noccb = int(noccb.round(3))
-
     fermi_a = np.sort(np.hstack(mo_energy_kpts[0]))[nocca-1]
     fermi_b = np.sort(np.hstack(mo_energy_kpts[1]))[noccb-1]
 
@@ -142,31 +145,53 @@ def get_occ(mf, mo_energy_kpts=None, mo_coeff_kpts=None):
     if mo_energy_kpts is None: mo_energy_kpts = mf.mo_energy
 
     nocc_a, nocc_b = mf.nelec
-    mo_energy = np.sort(np.hstack(mo_energy_kpts[0]))
-    fermi_a = mo_energy[nocc_a-1]
-    mo_occ_kpts = [[], []]
-    for mo_e in mo_energy_kpts[0]:
-        mo_occ_kpts[0].append((mo_e <= fermi_a).astype(np.double))
-    if nocc_a < len(mo_energy):
-        logger.info(mf, 'alpha HOMO = %.12g  LUMO = %.12g', fermi_a, mo_energy[nocc_a])
-    else:
-        logger.info(mf, 'alpha HOMO = %.12g  (no LUMO because of small basis) ', fermi_a)
+    mo_energy_kpts = np.asarray(mo_energy_kpts)
+    mo_energy_a = np.sort(mo_energy_kpts[0].ravel())
+    nmo = mo_energy_a.size
+    if nocc_a > nmo or nocc_b > nmo:
+        raise RuntimeError('Failed to assign mo_occ. '
+                           f'nelec ({nocc_a}, {nocc_b}) > Nmo ({nmo})')
 
+    fermi_a = mo_energy_a[nocc_a-1]
+    mo_energy_b = np.sort(mo_energy_kpts[1].ravel())
     if nocc_b > 0:
-        mo_energy = np.sort(np.hstack(mo_energy_kpts[1]))
-        fermi_b = mo_energy[nocc_b-1]
-        for mo_e in mo_energy_kpts[1]:
-            mo_occ_kpts[1].append((mo_e <= fermi_b).astype(np.double))
-        if nocc_b < len(mo_energy):
-            logger.info(mf, 'beta HOMO = %.12g  LUMO = %.12g', fermi_b, mo_energy[nocc_b])
-        else:
-            logger.info(mf, 'beta HOMO = %.12g  (no LUMO because of small basis) ', fermi_b)
+        nmo = mo_energy_b.size
+        fermi_b = mo_energy_b[nocc_b-1]
     else:
-        for mo_e in mo_energy_kpts[1]:
-            mo_occ_kpts[1].append(np.zeros_like(mo_e))
+        fermi_b = -np.inf
+    fermi = np.array([fermi_a, fermi_b])
+    mo_occ_kpts = np.zeros_like(mo_energy_kpts)
+    mo_occ_kpts[mo_energy_kpts <= fermi[:,None,None]] = 1
+
+    if 0 < nocc_a < nmo and nocc_b < nmo:
+        homo = homo_a = fermi_a
+        homo_b = None
+        if nocc_b > 0:
+            homo = max(homo, fermi_b)
+        lumo = lumo_b = mo_energy_b[nocc_b]
+        lumo_a = None
+        if nocc_a < nmo:
+            lumo_a = mo_energy_a[nocc_a]
+            lumo = min(lumo, lumo_a)
+        gap = (lumo - homo) * nist.HARTREE2EV
+        mf.scf_summary['gap'] = gap
+
+        if lumo_a is not None:
+            logger.info(mf, 'alpha HOMO = %.12g  LUMO = %.12g', homo_a, lumo_a)
+        else:
+            logger.info(mf, 'alpha HOMO = %.12g  (no LUMO because of small basis) ', homo_a)
+        if homo_b is not None:
+            logger.info(mf, 'beta HOMO = %.12g  LUMO = %.12g', homo_b, lumo_b)
+        else:
+            logger.info(mf, 'beta               LUMO = %.12g', lumo_b)
+        if homo+1e-3 > lumo:
+            logger.warn(mf, 'HOMO %.15g >= LUMO %.15g', homo, lumo)
+        else:
+            logger.info(mf, '  HOMO = %.12g  LUMO = %.12g  gap/eV = %.5f',
+                        homo, lumo, gap)
 
     if mf.verbose >= logger.DEBUG:
-        np.set_printoptions(threshold=len(mo_energy))
+        np.set_printoptions(threshold=nmo)
         logger.debug(mf, '     k-point                  alpha mo_energy')
         for k,kpt in enumerate(mf.cell.get_scaled_kpts(mf.kpts)):
             if (np.count_nonzero(mo_occ_kpts[0][k]) > 0 and
@@ -199,28 +224,34 @@ def energy_elec(mf, dm_kpts=None, h1e_kpts=None, vhf_kpts=None):
     '''
     if dm_kpts is None: dm_kpts = mf.make_rdm1()
     if h1e_kpts is None: h1e_kpts = mf.get_hcore()
-    if vhf_kpts is None: vhf_kpts = mf.get_veff(mf.cell, dm_kpts)
+    if vhf_kpts is None:
+        vhf_kpts = mf.get_veff(mf.cell, dm_kpts)
 
     nkpts = len(h1e_kpts)
-    e1 = 1./nkpts * np.einsum('kij,kji', dm_kpts[0], h1e_kpts)
-    e1+= 1./nkpts * np.einsum('kij,kji', dm_kpts[1], h1e_kpts)
-    e_coul = 1./nkpts * np.einsum('kij,kji', dm_kpts[0], vhf_kpts[0]) * 0.5
-    e_coul+= 1./nkpts * np.einsum('kij,kji', dm_kpts[1], vhf_kpts[1]) * 0.5
+    e1 = 1./nkpts * np.einsum('skij,kji->', dm_kpts, h1e_kpts)
+    e2 = 1./nkpts * np.einsum('skij,skji->', dm_kpts, vhf_kpts) * 0.5
     mf.scf_summary['e1'] = e1.real
-    mf.scf_summary['e2'] = e_coul.real
-    logger.debug(mf, 'E1 = %s  E_coul = %s', e1, e_coul)
-    if CHECK_COULOMB_IMAG and abs(e_coul.imag > mf.cell.precision*10):
+    mf.scf_summary['e2'] = e2.real
+    if hasattr(vhf_kpts, 'ecoul'):
+        ecoul = vhf_kpts.ecoul
+        exx = e2 - ecoul
+        mf.scf_summary['coul'] = ecoul.real
+        mf.scf_summary['exc'] = exx.real
+        logger.debug(mf, 'E1 = %s  E2 = %s  E_coul = %s  Exc = %s', e1, e2, ecoul, exx)
+    else:
+        logger.debug(mf, 'E1 = %s  E2 = %s', e1, e2)
+    if CHECK_COULOMB_IMAG and abs(e2.imag) > mf.cell.precision*10:
         logger.warn(mf, "Coulomb energy has imaginary part %s. "
                     "Coulomb integrals (e-e, e-N) may not converge !",
-                    e_coul.imag)
-    return (e1+e_coul).real, e_coul.real
+                    e2.imag)
+    return (e1+e2).real, e2.real
 
 
 def _make_rdm1_meta(cell, dm_ao_kpts, kpts, pre_orth_method, s):
     from pyscf.lo import orth
     from pyscf.pbc.tools import k2gamma
 
-    kmesh = k2gamma.kpts_to_kmesh(cell, kpts-kpts[0])
+    kmesh = k2gamma.kpts_to_kmesh(cell, kpts-kpts[0], bound_by_supmol=False)
     nkpts, nao = dm_ao_kpts[0].shape[:2]
     scell, phase = k2gamma.get_phase(cell, kpts, kmesh)
     s_sc = k2gamma.to_supercell_ao_integrals(cell, kpts, s, kmesh=kmesh, force_real=False)
@@ -271,35 +302,10 @@ def canonicalize(mf, mo_coeff_kpts, mo_occ_kpts, fock=None):
     if fock is None:
         dm = mf.make_rdm1(mo_coeff_kpts, mo_occ_kpts)
         fock = mf.get_fock(dm=dm)
-
-    def eig_(fock, mo_coeff, idx, es, cs):
-        if np.count_nonzero(idx) > 0:
-            orb = mo_coeff[:,idx]
-            f1 = reduce(np.dot, (orb.T.conj(), fock, orb))
-            e, c = scipy.linalg.eigh(f1)
-            es[idx] = e
-            cs[:,idx] = np.dot(orb, c)
-
-    mo_coeff = [[], []]
-    mo_energy = [[], []]
-    for k, mo in enumerate(mo_coeff_kpts[0]):
-        mo1 = np.empty_like(mo)
-        mo_e = np.empty_like(mo_occ_kpts[0][k])
-        occidxa = mo_occ_kpts[0][k] == 1
-        viridxa = ~occidxa
-        eig_(fock[0][k], mo, occidxa, mo_e, mo1)
-        eig_(fock[0][k], mo, viridxa, mo_e, mo1)
-        mo_coeff[0].append(mo1)
-        mo_energy[0].append(mo_e)
-    for k, mo in enumerate(mo_coeff_kpts[1]):
-        mo1 = np.empty_like(mo)
-        mo_e = np.empty_like(mo_occ_kpts[1][k])
-        occidxb = mo_occ_kpts[1][k] == 1
-        viridxb = ~occidxb
-        eig_(fock[1][k], mo, occidxb, mo_e, mo1)
-        eig_(fock[1][k], mo, viridxb, mo_e, mo1)
-        mo_coeff[1].append(mo1)
-        mo_energy[1].append(mo_e)
+    ea, ca = khf.canonicalize(mf, mo_coeff_kpts[0], mo_occ_kpts[0], fock[0])
+    eb, cb = khf.canonicalize(mf, mo_coeff_kpts[1], mo_occ_kpts[1], fock[1])
+    mo_energy = np.stack([ea, eb])
+    mo_coeff = np.stack([ca, cb])
     return mo_energy, mo_coeff
 
 def init_guess_by_chkfile(cell, chkfile_name, project=None, kpts=None):
@@ -385,8 +391,25 @@ def dip_moment(cell, dm_kpts, unit='Debye', verbose=logger.NOTE,
 
 get_rho = khf.get_rho
 
+def gen_response(mf, mo_coeff=None, mo_occ=None,
+                 with_j=True, hermi=0, max_memory=None, with_nlc=True):
+    from pyscf.pbc.scf._response_functions import _get_jk, _get_k
+    if mo_coeff is None: mo_coeff = mf.mo_coeff
+    if mo_occ is None: mo_occ = mf.mo_occ
+    cell = mf.cell
+    kpts = mf.kpts
+    if with_j:
+        def vind(dm1, kshift=0):
+            vj, vk = _get_jk(mf, cell, dm1, hermi, kpts, kshift)
+            v1 = vj[0] + vj[1] - vk
+            return v1
+    else:
+        def vind(dm1, kshift=0):
+            return -_get_k(mf, cell, dm1, hermi, kpts, kshift)
+    return vind
+
 class KUHF(khf.KSCF):
-    '''UHF class with k-point sampling.
+    '''UHF class with k-point sampling (default: gamma point).
     '''
     conv_tol_grad = getattr(__config__, 'pbc_scf_KSCF_conv_tol_grad', None)
     init_guess_breaksym = getattr(__config__, 'scf_uhf_init_guess_breaksym', 1)
@@ -405,9 +428,10 @@ class KUHF(khf.KSCF):
     get_rho = get_rho
     analyze = khf.analyze
     canonicalize = canonicalize
+    gen_response = gen_response
     to_gpu = lib.to_gpu
 
-    def __init__(self, cell, kpts=np.zeros((1,3)),
+    def __init__(self, cell, kpts=None,
                  exxdiv=getattr(__config__, 'pbc_scf_SCF_exxdiv', 'ewald')):
         khf.KSCF.__init__(self, cell, kpts, exxdiv)
         self.nelec = None
@@ -459,12 +483,17 @@ class KUHF(khf.KSCF):
             dm_kpts *= (nelec / ne).reshape(2,-1,1,1)
         return dm_kpts
 
-    def get_veff(self, cell=None, dm_kpts=None, dm_last=0, vhf_last=0, hermi=1,
+    def get_veff(self, cell=None, dm_kpts=None, dm_last=None, vhf_last=None, hermi=1,
                  kpts=None, kpts_band=None):
         if dm_kpts is None:
             dm_kpts = self.make_rdm1()
         vj, vk = self.get_jk(cell, dm_kpts, hermi, kpts, kpts_band)
-        vhf = vj[0] + vj[1] - vk
+        vj = vj[0] + vj[1]
+        vhf = vj - vk
+        if dm_kpts.ndim == 4 and kpts_band is None:
+            nkpts = len(dm_kpts)
+            ecoul = np.einsum('nKij,Kji->', dm_kpts, vj).real * .5/nkpts
+            vhf = lib.tag_array(vhf, ecoul=ecoul)
         return vhf
 
     def get_grad(self, mo_coeff_kpts, mo_occ_kpts, fock=None):
@@ -485,10 +514,10 @@ class KUHF(khf.KSCF):
                      for k in range(nkpts)]
         return np.hstack(grad_kpts)
 
-    def eig(self, h_kpts, s_kpts):
-        e_a, c_a = khf.KSCF.eig(self, h_kpts[0], s_kpts)
-        e_b, c_b = khf.KSCF.eig(self, h_kpts[1], s_kpts)
-        return (e_a,e_b), (c_a,c_b)
+    def eig(self, h_kpts, s_kpts, overwrite=False, x=None):
+        e_a, c_a = khf.KSCF.eig(self, h_kpts[0], s_kpts, x=x)
+        e_b, c_b = khf.KSCF.eig(self, h_kpts[1], s_kpts, overwrite, x)
+        return np.array((e_a,e_b)), np.array((c_a,c_b))
 
     def make_rdm1(self, mo_coeff_kpts=None, mo_occ_kpts=None, **kwargs):
         if mo_coeff_kpts is None: mo_coeff_kpts = self.mo_coeff
@@ -593,7 +622,7 @@ class KUHF(khf.KSCF):
         from pyscf.pbc.scf.stability import uhf_stability
         return uhf_stability(self, internal, external, verbose)
 
-    def nuc_grad_method(self):
+    def Gradients(self):
         from pyscf.pbc.grad import kuhf
         return kuhf.Gradients(self)
 

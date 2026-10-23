@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-# Copyright 2014-2019 The PySCF Developers. All Rights Reserved.
+# Copyright 2014-2026 The PySCF Developers. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -27,8 +27,10 @@ from pyscf.scf import hf as mol_hf
 from pyscf.pbc.scf import khf
 from pyscf.pbc.scf import kuhf
 from pyscf.pbc.scf import rohf as pbcrohf
+from pyscf.pbc.scf import hf as pbchf
 from pyscf import lib
 from pyscf.lib import logger
+from pyscf.data import nist
 from pyscf.pbc.scf import addons
 from pyscf import __config__
 
@@ -125,15 +127,19 @@ def get_occ(mf, mo_energy_kpts=None, mo_coeff_kpts=None):
     '''
 
     if mo_energy_kpts is None: mo_energy_kpts = mf.mo_energy
-    if getattr(mo_energy_kpts[0], 'mo_ea', None) is not None:
-        mo_ea_kpts = [x.mo_ea for x in mo_energy_kpts]
-        mo_eb_kpts = [x.mo_eb for x in mo_energy_kpts]
+    if getattr(mo_energy_kpts, 'mo_ea', None) is not None:
+        mo_ea_kpts = np.asarray(mo_energy_kpts.mo_ea)
+        mo_eb_kpts = np.asarray(mo_energy_kpts.mo_eb)
     else:
-        mo_ea_kpts = mo_eb_kpts = mo_energy_kpts
+        mo_ea_kpts = mo_eb_kpts = np.asarray(mo_energy_kpts)
 
     nocc_a, nocc_b = mf.nelec
-    mo_energy_kpts1 = np.hstack(mo_energy_kpts)
-    mo_energy = np.sort(mo_energy_kpts1)
+    mo_energy_kpts = np.asarray(mo_energy_kpts)
+    mo_energy = np.sort(mo_energy_kpts.ravel())
+    nmo = mo_energy.size
+    if nocc_a > nmo or nocc_b > nmo:
+        raise RuntimeError('Failed to assign occupancies. '
+                           f'nocc ({nocc_a}) > Nmo ({nmo})')
     if nocc_b > 0:
         core_level = mo_energy[nocc_b-1]
     else:
@@ -141,23 +147,21 @@ def get_occ(mf, mo_energy_kpts=None, mo_coeff_kpts=None):
     if nocc_a == nocc_b:
         fermi = core_level
     else:
-        mo_ea_kpts1 = np.hstack(mo_ea_kpts)
-        mo_ea = np.sort(mo_ea_kpts1[mo_energy_kpts1 > core_level])
+        mo_ea = np.sort(mo_ea_kpts[mo_energy_kpts > core_level])
         fermi = mo_ea[nocc_a - nocc_b - 1]
 
-    mo_occ_kpts = []
-    for k, mo_e in enumerate(mo_energy_kpts):
-        occ = np.zeros_like(mo_e)
-        occ[mo_e <= core_level] = 2
-        if nocc_a != nocc_b:
-            occ[(mo_e > core_level) & (mo_ea_kpts[k] <= fermi)] = 1
-        mo_occ_kpts.append(occ)
+    mo_occ_kpts = np.zeros_like(mo_energy_kpts)
+    mo_occ_kpts[mo_energy_kpts <= core_level] = 2
+    if nocc_a != nocc_b:
+        mo_occ_kpts[(mo_energy_kpts > core_level) & (mo_ea_kpts <= fermi)] = 1
 
-    if nocc_a < len(mo_energy):
-        logger.info(mf, 'HOMO = %.12g  LUMO = %.12g',
-                    mo_energy[nocc_a-1], mo_energy[nocc_a])
+    if nocc_a < nmo:
+        homo, lumo = mo_energy[nocc_a-1:nocc_a+1]
+        gap = (lumo - homo) * nist.HARTREE2EV
+        mf.scf_summary['gap'] = gap
+        logger.info(mf, '  HOMO = %.12g  LUMO = %.12g  gap/eV = %.5f', homo, lumo, gap)
     else:
-        logger.info(mf, 'HOMO = %.12g', mo_energy[nocc_a-1])
+        logger.info(mf, 'HOMO = %.12g (no LUMO)', mo_energy[nocc_a-1])
 
     np.set_printoptions(threshold=len(mo_energy))
     if mf.verbose >= logger.DEBUG:
@@ -202,7 +206,7 @@ def get_occ(mf, mo_energy_kpts=None, mo_coeff_kpts=None):
                           mo_eb_kpts[k][mo_occ_kpts[k]!=2])
     np.set_printoptions(threshold=1000)
 
-    return mo_occ_kpts
+    return np.array(mo_occ_kpts)
 
 
 energy_elec = kuhf.energy_elec
@@ -227,11 +231,9 @@ def canonicalize(mf, mo_coeff_kpts, mo_occ_kpts, fock=None):
         dm = mf.make_rdm1(mo_coeff_kpts, mo_occ_kpts)
         fock = mf.get_fock(dm=dm)
 
-    mo_coeff = []
-    mo_energy = []
+    mo_coeff = np.zeros_like(mo_coeff_kpts)
+    mo_energy = np.full(mo_occ_kpts.shape, pbchf.INVALID_ORBITAL_ENERGY)
     for k, mo in enumerate(mo_coeff_kpts):
-        mo1 = np.empty_like(mo)
-        mo_e = np.empty_like(mo_occ_kpts[k])
         coreidx = mo_occ_kpts[k] == 2
         openidx = mo_occ_kpts[k] == 1
         viridx = mo_occ_kpts[k] == 0
@@ -240,21 +242,23 @@ def canonicalize(mf, mo_coeff_kpts, mo_occ_kpts, fock=None):
                 orb = mo[:,idx]
                 f1 = reduce(np.dot, (orb.T.conj(), fock[k], orb))
                 e, c = scipy.linalg.eigh(f1)
-                mo1[:,idx] = np.dot(orb, c)
-                mo_e[idx] = e
-        if getattr(fock, 'focka', None) is not None:
-            fa, fb = fock.focka[k], fock.fockb[k]
-            mo_ea = np.einsum('pi,pi->i', mo1.conj(), fa.dot(mo1)).real
-            mo_eb = np.einsum('pi,pi->i', mo1.conj(), fb.dot(mo1)).real
-            mo_e = lib.tag_array(mo_e, mo_ea=mo_ea, mo_eb=mo_eb)
-        mo_coeff.append(mo1)
-        mo_energy.append(mo_e)
+                mo_coeff[k][:,idx] = np.dot(orb, c)
+                mo_energy[k,idx] = e
+        mol_hf._adjust_phase_(mo_coeff[k])
+
+    if getattr(fock, 'focka', None) is not None:
+        mo_ea = lib.einsum('kpi,kpq,kqi->ki', mo_coeff.conj(), fock.focka, mo_coeff).real
+        mo_eb = lib.einsum('kpi,kpq,kqi->ki', mo_coeff.conj(), fock.fockb, mo_coeff).real
+        mask = mo_energy == pbchf.INVALID_ORBITAL_ENERGY
+        mo_ea[mask] = pbchf.INVALID_ORBITAL_ENERGY
+        mo_eb[mask] = pbchf.INVALID_ORBITAL_ENERGY
+        mo_energy = lib.tag_array(mo_energy, mo_ea=mo_ea, mo_eb=mo_eb)
     return mo_energy, mo_coeff
 
 init_guess_by_chkfile = kuhf.init_guess_by_chkfile
 
 class KROHF(khf.KRHF):
-    '''UHF class with k-point sampling.
+    '''PBC ROHF class with k-point sampling (default: gamma point).
     '''
     conv_tol_grad = getattr(__config__, 'pbc_scf_KSCF_conv_tol_grad', None)
 
@@ -271,9 +275,10 @@ class KROHF(khf.KRHF):
     analyze = khf.analyze
     spin_square = pbcrohf.ROHF.spin_square
     canonicalize = canonicalize
+    gen_response = kuhf.gen_response
     to_gpu = lib.to_gpu
 
-    def __init__(self, cell, kpts=np.zeros((1,3)),
+    def __init__(self, cell, kpts=None,
                  exxdiv=getattr(__config__, 'pbc_scf_SCF_exxdiv', 'ewald')):
         khf.KSCF.__init__(self, cell, kpts, exxdiv)
         self.nelec = None
@@ -303,7 +308,7 @@ class KROHF(khf.KRHF):
                     'alpha = %d beta = %d', *self.nelec)
         return self
 
-    def get_veff(self, cell=None, dm_kpts=None, dm_last=0, vhf_last=0, hermi=1,
+    def get_veff(self, cell=None, dm_kpts=None, dm_last=None, vhf_last=None, hermi=1,
                  kpts=None, kpts_band=None):
         if dm_kpts is None:
             dm_kpts = self.make_rdm1()
@@ -313,9 +318,8 @@ class KROHF(khf.KRHF):
             mo_occ_b = [(x ==2).astype(np.double) for x in dm_kpts.mo_occ]
             dm_kpts = lib.tag_array(dm_kpts, mo_coeff=(mo_coeff,mo_coeff),
                                     mo_occ=(mo_occ_a,mo_occ_b))
-        vj, vk = self.get_jk(cell, dm_kpts, hermi, kpts, kpts_band)
-        vhf = vj[0] + vj[1] - vk
-        return vhf
+        return kuhf.KUHF.get_veff(self, cell, dm_kpts, dm_last, vhf_last, hermi,
+                                  kpts, kpts_band)
 
     def get_grad(self, mo_coeff_kpts, mo_occ_kpts, fock=None):
         if fock is None:
@@ -339,14 +343,15 @@ class KROHF(khf.KRHF):
         grad_kpts = np.hstack([grad(k) for k in range(nkpts)])
         return grad_kpts
 
-    def eig(self, fock, s):
-        e, c = khf.KSCF.eig(self, fock, s)
+    def eig(self, fock, s, overwrite=False, x=None):
+        e, c = khf.KSCF.eig(self, fock, s, overwrite, x)
         if getattr(fock, 'focka', None) is not None:
-            for k, mo in enumerate(c):
-                fa, fb = fock.focka[k], fock.fockb[k]
-                mo_ea = np.einsum('pi,pi->i', mo.conj(), fa.dot(mo)).real
-                mo_eb = np.einsum('pi,pi->i', mo.conj(), fb.dot(mo)).real
-                e[k] = lib.tag_array(e[k], mo_ea=mo_ea, mo_eb=mo_eb)
+            mo_ea = lib.einsum('kpi,kpq,kqi->ki', c.conj(), fock.focka, c).real
+            mo_eb = lib.einsum('kpi,kpq,kqi->ki', c.conj(), fock.fockb, c).real
+            mask = e == pbchf.INVALID_ORBITAL_ENERGY
+            mo_ea[mask] = pbchf.INVALID_ORBITAL_ENERGY
+            mo_eb[mask] = pbchf.INVALID_ORBITAL_ENERGY
+            e = lib.tag_array(e, mo_ea=mo_ea, mo_eb=mo_eb)
         return e, c
 
     def make_rdm1(self, mo_coeff_kpts=None, mo_occ_kpts=None, **kwargs):

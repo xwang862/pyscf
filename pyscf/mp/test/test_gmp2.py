@@ -16,6 +16,7 @@
 import unittest
 from functools import reduce
 import numpy
+import numpy as np
 from pyscf import lib
 from pyscf import gto
 from pyscf import scf
@@ -122,6 +123,14 @@ class KnownValues(unittest.TestCase):
         self.assertEqual(pt.frozen, 2)
         self.assertAlmostEqual(pt.emp2, -0.12783149583822068, 8)
 
+        pt.frozen = 0
+        pt.kernel(with_t2=False)
+        self.assertAlmostEqual(pt.emp2, -0.12886859451036942, 8)
+
+        pt.frozen = np.array([0])
+        pt.kernel(with_t2=False)
+        self.assertAlmostEqual(pt.emp2, -0.12819257245012924, 8)
+
     def test_gmp2_outcore_frozen(self):
         pt = mp.GMP2(gmf)
         pt.max_memory = 0
@@ -211,7 +220,12 @@ class KnownValues(unittest.TestCase):
     def test_non_canonical_mp2(self):
         mf = scf.GHF(mol).run(max_cycle=1)
         pt = mp.MP2(mf)
-        self.assertAlmostEqual(pt.kernel()[0], -0.12714840392411947, 7)
+        e = pt.kernel()[0]
+        self.assertAlmostEqual(e, -0.1775406695485, 7)
+        # first-order singles (T1) of the f_ov != 0 reference
+        self.assertAlmostEqual(pt.e_corr_singles, -0.0503922640769, 7)
+        # the doubles part is unchanged by the T1 treatment
+        self.assertAlmostEqual(e - pt.e_corr_singles, -0.12714840392411947, 7)
 
     def test_gmp2_with_df(self):
         pt = mp.GMP2(gmf).density_fit()

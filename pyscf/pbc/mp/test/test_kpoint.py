@@ -85,16 +85,16 @@ class KnownValues(unittest.TestCase):
     def test_111(self):
         nk = (1, 1, 1)
         escf, emp = run_kcell(cell,nk)
-        self.assertAlmostEqual(escf, -1.2061049658473704, 7)
-        self.assertAlmostEqual(emp, -5.44597932944397e-06, 9)
+        self.assertAlmostEqual(escf, -1.206272954628671, 7)
+        self.assertAlmostEqual(emp, -5.2597018396797814e-06, 9)
         escf, emp = run_kcell_complex(cell,nk)
-        self.assertAlmostEqual(emp, -5.44597932944397e-06, 9)
+        self.assertAlmostEqual(emp, -5.259701839679778e-06, 9)
 
     def test_311_high_cost(self):
         nk = (3, 1, 1)
         escf, emp = run_kcell(cell,nk)
-        self.assertAlmostEqual(escf, -1.0585001200928885, 7)
-        self.assertAlmostEqual(emp, -7.9832274354253814e-06, 9)
+        self.assertAlmostEqual(escf, -1.058602898458509, 7)
+        self.assertAlmostEqual(emp, -7.852377418181819e-06, 9)
 
     def test_h4_fcc_k2_frozen_high_cost(self):
         '''Metallic hydrogen fcc lattice with frozen lowest lying occupied
@@ -146,7 +146,7 @@ class KnownValues(unittest.TestCase):
         mymp = pyscf.pbc.mp.kmp2.KMP2(kmf, frozen=frozen)
         ekmp2, _ = mymp.kernel()
         self.assertAlmostEqual(ekmp2, -0.016333989667540873, 6)
-        self.assertAlmostEqual(mymp.e_tot, 2.329840607381255, 6)
+        self.assertAlmostEqual(mymp.e_tot, 2.329841269381374, 6)
 
     def test_rdm1(self):
         cell = pbcgto.Cell()

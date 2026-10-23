@@ -36,14 +36,14 @@ from pyscf.df.hessian import rhf as df_rhf_hess
 
 def partial_hess_elec(hessobj, mo_energy=None, mo_coeff=None, mo_occ=None,
                       atmlst=None, max_memory=4000, verbose=None):
+    if hessobj.grid_response:
+        raise NotImplementedError('CPU RKS Hessian grid response is not implemented')
     log = logger.new_logger(hessobj, verbose)
     time0 = t1 = (logger.process_clock(), logger.perf_counter())
 
     mol = hessobj.mol
     mf = hessobj.base
     ni = mf._numint
-    if mf.do_nlc():
-        raise NotImplementedError('RKS Hessian for NLC functional')
 
     if mo_energy is None: mo_energy = mf.mo_energy
     if mo_occ is None:    mo_occ = mf.mo_occ
@@ -84,10 +84,15 @@ def partial_hess_elec(hessobj, mo_energy=None, mo_coeff=None, mo_occ=None,
         for j0 in range(i0):
             de2[j0,i0] = de2[i0,j0].T
 
+    if mf.do_nlc():
+        de2 += rks_hess._get_enlc_deriv2(hessobj, mo_coeff, mo_occ, max_memory)
+
     log.timer('RKS partial hessian', *time0)
     return de2
 
 def make_h1(hessobj, mo_coeff, mo_occ, chkfile=None, atmlst=None, verbose=None):
+    if hessobj.grid_response:
+        raise NotImplementedError('CPU RKS Hessian grid response is not implemented')
     mol = hessobj.mol
     mf = hessobj.base
     ni = mf._numint
@@ -98,6 +103,9 @@ def make_h1(hessobj, mo_coeff, mo_occ, chkfile=None, atmlst=None, verbose=None):
     mem_now = lib.current_memory()[0]
     max_memory = max(2000, mf.max_memory*.9-mem_now)
     h1ao = rks_hess._get_vxc_deriv1(hessobj, mo_coeff, mo_occ, max_memory)
+    if mf.do_nlc():
+        h1ao += rks_hess._get_vnlc_deriv1(hessobj, mo_coeff, mo_occ, max_memory)
+
     for ia, h1, vj1, vk1 in df_rhf_hess._gen_jk(
             hessobj, mo_coeff, mo_occ, chkfile, atmlst, verbose, with_k=hybrid):
         h1ao[ia] += h1 + vj1
@@ -113,11 +121,18 @@ def make_h1(hessobj, mo_coeff, mo_occ, chkfile=None, atmlst=None, verbose=None):
 
 
 class Hessian(rks_hess.Hessian):
-    '''Non-relativistic RKS hessian'''
+    '''Non-relativistic RKS hessian.
+
+    Grid response is not implemented for this CPU Hessian.
+    Setting grid_response=True raises NotImplementedError.
+    '''
+
+    _keys = {'auxbasis_response',}
+
     def __init__(self, mf):
         rks_hess.Hessian.__init__(self, mf)
 
-    auxbasis_response = 1
+    auxbasis_response = 2
     partial_hess_elec = partial_hess_elec
     make_h1 = make_h1
 

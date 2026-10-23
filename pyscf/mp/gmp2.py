@@ -32,7 +32,7 @@ def kernel(mp, mo_energy=None, mo_coeff=None, eris=None, with_t2=WITH_T2, verbos
     if mo_energy is not None or mo_coeff is not None:
         # For backward compatibility.  In pyscf-1.4 or earlier, mp.frozen is
         # not supported when mo_energy or mo_coeff is given.
-        assert (mp.frozen == 0 or mp.frozen is None)
+        assert mp.frozen is None
 
     if eris is None:
         eris = mp.ao2mo(mo_coeff)
@@ -58,18 +58,28 @@ def kernel(mp, mo_energy=None, mo_coeff=None, eris=None, with_t2=WITH_T2, verbos
         if with_t2:
             t2[i] = t2i
 
+    # The canonical reference satisfies Brillouin's theorem, hence T1 = 0
+    mp.t1 = numpy.zeros((nocc,nvir), dtype=eris.oovv.dtype)
+
     return emp2.real, t2
 
 def energy(mp, t2, eris):
-    '''MP2 energy'''
+    '''MP2 energy including the first-order singles (T1) contribution'''
     eris_oovv = numpy.array(eris.oovv)
     e = 0.25*numpy.einsum('ijab,ijab', t2, eris_oovv)
     if abs(e.imag) > 1e-4:
         logger.warn(mp, 'Non-zero imaginary part found in GMP2 energy %s', e)
-    return e.real
+    nocc, nvir = t2.shape[1:3]
+    t1 = getattr(mp, 't1', None)
+    if t1 is None or getattr(mp, 'exclude_t1', False):
+        e_singles = 0.
+    else:
+        fov = numpy.asarray(eris.fock)[:nocc,nocc:]
+        e_singles = numpy.einsum('ia,ia->', fov, t1).real
+    return lib.tag_array(e.real + e_singles, e_corr_singles=e_singles)
 
-def update_amps(mp, t2, eris):
-    '''Update non-canonical MP2 amplitudes'''
+def update_amps(mp, t1, t2, eris):
+    '''Update non-canonical MP2 amplitudes (T1 and T2)'''
     #assert (isinstance(eris, _PhysicistsERIs))
     nocc, nvir = t2.shape[1:3]
     fock = eris.fock
@@ -78,6 +88,7 @@ def update_amps(mp, t2, eris):
 
     foo = fock[:nocc,:nocc] - numpy.diag(mo_e_o)
     fvv = fock[nocc:,nocc:] - numpy.diag(mo_e_v)
+    fov = fock[nocc:,:nocc].T
     t2new  = lib.einsum('ijac,bc->ijab', t2, fvv)
     t2new -= lib.einsum('ki,kjab->ijab', foo, t2)
     t2new = t2new + t2new.transpose(1,0,3,2)
@@ -85,7 +96,16 @@ def update_amps(mp, t2, eris):
 
     eia = mo_e_o[:,None] - mo_e_v
     t2new /= lib.direct_sum('ia,jb->ijab', eia, eia)
-    return t2new
+
+    # First-order singles (Finley & Hirao, CPL 328, 51 (2000), Eq. (50))
+    if getattr(mp, 'exclude_t1', False):
+        t1new = numpy.zeros_like(t1)
+    else:
+        t1new  = lib.einsum('ab,ib->ia', fvv, t1)
+        t1new -= lib.einsum('ji,ja->ia', foo, t1)
+        t1new += fov
+        t1new /= eia
+    return t1new, t2new
 
 
 def make_rdm1(mp, t2=None, ao_repr=False, with_frozen=True):
@@ -102,15 +122,35 @@ def make_rdm1(mp, t2=None, ao_repr=False, with_frozen=True):
     '''
     from pyscf.cc import gccsd_rdm
     if t2 is None: t2 = mp.t2
+    assert t2 is not None
     doo, dvv = _gamma1_intermediates(mp, t2)
     nocc, nvir = t2.shape[1:3]
-    dov = numpy.zeros((nocc,nvir))
-    d1 = doo, dov, dov.T, dvv
+    t1 = getattr(mp, 't1', None)
+    if t1 is None:
+        dov = numpy.zeros((nocc,nvir))
+        dvo = dov.T
+    else:
+        # First-order singles (f_ov != 0 references, issue #1687). The
+        # occupied-virtual block includes the t1 amplitude and the t1.t2
+        # cross term (cf. gcisd._gamma1_intermediates); the occ/vir blocks
+        # (t1^2) are in _gamma1_intermediates.
+        dvo = numpy.asarray(t1).T
+        if t2 is not None:
+            dvo = dvo + lib.einsum('jb,ijab->ai', t1.conj(), t2)
+        dov = dvo.T.conj()
+    d1 = doo, dov, dvo, dvv
     return gccsd_rdm._make_rdm1(mp, d1, with_frozen=with_frozen, ao_repr=ao_repr)
 
 def _gamma1_intermediates(mp, t2):
     doo = lib.einsum('imef,jmef->ij', t2.conj(), t2) *-.5
     dvv = lib.einsum('mnea,mneb->ab', t2, t2.conj()) * .5
+    # First-order singles (f_ov != 0 references, issue #1687): the t1^2
+    # corrections to the occupied/virtual blocks (cf. the c1^2 terms of
+    # gcisd._gamma1_intermediates). The t1.t2 cross terms are not included.
+    t1 = getattr(mp, 't1', None)
+    if t1 is not None:
+        doo -= lib.einsum('ia,ka->ik', t1.conj(), t1)
+        dvv += lib.einsum('ia,ic->ac', t1, t1.conj())
     return doo, dvv
 
 # spin-orbital rdm2 in Chemist's notation
@@ -124,8 +164,19 @@ def make_rdm2(mp, t2=None, ao_repr=False):
     correspond to another particle.  The contraction between ERIs (in
     Chemist's notation) and rdm2 is
     E = einsum('pqrs,pqrs', eri, rdm2)
+
+    The energy contract holds when the reference satisfies Brillouin's
+    theorem (f_ov = 0).  The T1 contributions to the 2-RDM are not included.
     '''
     if t2 is None: t2 = mp.t2
+    t1 = getattr(mp, 't1', None)
+    if t1 is not None:
+        t1 = t1 if isinstance(t1, (tuple, list)) else (t1,)
+        if max(numpy.abs(numpy.asarray(x)).max() for x in t1) > 1e-8:
+            logger.warn(mp, 'The 2-RDM does not include the first-order '
+                            'singles (T1): its energy contraction is only '
+                            'valid for a reference with f_ov = 0.')
+    assert t2 is not None
     nmo0 = mp.nmo
     nocc = nocc0 = mp.nocc
 
@@ -173,7 +224,7 @@ def make_rdm2(mp, t2=None, ao_repr=False):
     return dm2
 
 
-class GMP2(mp2.MP2):
+class GMP2(mp2.MP2Base):
     def __init__(self, mf, frozen=None, mo_coeff=None, mo_occ=None):
         mp2.MP2.__init__(self, mf, frozen, mo_coeff, mo_occ)
 
@@ -214,7 +265,11 @@ class GMP2(mp2.MP2):
     def init_amps(self, mo_energy=None, mo_coeff=None, eris=None, with_t2=WITH_T2):
         return kernel(self, mo_energy, mo_coeff, eris, with_t2)
 
-    to_gpu = lib.to_gpu
+    def _finalize(self):
+        log = logger.new_logger(self)
+        log.note('E(%s) = %.15g  E_corr = %.15g',
+                 self.__class__.__name__, self.e_tot, self.e_corr)
+        return self
 
 MP2 = GMP2
 
@@ -253,7 +308,8 @@ class _PhysicistsERIs:
                 mo_coeff = lib.tag_array(mo_coeff, orbspin=self.orbspin)
         self.mo_coeff = mo_coeff
 
-        if mp_mo_coeff is mp._scf.mo_coeff and mp._scf.converged:
+        if (mp_mo_coeff is mp._scf.mo_coeff and mp._scf.converged and
+                (mp.exclude_t1 or mp._reference_is_canonical())):
             self.mo_energy = mp._scf.mo_energy[mo_idx]
             self.fock = numpy.diag(self.mo_energy)
         else:
@@ -371,50 +427,3 @@ def _make_eris_outcore(mp, mo_coeff=None, verbose=None):
     return eris
 
 del (WITH_T2)
-
-
-if __name__ == '__main__':
-    from functools import reduce
-    from pyscf import scf
-    from pyscf import gto
-    mol = gto.Mole()
-    mol.atom = [['O', (0.,   0., 0.)],
-                ['O', (1.21, 0., 0.)]]
-    mol.basis = 'cc-pvdz'
-    mol.spin = 2
-    mol.build()
-    mf = scf.UHF(mol).run()
-    mf = scf.addons.convert_to_ghf(mf)
-
-    frozen = [0,1,2,3]
-    pt = GMP2(mf, frozen=frozen)
-    emp2, t2 = pt.kernel()
-    print(emp2 - -0.345306881488508)
-
-    pt.max_memory = 1
-    emp2, t2 = pt.kernel()
-    print(emp2 - -0.345306881488508)
-
-    dm1 = pt.make_rdm1(t2)
-    dm2 = pt.make_rdm2(t2)
-    nao = mol.nao_nr()
-    mo_a = mf.mo_coeff[:nao]
-    mo_b = mf.mo_coeff[nao:]
-    nmo = mo_a.shape[1]
-    eri = ao2mo.kernel(mf._eri, mo_a+mo_b, compact=False).reshape([nmo]*4)
-    orbspin = mf.mo_coeff.orbspin
-    sym_forbid = (orbspin[:,None] != orbspin)
-    eri[sym_forbid,:,:] = 0
-    eri[:,:,sym_forbid] = 0
-    hcore = scf.RHF(mol).get_hcore()
-    h1 = reduce(numpy.dot, (mo_a.T.conj(), hcore, mo_a))
-    h1+= reduce(numpy.dot, (mo_b.T.conj(), hcore, mo_b))
-    e1 = numpy.einsum('ij,ji', h1, dm1)
-    e1+= numpy.einsum('ijkl,ijkl', eri, dm2) * .5
-    e1+= mol.energy_nuc()
-    print(e1 - pt.e_tot)
-
-    mf = scf.UHF(mol).run(max_cycle=1)
-    mf = scf.addons.convert_to_ghf(mf)
-    pt = GMP2(mf)
-    print(pt.kernel()[0] - -0.371240143556976)

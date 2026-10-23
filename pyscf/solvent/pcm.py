@@ -29,17 +29,27 @@ from pyscf.dft import gen_grid
 from pyscf.data import radii
 from pyscf.solvent import ddcosmo
 from pyscf.solvent import _attach_solvent
+from pyscf.solvent import _solvent_data
+from scipy.special import erf
 
-libdft = lib.load_library('libdft')
+def _as_solvent_obj(solvent_obj, mol):
+    '''Allows the solvent model to be specified by the name of the solvent,
+    e.g. mf.PCM('toluene')
+    '''
+    if isinstance(solvent_obj, str):
+        solvent_obj = PCM(mol, solvent_obj)
+    return solvent_obj
 
 @lib.with_doc(_attach_solvent._for_scf.__doc__)
 def pcm_for_scf(mf, solvent_obj=None, dm=None):
+    solvent_obj = _as_solvent_obj(solvent_obj, mf.mol)
     if solvent_obj is None:
         solvent_obj = PCM(mf.mol)
     return _attach_solvent._for_scf(mf, solvent_obj, dm)
 
 @lib.with_doc(_attach_solvent._for_casscf.__doc__)
 def pcm_for_casscf(mc, solvent_obj=None, dm=None):
+    solvent_obj = _as_solvent_obj(solvent_obj, mc.mol)
     if solvent_obj is None:
         if isinstance(getattr(mc._scf, 'with_solvent', None), PCM):
             solvent_obj = mc._scf.with_solvent
@@ -49,6 +59,7 @@ def pcm_for_casscf(mc, solvent_obj=None, dm=None):
 
 @lib.with_doc(_attach_solvent._for_casci.__doc__)
 def pcm_for_casci(mc, solvent_obj=None, dm=None):
+    solvent_obj = _as_solvent_obj(solvent_obj, mc.mol)
     if solvent_obj is None:
         if isinstance(getattr(mc._scf, 'with_solvent', None), PCM):
             solvent_obj = mc._scf.with_solvent
@@ -58,6 +69,7 @@ def pcm_for_casci(mc, solvent_obj=None, dm=None):
 
 @lib.with_doc(_attach_solvent._for_post_scf.__doc__)
 def pcm_for_post_scf(method, solvent_obj=None, dm=None):
+    solvent_obj = _as_solvent_obj(solvent_obj, method.mol)
     if solvent_obj is None:
         if isinstance(getattr(method._scf, 'with_solvent', None), PCM):
             solvent_obj = method._scf.with_solvent
@@ -65,14 +77,7 @@ def pcm_for_post_scf(method, solvent_obj=None, dm=None):
             solvent_obj = PCM(method.mol)
     return _attach_solvent._for_post_scf(method, solvent_obj, dm)
 
-@lib.with_doc(_attach_solvent._for_tdscf.__doc__)
-def pcm_for_tdscf(method, solvent_obj=None, dm=None):
-    scf_solvent = getattr(method._scf, 'with_solvent', None)
-    assert scf_solvent is None or isinstance(scf_solvent, PCM)
-
-    if solvent_obj is None:
-        solvent_obj = PCM(method.mol)
-    return _attach_solvent._for_tdscf(method, solvent_obj, dm)
+pcm_for_tdscf = _attach_solvent._for_tdscf
 
 
 # Inject PCM to other methods
@@ -136,16 +141,18 @@ def switch_h(x):
     y[x>1] = 1.0
     return y
 
-def gen_surface(mol, ng=302, rad=modified_Bondi, vdw_scale=1.2):
+def gen_surface(mol, ng=302, rad=modified_Bondi, surface_discretization_method="SWIG"):
     '''J. Phys. Chem. A 1999, 103, 11060-11079'''
     unit_sphere = gen_grid.MakeAngularGrid(ng)
     atom_coords = mol.atom_coords(unit='B')
-    charges = mol.atom_charges()
     N_J = ng * numpy.ones(mol.natm)
-    R_J = numpy.asarray([rad[chg] for chg in charges])
-    R_sw_J = R_J * (14.0 / N_J)**0.5
-    alpha_J = 1.0/2.0 + R_J/R_sw_J - ((R_J/R_sw_J)**2 - 1.0/28)**0.5
-    R_in_J = R_J - alpha_J * R_sw_J
+    from pyscf.data.elements import charge as charge_of_element
+    element_index = [charge_of_element(e) for e in mol.elements]
+    R_J = numpy.asarray([rad[chg] for chg in element_index])
+    if surface_discretization_method.upper() == "SWIG":
+        R_sw_J = R_J * (14.0 / N_J)**0.5
+        alpha_J = 1.0/2.0 + R_J/R_sw_J - ((R_J/R_sw_J)**2 - 1.0/28)**0.5
+        R_in_J = R_J - alpha_J * R_sw_J
 
     grid_coords = []
     weights = []
@@ -157,19 +164,28 @@ def gen_surface(mol, ng=302, rad=modified_Bondi, vdw_scale=1.2):
     gslice_by_atom = []
     p0 = p1 = 0
     for ia in range(mol.natm):
-        symb = mol.atom_symbol(ia)
-        chg = gto.charge(symb)
-        r_vdw = rad[chg]
+        r_vdw = R_J[ia]
 
         atom_grid = r_vdw * unit_sphere[:,:3] + atom_coords[ia,:]
         riJ = scipy.spatial.distance.cdist(atom_grid[:,:3], atom_coords)
-        diJ = (riJ - R_in_J) / R_sw_J
-        diJ[:,ia] = 1.0
-        diJ[diJ < 1e-8] = 0.0
-        fiJ = switch_h(diJ)
 
         w = unit_sphere[:,3] * 4.0 * PI
+        xi = XI[ng] / (r_vdw * w**0.5)
+
+        if surface_discretization_method.upper() == "SWIG":
+            diJ = (riJ - R_in_J) / R_sw_J
+            diJ[:,ia] = 1.0
+            diJ[diJ < 1e-8] = 0.0
+            fiJ = switch_h(diJ)
+        elif surface_discretization_method.upper() == "ISWIG":
+            fiJ = 1 - 0.5 * (erf(xi[:, None] * (R_J[None, :] - riJ)) + erf(xi[:, None] * (R_J[None, :] + riJ)))
+            fiJ[:,ia] = 1.0
+            fiJ[fiJ < 1e-8] = 0
+        else:
+            raise NotImplementedError(f"surface_discretization_method = {surface_discretization_method} not recognized")
+
         swf = numpy.prod(fiJ, axis=1)
+
         idx = w*swf > 1e-16
 
         p0, p1 = p1, p1+sum(idx)
@@ -178,8 +194,7 @@ def gen_surface(mol, ng=302, rad=modified_Bondi, vdw_scale=1.2):
         weights.append(w[idx])
         switch_fun.append(swf[idx])
         norm_vec.append(unit_sphere[idx,:3])
-        xi = XI[ng] / (r_vdw * w[idx]**0.5)
-        charge_exp.append(xi)
+        charge_exp.append(xi[idx])
         R_vdw.append(numpy.ones(sum(idx)) * r_vdw)
         area.append(w[idx]*r_vdw**2*swf[idx])
 
@@ -201,10 +216,17 @@ def gen_surface(mol, ng=302, rad=modified_Bondi, vdw_scale=1.2):
         'R_vdw': R_vdw,
         'norm_vec': norm_vec,
         'area': area,
-        'R_in_J': R_in_J,
-        'R_sw_J': R_sw_J,
         'atom_coords': atom_coords
     }
+    if surface_discretization_method.upper() == "SWIG":
+        surface.update({
+            'R_in_J': R_in_J,
+            'R_sw_J': R_sw_J,
+        })
+    elif surface_discretization_method.upper() == "ISWIG":
+        surface.update({
+            'R_J': R_J,
+        })
     return surface
 
 def get_F_A(surface):
@@ -234,7 +256,7 @@ def get_D_S(surface, with_S=True, with_D=False):
     rij = scipy.spatial.distance.cdist(grid_coords, grid_coords)
     xi_r_ij = xi_ij * rij
     numpy.fill_diagonal(rij, 1)
-    S = scipy.special.erf(xi_r_ij) / rij
+    S = erf(xi_r_ij) / rij
     numpy.fill_diagonal(S, charge_exp * (2.0 / PI)**0.5 / switch_fun)
 
     D = None
@@ -249,16 +271,120 @@ def get_D_S(surface, with_S=True, with_D=False):
 
 
 class PCM(lib.StreamObject):
+    '''
+    PCM Solvent Model
+
+    This class implements the Polarizable Continuum Model (PCM) for solvent effects.
+
+    Examples:
+
+    >>> mf = mol.RHF().PCM()
+    >>> mf.with_solvent.solvent = 'toluene'
+    >>> mf.kernel()
+
+    Input Attributes:
+    -----------------
+    method : str
+        The PCM model. Options include 'C-PCM', 'IEF-PCM', 'COSMO', and 'SS(V)PE'.
+        Default is 'C-PCM'.
+
+    vdw_scale : float
+        A scaling factor for van der Waals radii. Default is 1.2, consistent with Q-Chem settings.
+
+    r_probe : float
+        An additional radius (in Angstrom) added to the van der Waals radii.
+        Default is 0.0.
+
+    radii_table : dict
+        Custom van der Waals radii for each element. By default, scaled van der Waals radii
+        from `vdw_scale` and `r_probe` are used.
+
+    lebedev_order : int
+        The order of the Lebedev mesh used for the cavity sphere. Default is 29 (302 grids).
+
+    solvent : str
+        The name of the solvent. Assigning this attribute applies the dielectric constant
+        and the refractive index of the solvent to `eps` and `eps_optical`, which can be
+        overwritten afterwards. Supported solvents can be accessed via the variable
+        `pyscf.solvent.smd.solvent_db`. Their names are matched case-insensitively,
+        ignoring spaces and hyphens, and common abbreviations (such as "DMSO") are
+        recognized as well. Default is '' (the parameters of water are then applied).
+
+    eps : float
+        The dielectric constant of the solvent. Default is 78.3553, the dielectric constant
+        for water. It is overwritten by `solvent` if a solvent name is specified.
+
+    eps_optical : float
+        The optical (high-frequency) dielectric constant of the solvent, i.e. the square of
+        its refractive index. It is only used by the non-equilibrium solvation of excited
+        states (see `equilibrium_solvation`). It is assigned by `solvent` if a solvent name
+        is specified. Otherwise, the value of water (eps_optical=1.78) is applied and a
+        warning is issued whenever `eps` indicates a solvent other than water.
+        Default is None.
+
+    frozen : bool
+        Whether to freeze the potential produced by the solvent during SCF iterations or
+        other convergence processes. When frozen=True is set, the solvent is
+        assumed to respond slowly, while the electron density relaxes quickly.
+        Default is False.
+
+    max_cycle : int
+        The maximum number of iterations to relax the solvent.
+
+    conv_tol : float
+        The convergence tolerance for total energy during solvent relaxation.
+
+    equilibrium_solvation : bool
+        Affects TDDFT and other excited state computations. Controls whether the solvent
+        relaxes rapidly with respect to the electron density of the excited state.
+        For vertical excitations, it is recommended to set this to False, as the solvent
+        typically does not fully relax. The non-equilibrium solvation is then applied with
+        the optical dielectric constant `eps_optical`. Default is False.
+
+    state_id : int
+        Specifies the target state in excited state calculations.
+        `state_id=0` corresponds to the ground state, while `state_id=1` corresponds
+        to the first excited state. Default is 0.
+
+    surface_discretization_method : str
+        Specifies the algorithm for the switching function, i.e. how each grid is partitioned
+        among the atoms.
+        Available options are "SWIG" (switching/Gaussian method) and "ISWIG" (improved SWIG).
+        Please refer to the following paper for the definition of both algorithms:
+        Lange, A. W.; Herbert, J. M. A smooth, nonsingular, and faithful discretization scheme
+        for polarizable continuum models: The switching/Gaussian approach. The Journal of
+        Chemical Physics 2010, 133. https://doi.org/10.1063/1.3511297
+
+    Saved Results:
+    --------------
+    e_tot : float
+        The energy contribution from the solvent.
+
+    v : ndarray
+        The potential matrix generated by the solvent.
+
+    Intermediate Attributes:
+    ------------------------
+    These attributes are generated during calculations and should not be modified.
+    Additionally, they may not be compatible between GPU and CPU implementations.
+
+    - surface
+    - _intermediates
+    - v_grids_n
+    '''
+
     _keys = {
-        'method', 'vdw_scale', 'surface', 'r_probe', 'intopt',
-        'mol', 'radii_table', 'atom_radii', 'lebedev_order', 'lmax', 'eta',
-        'eps', 'max_cycle', 'conv_tol', 'state_id', 'frozen',
+        'method', 'vdw_scale', 'surface', 'r_probe',
+        'mol', 'radii_table', 'lebedev_order', 'solvent',
+        'eps', 'eps_optical', 'max_cycle', 'conv_tol', 'state_id', 'frozen',
         'equilibrium_solvation', 'e', 'v', 'v_grids_n',
+        'surface_discretization_method',
     }
 
     kernel = ddcosmo.DDCOSMO.kernel
+    get_eps_optical = ddcosmo.DDCOSMO.get_eps_optical
 
-    def __init__(self, mol):
+    def __init__(self, mol, solvent=None):
         self.mol = mol
         self.stdout = mol.stdout
         self.verbose = mol.verbose
@@ -266,13 +392,15 @@ class PCM(lib.StreamObject):
         self.method = 'C-PCM'
 
         self.vdw_scale = 1.2 # default value in qchem
-        self.surface = {}
         self.r_probe = 0.0
         self.radii_table = None
-        self.atom_radii = None
         self.lebedev_order = 29
-        self._intermediates = {}
-        self.eps = 78.3553
+        self.eps = ddcosmo.EPS_WATER
+        self.eps_optical = None
+        # Assigning .solvent overwrites .eps and .eps_optical with the
+        # parameters of the solvent (see .__setattr__)
+        self.solvent = solvent or ''
+        self.surface_discretization_method = "SWIG"
 
         self.max_cycle = 20
         self.conv_tol = 1e-7
@@ -281,9 +409,32 @@ class PCM(lib.StreamObject):
         self.frozen = False
         self.equilibrium_solvation = False
 
+        self.surface = {}
+        self._intermediates = {}
+        self.v_grids_n = None # nuclear potential on grids
+
         self.e = None
         self.v = None
         self._dm = None
+
+    def __setattr__(self, key, val):
+        if key == 'solvent' and val:
+            val = self._set_solvent(val)
+        super().__setattr__(key, val)
+
+    def _set_solvent(self, solvent):
+        '''Applies the dielectric constant and the refractive index of the
+        solvent found in the solvent database. Returns the name of the solvent
+        as it is stored in the database.
+        '''
+        name = _solvent_data.resolve_solvent_name(solvent)
+        n, _, _, _, _, eps = _solvent_data.solvent_db[name][:6]
+        self.eps = eps
+        self.eps_optical = n**2
+        if getattr(self, '_intermediates', None):
+            # .eps was modified. The cached intermediates are outdated.
+            self.reset()
+        return name
 
     def dump_flags(self, verbose=None):
         logger.info(self, '******** %s (In testing) ********', self.__class__)
@@ -292,12 +443,13 @@ class PCM(lib.StreamObject):
                     'in the future.')
         logger.info(self, 'lebedev_order = %s (%d grids per sphere)',
                     self.lebedev_order, gen_grid.LEBEDEV_ORDER[self.lebedev_order])
+        solvent = getattr(self, 'solvent', '')
+        if solvent:
+            logger.info(self, 'solvent = %s'  , solvent)
         logger.info(self, 'eps = %s'          , self.eps)
+        logger.info(self, 'eps_optical = %s'  , self.eps_optical)
         logger.info(self, 'frozen = %s'       , self.frozen)
-        logger.info(self, 'equilibrium_solvation = %s', self.equilibrium_solvation)
-        logger.debug2(self, 'radii_table %s', self.radii_table)
-        if self.atom_radii:
-            logger.info(self, 'User specified atomic radii %s', str(self.atom_radii))
+        #logger.info(self, 'equilibrium_solvation = %s', self.equilibrium_solvation)
         return self
 
     def to_gpu(self):
@@ -310,39 +462,43 @@ class PCM(lib.StreamObject):
             self.mol = mol
         self._intermediates = None
         self.surface = None
-        self.intopt = None
+        self.v_grids_n = None
         return self
 
     def build(self, ng=None):
         if self.radii_table is None:
             vdw_scale = self.vdw_scale
-            self.radii_table = vdw_scale * modified_Bondi + self.r_probe
+            radii_table = vdw_scale * modified_Bondi + self.r_probe/radii.BOHR
+        else:
+            radii_table = self.radii_table
+        logger.debug2(self, 'radii_table %s', radii_table)
         mol = self.mol
         if ng is None:
             ng = gen_grid.LEBEDEV_ORDER[self.lebedev_order]
 
-        self.surface = gen_surface(mol, rad=self.radii_table, ng=ng)
+        self.surface = gen_surface(mol, rad=radii_table, ng=ng,
+                                   surface_discretization_method = self.surface_discretization_method)
         self._intermediates = {}
         F, A = get_F_A(self.surface)
         D, S = get_D_S(self.surface, with_S=True, with_D=True)
 
         epsilon = self.eps
         if self.method.upper() in ['C-PCM', 'CPCM']:
-            f_epsilon = (epsilon-1.)/epsilon
+            f_epsilon = (epsilon-1.)/epsilon if epsilon != float('inf') else 1.0
             K = S
             R = -f_epsilon * numpy.eye(K.shape[0])
         elif self.method.upper() == 'COSMO':
-            f_epsilon = (epsilon - 1.0)/(epsilon + 1.0/2.0)
+            f_epsilon = (epsilon - 1.0)/(epsilon + 1.0/2.0) if epsilon != float('inf') else 1.0
             K = S
             R = -f_epsilon * numpy.eye(K.shape[0])
         elif self.method.upper() in ['IEF-PCM', 'IEFPCM']:
-            f_epsilon = (epsilon - 1.0)/(epsilon + 1.0)
+            f_epsilon = (epsilon - 1.0)/(epsilon + 1.0) if epsilon != float('inf') else 1.0
             DA = D*A
             DAS = numpy.dot(DA, S)
             K = S - f_epsilon/(2.0*PI) * DAS
             R = -f_epsilon * (numpy.eye(K.shape[0]) - 1.0/(2.0*PI)*DA)
         elif self.method.upper() == 'SS(V)PE':
-            f_epsilon = (epsilon - 1.0)/(epsilon + 1.0)
+            f_epsilon = (epsilon - 1.0)/(epsilon + 1.0) if epsilon != float('inf') else 1.0
             DA = D*A
             DAS = numpy.dot(DA, S)
             K = S - f_epsilon/(4.0*PI) * (DAS + DAS.T)
@@ -413,14 +569,21 @@ class PCM(lib.StreamObject):
         nset = dms.shape[0]
         v_grids_e = numpy.empty([nset, ngrids])
         max_memory = self.max_memory - lib.current_memory()[0]
-        blksize = int(max(max_memory*.9e6/8/nao**2, 400))
+        # The floor of 8 grids per block bounds the Python overhead of the
+        # block loop. It must not exceed what the remaining memory allows,
+        # otherwise a single v_nj buffer (nao**2 * blksize * 8 bytes) can
+        # exceed the memory budget for large systems.
+        blksize = int(max(max_memory*.9e6/8/nao**2, 8))
         int3c2e = mol._add_suffix('int3c2e')
         cintopt = gto.moleintor.make_cintopt(mol._atm, mol._bas, mol._env, int3c2e)
         for p0, p1 in lib.prange(0, ngrids, blksize):
             fakemol = gto.fakemol_for_charges(grid_coords[p0:p1], expnt=exponents[p0:p1]**2)
+            fakemol.cart = mol.cart
             v_nj = df.incore.aux_e2(mol, fakemol, intor=int3c2e, aosym='s1', cintopt=cintopt)
             for i in range(nset):
                 v_grids_e[i,p0:p1] = numpy.einsum('ijL,ij->L',v_nj, dms[i])
+            # Free up v_nj to stay within mem limits
+            del v_nj
 
         return v_grids_e
 
@@ -434,37 +597,51 @@ class PCM(lib.StreamObject):
         nset = q.shape[0]
         vmat = numpy.zeros([nset,nao,nao])
         max_memory = self.max_memory - lib.current_memory()[0]
-        blksize = int(max(max_memory*.9e6/8/nao**2, 400))
+        blksize = int(max(max_memory*.9e6/8/nao**2, 8))
 
         int3c2e = mol._add_suffix('int3c2e')
         cintopt = gto.moleintor.make_cintopt(mol._atm, mol._bas, mol._env, int3c2e)
         for p0, p1 in lib.prange(0, ngrids, blksize):
             fakemol = gto.fakemol_for_charges(grid_coords[p0:p1], expnt=exponents[p0:p1]**2)
+            fakemol.cart = mol.cart
             v_nj = df.incore.aux_e2(mol, fakemol, intor=int3c2e, aosym='s1', cintopt=cintopt)
             for i in range(nset):
                 vmat[i] += -numpy.einsum('ijL,L->ij', v_nj, q[i,p0:p1])
+            # Free up v_nj to stay within mem limits
+            del v_nj
         return vmat
 
     def nuc_grad_method(self, grad_method):
-        from pyscf.solvent.grad import pcm as pcm_grad
-        if self.frozen:
-            raise RuntimeError('Frozen solvent model is not supported')
-        from pyscf import scf
-        from pyscf.solvent import _ddcosmo_tdscf_grad
-        if isinstance(grad_method.base, tdscf.rhf.TDBase):
-            return _ddcosmo_tdscf_grad.make_grad_object(grad_method)
-        else:
-            return pcm_grad.make_grad_object(grad_method)
+        raise DeprecationWarning('Use the make_grad_object function from '
+                                 'pyscf.solvent.grad.pcm or '
+                                 'pyscf.solvent._ddcosmo_tdscf_grad instead.')
+
+    def grad(self, dm):
+        '''Computes the Jacobian for the energy associated with the solvent,
+        including the derivatives of the solvent itsself and the interactions
+        between the solvent and the charge density of the solute.
+        '''
+        from pyscf.solvent.grad.pcm import grad_qv, grad_nuc, grad_solver
+        de_solvent = grad_qv(self, dm)
+        de_solvent+= grad_nuc(self, dm)
+        de_solvent+= grad_solver(self, dm)
+        return de_solvent
 
     def Hessian(self, hess_method):
-        from pyscf.solvent.hessian import pcm as pcm_hess
-        if self.frozen:
-            raise RuntimeError('Frozen solvent model is not supported')
-        from pyscf import scf
-        if isinstance(hess_method.base, (scf.hf.RHF, scf.uhf.UHF)):
-            return pcm_hess.make_hess_object(hess_method)
-        else:
-            raise RuntimeError('Only SCF gradient is supported')
+        raise DeprecationWarning('Use the make_hessian_object function from '
+                                 'pyscf.solvent.hessian.pcm instead.')
+
+    def hess(self, dm):
+        '''Computes the Hessian for the energy associated with the solvent,
+        including the derivatives of the solvent itsself and the interactions
+        between the solvent and the charge density of the solute.
+        '''
+        from pyscf.solvent.hessian.pcm import (
+            analytical_hess_nuc, analytical_hess_qv, analytical_hess_solver)
+        de_solvent  =    analytical_hess_nuc(self, dm, verbose=self.verbose)
+        de_solvent +=     analytical_hess_qv(self, dm, verbose=self.verbose)
+        de_solvent += analytical_hess_solver(self, dm, verbose=self.verbose)
+        return de_solvent
 
     def _B_dot_x(self, dms):
         if not self._intermediates:

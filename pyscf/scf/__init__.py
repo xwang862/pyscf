@@ -36,11 +36,12 @@ to control the SCF method.
     chkfile : str
         checkpoint file to save MOs, orbital energies etc.
     conv_tol : float
-        converge threshold.  Default is 1e-10
+        converge threshold.  Default is 1e-9
     max_cycle : int
         max number of iterations.  Default is 50
     init_guess : str
-        initial guess method.  It can be one of 'minao', 'atom', '1e', 'chkfile'.
+        initial guess method.  It can be one of 'minao', 'atom', 'huckel',
+        'mod_huckel', '1e', 'hcore', 'sap', 'chkfile'.
         Default is 'minao'
     DIIS : class listed in :mod:`scf.diis`
         Default is :class:`diis.SCF_DIIS`. Set it to None/False to turn off DIIS.
@@ -210,26 +211,26 @@ def newton(mf):
 
 fast_newton = addons.fast_newton
 
-def KS(mol, *args):
+def KS(mol, *args, **kwargs):
     from pyscf import dft
-    return dft.KS(mol, *args)
+    return dft.KS(mol, *args, **kwargs)
 
-def RKS(mol, *args):
+def RKS(mol, *args, **kwargs):
     from pyscf import dft
-    return dft.RKS(mol, *args)
+    return dft.RKS(mol, *args, **kwargs)
 
-def ROKS(mol, *args):
+def ROKS(mol, *args, **kwargs):
     from pyscf import dft
-    return dft.ROKS(mol, *args)
+    return dft.ROKS(mol, *args, **kwargs)
 
-def UKS(mol, *args):
+def UKS(mol, *args, **kwargs):
     from pyscf import dft
-    return dft.UKS(mol, *args)
+    return dft.UKS(mol, *args, **kwargs)
 
-def GKS(mol, *args):
+def GKS(mol, *args, **kwargs):
     from pyscf import dft
-    return dft.GKS(mol, *args)
+    return dft.GKS(mol, *args, **kwargs)
 
-def DKS(mol, *args):
+def DKS(mol, *args, **kwargs):
     from pyscf import dft
-    return dft.DKS(mol, *args)
+    return dft.DKS(mol, *args, **kwargs)

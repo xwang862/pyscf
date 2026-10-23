@@ -10,7 +10,6 @@ The format and input convention of auxbasis are the same to the AO basis.
 See also examples/gto/04-input_basis.py
 '''
 
-import tempfile
 from pyscf import gto, scf, df
 
 #
@@ -65,3 +64,19 @@ mf = scf.RHF(mol).density_fit()
 mf.with_df.auxbasis = df.aug_etb(mol, beta=1.7)
 mf.kernel()
 
+# Generating auxiliary basis using the AutoAux algorithms proposed by Stoychev
+# (JCTC, 13, 554)
+mf = scf.RHF(mol).density_fit()
+mf.with_df.auxbasis = df.autoaux(mol)
+mf.kernel()
+
+# 'autoaux' can be specified directly as a keyword for the basis set
+mf.with_df.auxbasis = 'autoaux'
+
+# It also supports defining mixed auxiliary bases, e.g.
+mf.with_df.auxbasis = {'default': 'autoaux', 'N2': 'weigend'}
+
+# The automatic generation of auxiliary basis set (see also 10.1021/acs.jctc.3c00670)
+mf = scf.RHF(mol).density_fit()
+mf.with_df.auxbasis = df.autoabs(mol)
+mf.kernel()

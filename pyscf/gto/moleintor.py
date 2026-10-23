@@ -183,6 +183,31 @@ def getints(intor_name, atm, bas, env, shls_slice=None, comp=None, hermi=0,
             "ECPso_spinor"                    < | sigam dot Spin-orbit ECP | >
             ================================  =============
 
+            ==========   =============
+            Symbol       Meaning
+            ==========   =============
+            p            :math:`-i \nabla`
+            ip           :math:`\nabla`
+            r0           :math:`\vec{r} - (0,0,0)`
+            rc           :math:`\vec{r} - \vec{R}_{(\texttt{env[PTR_COMMON_ORIG]})}`
+            ri           :math:`\vec{r} - \vec{R}_i`
+            rj           :math:`\vec{r} - \vec{R}_j`
+            rk           :math:`\vec{r} - \vec{R}_k`
+            rl           :math:`\vec{r} - \vec{R}_l`
+            r            can be ri/rj/rk/rl; associate with the basis it operates
+            g            :math:`(i/2) (\vec{R}_{bra} - \vec{R}_{ket}) \times \vec{r}`
+            sigma        three pauli matrices
+            dot, cross   can be used to combine operator-bra or operator-ket
+            rinv         :math:`|\vec{r} - \vec{R}_{(\texttt{env[PTR_RINV_ORIG]})}|^{-1}`
+            nuc          :math:`\sum_N Z_N |\vec{r} - \vec{R}_N|^{-1}`
+            nabla-rinv   :math:`\nabla |\vec{r} - \vec{R}_{(\texttt{env[PTR_RINV_ORIG]})}|^{-1}`
+            gaunt        :math:`\alpha_i \cdot \alpha_j  / |\vec{r}_i - \vec{r}_j|`, \
+                         note the minus sign in Gaunt is not included
+            breit        :math:`-(\alpha_i \cdot \alpha_j)/(2 |\vec{r}_i - \vec{r}_j|) \
+                         - ((\alpha_i \cdot r_{ij})  (\alpha_j \cdot r_{ij})) / \
+                         (2|\vec{r}_i - \vec{r}_j|^3)`
+            ==========   =============
+
         atm : int32 ndarray
             libcint integral function argument
         bas : int32 ndarray
@@ -231,12 +256,10 @@ def getints(intor_name, atm, bas, env, shls_slice=None, comp=None, hermi=0,
     if any(bas[:,ANG_OF] > 12):
         raise NotImplementedError('cint library does not support high angular (l>12) GTOs')
 
-    if (intor_name.startswith('int1e') or
-        intor_name.startswith('ECP') or
-        intor_name.startswith('int2c2e')):
+    if intor_name.startswith(('int1e', 'ECP', 'int2c2e')):
         return getints2c(intor_name, atm, bas, env, shls_slice, comp,
                          hermi, ao_loc, cintopt, out)
-    elif intor_name.startswith('int2e') or intor_name.startswith('int4c1e'):
+    elif intor_name.startswith(('int2e', 'int4c1e')):
         return getints4c(intor_name, atm, bas, env, shls_slice, comp,
                          aosym, ao_loc, cintopt, out)
     elif intor_name.startswith('int3c'):
@@ -472,7 +495,7 @@ def getints2c(intor_name, atm, bas, env, shls_slice=None, comp=1, hermi=0,
         shape = (naoi, naoj, comp)
         prefix = 'GTO'
 
-    if intor_name.endswith('_cart') or intor_name.endswith('_sph'):
+    if intor_name.endswith(('_cart', '_sph')):
         dtype = numpy.double
         drv_name = prefix + 'int2c'
     else:
@@ -594,7 +617,7 @@ def getints4c(intor_name, atm, bas, env, shls_slice=None, comp=1,
     if aosym == 's8':
         assert (shls_slice is None)
         from pyscf.scf import _vhf
-        nao = ao_loc[-1]
+        nao = int(ao_loc[-1])
         nao_pair = nao*(nao+1)//2
         out = numpy.ndarray((nao_pair*(nao_pair+1)//2), buffer=out)
         if nao_pair == 0:
@@ -632,14 +655,15 @@ def getints4c(intor_name, atm, bas, env, shls_slice=None, comp=1,
             assert (numpy.all(ao_loc[k0:k1]-ao_loc[k0] == ao_loc[l0:l1]-ao_loc[l0]))
         else:
             nkl = [naok, naol]
-        shape = [comp] + nij + nkl
 
         if '_spinor' in intor_name:
+            shape = nij + nkl + [comp]
             drv = libcgto.GTOr4c_drv
             fill = libcgto.GTOr4c_fill_s1
-            out = numpy.ndarray(shape[::-1], dtype=numpy.complex128, buffer=out, order='F')
+            out = numpy.ndarray(shape, dtype=numpy.complex128, buffer=out, order='F')
             out = numpy.rollaxis(out, -1, 0)
         else:
+            shape = [comp] + nij + nkl
             drv = libcgto.GTOnr2e_fill_drv
             fill = getattr(libcgto, 'GTOnr2e_fill_'+aosym)
             out = numpy.ndarray(shape, buffer=out)
@@ -740,7 +764,7 @@ def getints_by_shell(intor_name, shls, atm, bas, env, comp=1):
         else:
             return buf.transpose(3,0,1,2)
 
-    elif intor_name.startswith('int2e') or intor_name.startswith('int4c'):
+    elif intor_name.startswith(('int2e', 'int4c')):
         assert (len(shls) == 4)
         di, dj, dk, dl = [num_cgto_of(x) for x in shls]
         buf = numpy.empty((di,dj,dk,dl,comp), dtype, order='F')

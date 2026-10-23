@@ -29,7 +29,7 @@ H       0.7570000000     0.0000000000    -0.4696000000
     '''
     mol.basis = 'sto3g'
     mol.output = '/dev/null'
-    mol.build(verbose=0)
+    mol.build(verbose=6)
     mol.nelectron = mol.nao * 2
     epsilon = 35.9
     lebedev_order = 3
@@ -156,11 +156,14 @@ class KnownValues(unittest.TestCase):
 
     def test_grad_SSVPE(self):
         grad = _grad_with_solvent('SS(V)PE')
-        g0 = numpy.asarray(
-            [[ 3.42479745e-15, -1.00280742e-16, -1.61117735e+00],
-            [ 1.07135985e+00, -6.97375148e-16,  8.05588676e-01],
-            [-1.07135985e+00,  7.91425487e-16,  8.05588676e-01]]
-        )
+        # Note: This reference value is obtained via finite difference with dx = 1e-5
+        #       QChem 6.1 has a bug in SSVPE gradient, they use the IEFPCM gradient algorithm
+        #       to compute SSVPE gradient, which is wrong.
+        g0 = numpy.asarray([
+            [ 0.00000000e+00, -7.10542736e-10, -1.63195623e+00],
+            [ 1.07705138e+00,  2.13162821e-09,  8.15978117e-01],
+            [-1.07705138e+00, -2.13162821e-09,  8.15978116e-01],
+        ])
         print(f"Gradient error in RHF with SS(V)PE: {numpy.linalg.norm(g0 - grad)}")
         assert numpy.linalg.norm(g0 - grad) < 1e-6
 
@@ -232,6 +235,119 @@ class KnownValues(unittest.TestCase):
         e2 = mycc2.e_tot
 
         self.assertAlmostEqual((e2-e1)/dx, de[0,2], 3)
+
+    @unittest.skip('PCM-TDDFT gradients not available')
+    def test_scanner(self):
+        mol = gto.M(atom='H  0.  0.  1.804; F  0.  0.  0.', verbose=0, unit='B')
+        td = mol.RHF().PCM().TDA(equilibrium_solvation=True).Gradients()
+        scan = td.as_scanner()
+        e, de = scan('H 0 0 0; F .1 0 2.1')
+
+        mol0 = gto.M(atom='H 0 0 0; F .1 0 2.1', verbose=0, unit='B')
+        td_ref = mol0.RHF().PCM().run(conf_tol=1e-12).TDA(equilibrium_solvation=True).run(conf_tol=1e-10)
+        ref = td_ref.Gradients().kernel()
+        assert abs(e - -98.20379057832794) < 1e-8
+        assert abs(e - td_ref.e_tot[0]) < 1e-8
+        assert abs(de[0,0] - 0.011132973) < 1e-5
+        assert abs(abs(ref - de).max()) < 1e-5
+
+        mol1 = gto.M(atom='H 0 0 -0.001; F .1 0 2.1', verbose=0, unit='B')
+        td1 = mol1.RHF().PCM().run(conf_tol=1e-12).TDA(equilibrium_solvation=True).run(conf_tol=1e-10)
+        mol2 = gto.M(atom='H 0 0  0.001; F .1 0 2.1', verbose=0, unit='B')
+        td2 = mol2.RHF().PCM().run(conf_tol=1e-12).TDA(equilibrium_solvation=True).run(conf_tol=1e-10)
+        assert abs((td2.e_tot[0]-td1.e_tot[0])/0.002- de[0,2]) < 1e-5
+
+    def test_grad_lazy_run(self):
+        mol = gto.M(atom='H 0 0 0; H 0 0 1', basis='631g', verbose=0)
+        g = mol.RHF().PCM().Gradients().run()
+        assert abs(lib.fp(g.de) - 0.06742803540514217) < 1e-6
+
+    def test_iswig_grad(self):
+        mol = gto.M(
+            atom = """
+                H 0 0 0
+                F 1 0 0.1
+            """,
+            basis = "6-31g",
+            verbose = 0,
+        )
+
+        mf = mol.RHF().PCM()
+        mf.with_solvent.method = 'C-PCM'
+        mf.with_solvent.lebedev_order = 7
+        mf.with_solvent.eps = 78
+        mf.with_solvent.surface_discretization_method = "iswig"
+        mf.conv_tol = 1e-12
+        mf.kernel()
+        assert mf.converged
+
+        test_gradient = mf.Gradients().kernel()
+
+        # ref_gradient = numpy.empty([mol.natm, 3])
+
+        # def get_e(mol):
+        #     mf = mol.RHF().PCM()
+        #     mf.with_solvent.method = 'C-PCM'
+        #     mf.with_solvent.lebedev_order = 7
+        #     mf.with_solvent.eps = 78
+        #     mf.with_solvent.surface_discretization_method = "iswig"
+        #     mf.conv_tol = 1e-12
+        #     e = mf.kernel()
+        #     assert mf.converged
+        #     return e
+
+        # dx = 4e-5
+        # mol_copy = mol.copy()
+        # for i_atom in range(mol.natm):
+        #     for i_xyz in range(3):
+        #         xyz_p = mol.atom_coords()
+        #         xyz_p[i_atom, i_xyz] += dx
+        #         mol_copy.set_geom_(xyz_p, unit='Bohr')
+        #         mol_copy.build()
+        #         e_p = get_e(mol_copy)
+
+        #         xyz_m = mol.atom_coords()
+        #         xyz_m[i_atom, i_xyz] -= dx
+        #         mol_copy.set_geom_(xyz_m, unit='Bohr')
+        #         mol_copy.build()
+        #         e_m = get_e(mol_copy)
+
+        #         ref_gradient[i_atom, i_xyz] = (e_p - e_m) / (2 * dx)
+        # print(repr(ref_gradient))
+
+        ref_gradient = numpy.array([
+            [-6.76381013e-02,  8.88178420e-10, -6.88678181e-03],
+            [ 6.76381010e-02,  0.00000000e+00,  6.88678217e-03]
+        ])
+
+        assert numpy.max(numpy.abs(test_gradient - ref_gradient)) < 1e-7
+
+    def test_cartesian_basis_grad(self):
+        mol = gto.M(
+            atom = """
+                H 0 0 0
+                F 1 0 0.1
+            """,
+            basis = "def2-tzvp",
+            cart = 1,
+            verbose = 0,
+        )
+        mf = scf.RHF(mol).PCM()
+        mf.with_solvent.method = "C-PCM"
+        mf.with_solvent.eps = 35.9
+
+        mf.conv_tol = 1e-10
+        mf.kernel()
+        assert mf.converged
+
+        test_gradient = mf.Gradients().kernel()
+
+        ref_gradient = numpy.array([
+            [ -0.090575,     -0.000000,     -0.009052],
+            [  0.090575,      0.000000,      0.009052],
+        ])
+
+        assert numpy.max(numpy.abs(test_gradient - ref_gradient)) < 1e-6
 
 if __name__ == "__main__":
     print("Full Tests for Gradient of PCMs")

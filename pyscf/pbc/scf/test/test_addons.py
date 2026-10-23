@@ -21,6 +21,7 @@ import numpy
 from pyscf import lib
 import pyscf.pbc.gto as pbcgto
 import pyscf.pbc.scf as pscf
+from pyscf.df import make_auxbasis
 
 def setUpModule():
     global cell, kmf_ro, kmf_r, kmf_u, kmf_g, nao, kpts
@@ -93,7 +94,7 @@ class KnownValues(unittest.TestCase):
         cell.verbose = 3
         cell.build()
         nks = [2,1,1]
-        mf = pscf.KUHF(cell, cell.make_kpts(nks)).density_fit()
+        mf = pscf.KUHF(cell, cell.make_kpts(nks)).density_fit(auxbasis=make_auxbasis(cell))
         mf = pscf.addons.smearing_(mf, .1)
         mf.kernel()
         self.assertAlmostEqual(mf.e_tot, -5.56769351866668, 6)
@@ -120,7 +121,7 @@ class KnownValues(unittest.TestCase):
 
     def test_uhf_smearing(self):
         mf = pscf.UHF(cell)
-        pscf.addons.smearing_(mf, 0.1, 'fermi')
+        mf = mf.smearing(0.1, 'fermi')
         mo_energy = numpy.arange(nao)*.2+numpy.cos(.5)*.1
         mo_energy = numpy.array([mo_energy, mo_energy+numpy.cos(mo_energy)*.02])
         mf.get_occ(mo_energy)
@@ -394,7 +395,7 @@ class KnownValues(unittest.TestCase):
         kmf.get_ovlp = lambda *args: numpy.array([numpy.eye(Nsite)]*Nk)
         kmf.get_veff = get_veff
 
-        kmf = pscf.addons.smearing_(kmf, sigma=0.2, method='gaussian')
+        kmf = kmf.smearing(sigma=0.2, method='gaussian')
 
         dm_a = numpy.array([numpy.eye(Nsite)]*Nk)
         dm_b = dm_a * 0.5

@@ -23,52 +23,53 @@ from pyscf.dft import numint
 def setUpModule():
     numint.SWITCH_SIZE = 0
     global mol, mf, h4, mf_h4, mol1, h2o, nao, he2, mf_he2
-    mol = gto.Mole()
-    mol.verbose = 0
-    mol.atom = [('h', (0,0,i*3)) for i in range(12)]
-    mol.basis = 'ccpvtz'
-    mol.build()
-    mf = dft.RKS(mol)
-    mf.grids.atom_grid = {"H": (50, 110)}
-    mf.prune = None
-    mf.grids.build(with_non0tab=True)
-    nao = mol.nao_nr()
-    ao_loc = mol.ao_loc_nr()
+    with lib.temporary_env(dft.radi, ATOM_SPECIFIC_TREUTLER_GRIDS=False):
+        mol = gto.Mole()
+        mol.verbose = 0
+        mol.atom = [('h', (0,0,i*3)) for i in range(12)]
+        mol.basis = 'ccpvtz'
+        mol.build()
+        mf = dft.RKS(mol)
+        mf.grids.atom_grid = {"H": (50, 110)}
+        mf.prune = None
+        mf.grids.build(with_non0tab=True)
+        nao = mol.nao_nr()
+        ao_loc = mol.ao_loc_nr()
 
-    h4 = gto.Mole()
-    h4.verbose = 0
-    h4.atom = 'H 0 0 0; H 0 0 9; H 0 9 0; H 0 9 9'
-    h4.basis = 'ccpvtz'
-    h4.build()
-    mf_h4 = dft.RKS(h4)
-    mf_h4.grids.atom_grid = {"H": (50, 110)}
-    mf_h4.grids.build(with_non0tab=True)
+        h4 = gto.Mole()
+        h4.verbose = 0
+        h4.atom = 'H 0 0 0; H 0 0 9; H 0 9 0; H 0 9 9'
+        h4.basis = 'ccpvtz'
+        h4.build()
+        mf_h4 = dft.RKS(h4)
+        mf_h4.grids.atom_grid = {"H": (50, 110)}
+        mf_h4.grids.build(with_non0tab=True)
 
-    mol1 = gto.Mole()
-    mol1.verbose = 0
-    mol1.atom = [('h', (0,0,i*3)) for i in range(4)]
-    mol1.basis = 'ccpvtz'
-    mol1.build()
+        mol1 = gto.Mole()
+        mol1.verbose = 0
+        mol1.atom = [('h', (0,0,i*3)) for i in range(4)]
+        mol1.basis = 'ccpvtz'
+        mol1.build()
 
-    h2o = gto.Mole()
-    h2o.verbose = 5
-    h2o.output = '/dev/null'
-    h2o.atom = [
-        ["O" , (0. , 0.     , 0.)],
-        [1   , (0. , -0.757 , 0.587)],
-        [1   , (0. , 0.757  , 0.587)] ]
+        h2o = gto.Mole()
+        h2o.verbose = 5
+        h2o.output = '/dev/null'
+        h2o.atom = [
+            ["O" , (0. , 0.     , 0.)],
+            [1   , (0. , -0.757 , 0.587)],
+            [1   , (0. , 0.757  , 0.587)] ]
 
-    h2o.basis = {"H": '6-31g', "O": '6-31g',}
-    h2o.build()
+        h2o.basis = {"H": '6-31g', "O": '6-31g',}
+        h2o.build()
 
-    he2 = gto.Mole()
-    he2.verbose = 0
-    he2.atom = 'He 0.0 0.0 0.0; He 0.0 0.0 20.0'
-    he2.basis = 'aug-pc-4'
-    he2.build()
-    mf_he2 = dft.RKS(he2)
-    mf_he2.grids.level = 0
-    mf_he2.grids.build(with_non0tab=True)
+        he2 = gto.Mole()
+        he2.verbose = 0
+        he2.atom = 'He 0.0 0.0 0.0; He 0.0 0.0 20.0'
+        he2.basis = 'aug-pc-4'
+        he2.build()
+        mf_he2 = dft.RKS(he2)
+        mf_he2.grids.level = 0
+        mf_he2.grids.build(with_non0tab=True)
 
 def tearDownModule():
     numint.SWITCH_SIZE = 800
@@ -92,6 +93,15 @@ def _fill_zero_blocks(mat, ao_loc, mask):
     return mat
 
 class KnownValues(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.original_grids = dft.radi.ATOM_SPECIFIC_TREUTLER_GRIDS
+        dft.radi.ATOM_SPECIFIC_TREUTLER_GRIDS = False
+
+    @classmethod
+    def tearDownClass(cls):
+        dft.radi.ATOM_SPECIFIC_TREUTLER_GRIDS = cls.original_grids
+
     def test_dot_ao_dm(self):
         dm = mf_h4.get_init_guess(key='minao')
         ao_loc = h4.ao_loc_nr()
@@ -167,10 +177,20 @@ class KnownValues(unittest.TestCase):
         ao = dft.numint.eval_ao(mol, mf.grids.coords, deriv=1)
         nao = ao.shape[1]
         ao_loc = mol.ao_loc_nr()
+        cutoff = mf.grids.cutoff * 1e2
+        cutoff2 = numint.CUTOFF * 1e2
+        nbins = numint.NBINS * 2 - int(numint.NBINS * numpy.log(cutoff)
+                                       / numpy.log(mf.grids.cutoff))
+        pair_mask = mol.get_overlap_cond() < -numpy.log(cutoff2)
+        wv = numpy.ones(ao.shape[1])
         res0 = lib.dot(ao[0].T, ao[1])
         res1 = dft.numint._dot_ao_ao(mol, ao[0], ao[1], non0tab,
                                      shls_slice=(0,mol.nbas), ao_loc=ao_loc)
+        res2 = dft.numint._dot_ao_ao_sparse(ao[0], ao[1], wv, nbins,
+                                            non0tab, pair_mask, ao_loc,
+                                            hermi=0)
         self.assertAlmostEqual(abs(res0 - res1).max(), 0, 9)
+        self.assertAlmostEqual(abs(res0 - res2).max(), 0, 9)
 
     def test_eval_rho(self):
         numpy.random.seed(10)
@@ -532,18 +552,19 @@ class KnownValues(unittest.TestCase):
         ni.omega = 0.4
         omega = 0.2
         exc, vxc, fxc, kxc = ni.eval_xc('ITYH,', rho0, 0, 0, 1, omega)
-        self.assertAlmostEqual(float(exc), -0.6359945579326314, 7)
-        self.assertAlmostEqual(float(vxc[0]), -0.8712041561251518, 7)
-        self.assertAlmostEqual(float(vxc[1]), -0.003911167644579979, 7)
+        self.assertAlmostEqual(float(exc[0]), -0.6359945579326314, 7)
+        self.assertAlmostEqual(float(vxc[0][0]), -0.8712041561251518, 7)
+        self.assertAlmostEqual(float(vxc[1][0]), -0.003911167644579979, 7)
 
         exc, vxc, fxc, kxc = ni.eval_xc('ITYH,', rho0, 0, 0, 1)
-        self.assertAlmostEqual(float(exc), -0.5406095865415561, 7)
-        self.assertAlmostEqual(float(vxc[0]), -0.772123720263471, 7)
-        self.assertAlmostEqual(float(vxc[1]), -0.00301639097170439, 7)
+        self.assertAlmostEqual(float(exc[0]), -0.5406095865415561, 7)
+        self.assertAlmostEqual(float(vxc[0][0]), -0.772123720263471, 7)
+        self.assertAlmostEqual(float(vxc[1][0]), -0.00301639097170439, 7)
 
     def test_cache_xc_kernel(self):
         mf = dft.RKS(h2o)
         mf.grids.atom_grid = {"H": (50, 194), "O": (50, 194),}
+        mf.small_rho_cutoff = 1e-7
         mf.run()
 
         mf.xc = 'WB97XD'
@@ -571,6 +592,180 @@ class KnownValues(unittest.TestCase):
             rho2, vxc2, fxc2 = mf._numint.cache_xc_kernel(mf.mol, mf.grids, mf.xc, mf.mo_coeff, mf.mo_occ)
 
             self.assertAlmostEqual(abs(fxc1*rho1[0] - fxc2*rho2[0]).max(), 0, 4)
+
+    def test_get_rho_mo_input(self):
+        mol = gto.M(
+            atom = """
+                O 0 0 0
+                H 1 0 0
+                H -0.5 0.5 0
+            """,
+            basis = '6-31g',
+            verbose = 0,
+        )
+        mf = mol.RKS(xc = 'r2scan').density_fit(auxbasis = "def2-universal-jkfit")
+        mf.grids.atom_grid = (3,6)
+        mf.conv_tol = 1e-10
+        mf.kernel()
+        assert mf.converged
+
+        dm = mf.make_rdm1()
+        assert getattr(dm, "mo_coeff", None) is not None
+        assert getattr(dm, "mo_occ", None) is not None
+        test_rho = mf._numint.get_rho(mf.mol, dm, mf.grids)
+
+        ref_rho = numint.get_rho_naive(mol, dm, mf.grids)
+
+        assert test_rho.shape == ref_rho.shape
+        assert numpy.max(numpy.abs(test_rho - ref_rho)) < 1e-12
+
+    def test_get_rho_dm_input(self):
+        mol = gto.M(
+            atom = """
+                O 0 0 0
+                H 1 0 0
+                H -0.5 0.5 0
+            """,
+            basis = '6-31g',
+            verbose = 0,
+        )
+        mf = mol.RKS(xc = 'PBE0')
+        mf.grids.atom_grid = (50,194)
+        mf.conv_tol = 1e-10
+        mf.kernel()
+        assert mf.converged
+
+        dm = mf.make_rdm1()
+        dm = dm.copy() # Remove attached fields
+        assert getattr(dm, "mo_coeff", None) is None
+        assert getattr(dm, "mo_occ", None) is None
+        test_rho = mf._numint.get_rho(mf.mol, dm, mf.grids)
+
+        ref_rho = numint.get_rho_naive(mol, dm, mf.grids)
+
+        assert test_rho.shape == ref_rho.shape
+        assert numpy.max(numpy.abs(test_rho - ref_rho)) < 1e-12
+
+    def test_get_rho_with_derivatives_restricted_mo_input(self):
+        mol = gto.M(
+            atom = """
+                O 0 0 0
+                H 1 0 0
+                H -0.5 0.5 0
+            """,
+            basis = '6-31g',
+            verbose = 0,
+        )
+        mf = mol.RKS(xc = 'PBE').density_fit(auxbasis = "def2-universal-jkfit")
+        mf.grids.atom_grid = (50,194)
+        mf.conv_tol = 1e-10
+        mf.kernel()
+        assert mf.converged
+
+        dm = mf.make_rdm1()
+        assert getattr(dm, "mo_coeff", None) is not None
+        assert getattr(dm, "mo_occ", None) is not None
+
+        test_rho = mf._numint.get_rho_with_derivatives(mf.mol, dm, mf.grids)
+
+        ref_rho = numint.get_rho_with_derivatives_naive(mol, dm, mf.grids)
+
+        assert test_rho.shape == (1, 5, mf.grids.coords.shape[0])
+        assert  ref_rho.shape == (1, 5, mf.grids.coords.shape[0])
+        assert numpy.max(numpy.abs(test_rho - ref_rho)) < 2e-11
+
+    def test_get_rho_with_derivatives_restricted_dm_input(self):
+        mol = gto.M(
+            atom = """
+                O 0 0 0
+                H 1 0 0
+                H -0.5 0.5 0
+            """,
+            basis = '6-31g',
+            verbose = 0,
+        )
+        mf = mol.RKS(xc = 'r2scan').density_fit(auxbasis = "def2-universal-jkfit")
+        mf.grids.atom_grid = (3,6)
+        mf.conv_tol = 1e-10
+        mf.kernel()
+        assert mf.converged
+
+        dm = mf.make_rdm1()
+        dm = dm.copy() # Remove attached fields
+        assert getattr(dm, "mo_coeff", None) is None
+        assert getattr(dm, "mo_occ", None) is None
+
+        test_rho = mf._numint.get_rho_with_derivatives(mf.mol, dm, mf.grids, "PBE")
+
+        ref_rho = numint.get_rho_with_derivatives_naive(mol, dm, mf.grids, "PBE")
+
+        assert test_rho.shape == (1, 4, mf.grids.coords.shape[0])
+        assert  ref_rho.shape == (1, 4, mf.grids.coords.shape[0])
+        assert numpy.max(numpy.abs(test_rho - ref_rho)) < 1e-11
+
+    def test_get_rho_with_derivatives_unrestricted_mo_input(self):
+        mol = gto.M(
+            atom = """
+                O 0 0 0
+                H 1 0 0
+                H -0.5 0.5 0
+            """,
+            basis = '6-31g',
+            charge = 1,
+            spin = 1,
+            verbose = 0,
+        )
+        mf = mol.UKS(xc = 'LDA').density_fit(auxbasis = "def2-universal-jkfit")
+        mf.grids.level = 0
+        mf.conv_tol = 1e-10
+        mf.kernel()
+        assert mf.converged
+
+        dm = mf.make_rdm1()
+        assert dm.shape == (2, mol.nao, mol.nao)
+        assert getattr(dm, "mo_coeff", None) is not None
+        assert getattr(dm, "mo_occ", None) is not None
+
+        test_rho = mf._numint.get_rho_with_derivatives(mf.mol, dm, mf.grids)
+
+        ref_rho = numint.get_rho_with_derivatives_naive(mol, dm, mf.grids)
+
+        assert test_rho.shape == (2, 5, mf.grids.coords.shape[0])
+        assert  ref_rho.shape == (2, 5, mf.grids.coords.shape[0])
+        assert numpy.max(numpy.abs(test_rho - ref_rho)) < 1e-11
+
+    def test_get_rho_with_derivatives_unrestricted_dm_input(self):
+        mol = gto.M(
+            atom = """
+                O 0 0 0
+                H 1 0 0
+                H -0.5 0.5 0
+            """,
+            basis = '6-31g',
+            charge = 1,
+            spin = 1,
+            verbose = 0,
+        )
+        mf = mol.UKS(xc = 'wB97X').density_fit(auxbasis = "def2-universal-jkfit")
+        mf.grids.level = 3
+        mf.conv_tol = 1e-10
+        mf.kernel()
+        assert mf.converged
+
+        dm = mf.make_rdm1()
+        dm = dm.copy() # Remove attached fields
+        assert dm.shape == (2, mol.nao, mol.nao)
+        assert getattr(dm, "mo_coeff", None) is None
+        assert getattr(dm, "mo_occ", None) is None
+
+        test_rho = mf._numint.get_rho_with_derivatives(mf.mol, dm, mf.grids)
+
+        ref_rho = numint.get_rho_with_derivatives_naive(mol, dm, mf.grids)
+
+        assert test_rho.shape == (2, 5, mf.grids.coords.shape[0])
+        assert  ref_rho.shape == (2, 5, mf.grids.coords.shape[0])
+        assert numpy.max(numpy.abs(test_rho - ref_rho)) < 1e-11
+
 
 if __name__ == "__main__":
     print("Test numint")

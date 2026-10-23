@@ -44,8 +44,10 @@ def ft_aopair(mol, Gv, shls_slice=None, aosym='s1', b=numpy.eye(3),
     if shls_slice is None:
         shls_slice = (0, mol.nbas, 0, mol.nbas)
 
+    Gv = numpy.asarray(Gv, dtype=numpy.double).reshape(-1,3)
     GvT = numpy.asarray(Gv.T, order='C') + q[:,None]
     nGv = Gv.shape[0]
+
     if (gxyz is None or b is None or Gvbase is None
         # backward compatibility for pyscf-1.2, in which the argument Gvbase is gs
         or (Gvbase is not None and isinstance(Gvbase[0], (int, numpy.integer)))):
@@ -72,13 +74,13 @@ def ft_aopair(mol, Gv, shls_slice=None, aosym='s1', b=numpy.eye(3),
             fill = 'fill_s1hermi'
         else:
             fill = 'fill_s1'
-        ni = ao_loc[shls_slice[1]] - ao_loc[shls_slice[0]]
-        nj = ao_loc[shls_slice[3]] - ao_loc[shls_slice[2]]
+        ni = int(ao_loc[shls_slice[1]] - ao_loc[shls_slice[0]])
+        nj = int(ao_loc[shls_slice[3]] - ao_loc[shls_slice[2]])
         shape = (nj, ni, nGv)
     else:
         fill = 'fill_s2'
-        i0 = ao_loc[shls_slice[0]]
-        i1 = ao_loc[shls_slice[1]]
+        i0 = int(ao_loc[shls_slice[0]])
+        i1 = int(ao_loc[shls_slice[1]])
         nij = i1*(i1+1)//2 - i0*(i0+1)//2
         shape = (nij, nGv)
     if comp != 1:
@@ -143,6 +145,7 @@ def ft_ao(mol, Gv, shls_slice=None, b=numpy.eye(3),
     '''
     if shls_slice is None:
         shls_slice = (0, mol.nbas)
+    Gv = numpy.asarray(Gv, dtype=numpy.double).reshape(-1,3)
     nGv = Gv.shape[0]
     if (gxyz is None or b is None or Gvbase is None
         # backward compatibility for pyscf-1.2, in which the argument Gvbase is gs
@@ -179,9 +182,9 @@ def ft_ao(mol, Gv, shls_slice=None, b=numpy.eye(3),
     atm, bas, env = gto.conc_env(mol._atm, mol._bas, mol._env,
                                  ghost_atm, ghost_bas, ghost_env)
     ao_loc = mol.ao_loc_nr()
-    nao = ao_loc[mol.nbas]
+    nao = int(ao_loc[mol.nbas])
     ao_loc = numpy.asarray(numpy.hstack((ao_loc, [nao+1])), dtype=numpy.int32)
-    ni = ao_loc[shls_slice[1]] - ao_loc[shls_slice[0]]
+    ni = int(ao_loc[shls_slice[1]] - ao_loc[shls_slice[0]])
     shape = (ni, nGv)
     mat = numpy.zeros(shape, order='C', dtype=numpy.complex128)
     phase = 0

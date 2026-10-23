@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-# Copyright 2014-2020 The PySCF Developers. All Rights Reserved.
+# Copyright 2014-2026 The PySCF Developers. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -27,10 +27,10 @@ import numpy
 from pyscf import lib
 from pyscf import gto
 from pyscf.lib import logger
-from pyscf.scf import hf
+from pyscf.data import nist
+from pyscf.scf import hf, ghf
 from pyscf.scf import _vhf
 from pyscf.scf import chkfile
-from pyscf.data import nist
 from pyscf import __config__
 
 zquatev = None
@@ -61,7 +61,8 @@ def kernel(mf, conv_tol=1e-9, conv_tol_grad=None,
     else:
         dm = dm0
 
-    mf._coulomb_level = 'LLLL'
+    if mf.init_guess != 'chkfile':
+        mf._coulomb_level = 'LLLL'
     cycles = 0
     if dm0 is None and mf._coulomb_level.upper() == 'LLLL':
         scf_conv, e_tot, mo_energy, mo_coeff, mo_occ \
@@ -109,17 +110,24 @@ def energy_elec(mf, dm=None, h1e=None, vhf=None):
     '''
     if dm is None: dm = mf.make_rdm1()
     if h1e is None: h1e = mf.get_hcore()
-    if vhf is None: vhf = mf.get_veff(mf.mol, dm)
+    if vhf is None:
+        vhf = mf.get_veff(mf.mol, dm)
     e1 = numpy.einsum('ij,ji->', h1e, dm).real
-    e_coul = numpy.einsum('ij,ji->', vhf, dm).real * .5
-    logger.debug(mf, 'E1 = %.14g  E_coul = %.14g', e1, e_coul)
-
+    e2 = numpy.einsum('ij,ji->', vhf, dm).real * .5
     if not mf.with_ssss and mf.ssss_approx == 'Visscher':
-        e_coul += _visscher_ssss_correction(mf, dm)
+        e2 += _visscher_ssss_correction(mf, dm)
 
     mf.scf_summary['e1'] = e1
-    mf.scf_summary['e2'] = e_coul
-    return e1+e_coul, e_coul
+    mf.scf_summary['e2'] = e2
+    if hasattr(vhf, 'ecoul'):
+        ecoul = vhf.ecoul.real
+        exx = e2 - ecoul
+        mf.scf_summary['coul'] = ecoul
+        mf.scf_summary['exc'] = exx
+        logger.debug(mf, 'E1 = %s  E2 = %s  Ecoul = %s  Exc = %s', e1, e2, ecoul, exx)
+    else:
+        logger.debug(mf, 'E1 = %s  E2 = %s', e1, e2)
+    return e1+e2, e2
 
 def _visscher_ssss_correction(mf, dm):
     '''
@@ -145,6 +153,7 @@ def get_jk_coulomb(mol, dm, hermi=1, coulomb_allow='SSSS',
                    opt_llll=None, opt_ssll=None, opt_ssss=None,
                    omega=None, verbose=None):
     log = logger.new_logger(mol, verbose)
+    t0 = (logger.process_clock(), logger.perf_counter())
 
     if hermi == 0 and DEBUG:
         # J matrix is symmetrized in this function which is only true for
@@ -155,29 +164,35 @@ def get_jk_coulomb(mol, dm, hermi=1, coulomb_allow='SSSS',
         if coulomb_allow.upper() == 'LLLL':
             log.debug('Coulomb integral: (LL|LL)')
             j1, k1 = _call_veff_llll(mol, dm, hermi, opt_llll)
+            log.timer_debug1('LLLL', *t0)
             n2c = j1.shape[1]
             vj = numpy.zeros_like(dm)
             vk = numpy.zeros_like(dm)
-            vj[...,:n2c,:n2c] = j1
-            vk[...,:n2c,:n2c] = k1
+            vj[..., :n2c, :n2c] = j1
+            vk[..., :n2c, :n2c] = k1
         elif coulomb_allow.upper() == 'SSLL' \
           or coulomb_allow.upper() == 'LLSS':
             log.debug('Coulomb integral: (LL|LL) + (SS|LL)')
             vj, vk = _call_veff_ssll(mol, dm, hermi, opt_ssll)
+            t0 = log.timer_debug1('SSLL', *t0)
             j1, k1 = _call_veff_llll(mol, dm, hermi, opt_llll)
+            log.timer_debug1('LLLL', *t0)
             n2c = j1.shape[1]
-            vj[...,:n2c,:n2c] += j1
-            vk[...,:n2c,:n2c] += k1
-        else: # coulomb_allow == 'SSSS'
+            vj[..., :n2c, :n2c] += j1
+            vk[..., :n2c, :n2c] += k1
+        else:  # coulomb_allow == 'SSSS'
             log.debug('Coulomb integral: (LL|LL) + (SS|LL) + (SS|SS)')
             vj, vk = _call_veff_ssll(mol, dm, hermi, opt_ssll)
+            t0 = log.timer_debug1('SSLL', *t0)
             j1, k1 = _call_veff_llll(mol, dm, hermi, opt_llll)
+            t0 = log.timer_debug1('LLLL', *t0)
             n2c = j1.shape[1]
-            vj[...,:n2c,:n2c] += j1
-            vk[...,:n2c,:n2c] += k1
+            vj[..., :n2c, :n2c] += j1
+            vk[..., :n2c, :n2c] += k1
             j1, k1 = _call_veff_ssss(mol, dm, hermi, opt_ssss)
-            vj[...,n2c:,n2c:] += j1
-            vk[...,n2c:,n2c:] += k1
+            log.timer_debug1('SSSS', *t0)
+            vj[..., n2c:, n2c:] += j1
+            vk[..., n2c:, n2c:] += k1
 
     return vj, vk
 get_jk = get_jk_coulomb
@@ -477,6 +492,7 @@ class DHF(hf.SCF):
     with_breit = getattr(__config__, 'scf_dhf_SCF_with_breit', False)
     # corrections for small component when with_ssss is set to False
     ssss_approx = getattr(__config__, 'scf_dhf_SCF_ssss_approx', 'Visscher')
+    screening = True
 
     _keys = {'conv_tol', 'with_ssss', 'with_gaunt', 'with_breit', 'ssss_approx'}
 
@@ -558,20 +574,23 @@ employing the updated GWH rule from doi:10.1021/ja00480a005.''')
         nocc = mol.nelectron
         if mo_energy[n2c] > -1.999 * c**2:
             mo_occ[n2c:n2c+nocc] = 1
+            homo = mo_energy[n2c+nocc-1]
+            lumo = mo_energy[n2c+nocc]
         else:
             logger.warn(self, 'Variational collapse. PES mo_energy %g < -2c^2',
                         mo_energy[n2c])
             lumo = mo_energy[mo_energy > -1.999 * c**2][nocc]
             mo_occ[mo_energy > -1.999 * c**2] = 1
             mo_occ[mo_energy >= lumo] = 0
+            homo = mo_energy[mo_occ == 1].max()
+        gap = (lumo - homo) * nist.HARTREE2EV
+        self.scf_summary['gap'] = gap
         if self.verbose >= logger.INFO:
-            if mo_energy[n2c+nocc-1]+1e-3 > mo_energy[n2c+nocc]:
-                logger.warn(self, 'HOMO %.15g == LUMO %.15g',
-                            mo_energy[n2c+nocc-1], mo_energy[n2c+nocc])
+            if homo+1e-3 > lumo:
+                logger.warn(self, 'HOMO %.15g == LUMO %.15g', homo, lumo)
             else:
-                logger.info(self, 'HOMO %d = %.12g  LUMO %d = %.12g',
-                            nocc, mo_energy[n2c+nocc-1],
-                            nocc+1, mo_energy[n2c+nocc])
+                logger.info(self, 'HOMO %d = %.12g  LUMO %d = %.12g  gap/eV = %.5f',
+                            nocc, homo, nocc+1, lumo, gap)
                 logger.debug1(self, 'NES  mo_energy = %s', mo_energy[:n2c])
                 logger.debug(self, 'PES  mo_energy = %s', mo_energy[n2c:])
         return mo_occ
@@ -605,11 +624,34 @@ employing the updated GWH rule from doi:10.1021/ja00480a005.''')
                            direct_scf_tol=self.direct_scf_tol)
         opt_ssll.q_cond = numpy.array([opt_llll.q_cond, opt_ssss.q_cond])
         set_vkscreen(opt_ssll, 'CVHFrkbssll_vkscreen')
+        logger.timer(self, 'init_direct_scf_coulomb', *cpu0)
+
+        opt_gaunt_lsls = None
+        opt_gaunt_lssl = None
 
         #TODO: prescreen for gaunt
-        opt_gaunt = None
-        logger.timer(self, 'init_direct_scf', *cpu0)
-        return opt_llll, opt_ssll, opt_ssss, opt_gaunt
+        if self.with_gaunt:
+            if self.with_breit:
+                # integral function int2e_breit_ssp1ssp2_spinor evaluates
+                # -1/2[alpha1*alpha2/r12 + (alpha1*r12)(alpha2*r12)/r12^3]
+                intor_prefix = 'int2e_breit_'
+            else:
+                # integral function int2e_ssp1ssp2_spinor evaluates only
+                # alpha1*alpha2/r12. Minus sign was not included.
+                intor_prefix = 'int2e_'
+            opt_gaunt_lsls = _VHFOpt(mol, intor_prefix + 'ssp1ssp2_spinor',
+                                 'CVHFrkb_gaunt_lsls_prescreen', 'CVHFrkb_asym_q_cond',
+                                 'CVHFrkb_dm_cond',
+                                 direct_scf_tol=self.direct_scf_tol/c1**2)
+
+            opt_gaunt_lssl = _VHFOpt(mol, intor_prefix + 'ssp1sps2_spinor',
+                                 'CVHFrkb_gaunt_lssl_prescreen', 'CVHFrkb_asym_q_cond',
+                                 'CVHFrkb_dm_cond',
+                                 direct_scf_tol=self.direct_scf_tol/c1**2)
+
+            logger.timer(self, 'init_direct_scf_gaunt_breit', *cpu0)
+        #return None, None, None, None, None
+        return opt_llll, opt_ssll, opt_ssss, opt_gaunt_lsls, opt_gaunt_lssl
 
     def get_jk(self, mol=None, dm=None, hermi=1, with_j=True, with_k=True,
                omega=None):
@@ -622,13 +664,16 @@ employing the updated GWH rule from doi:10.1021/ja00480a005.''')
                 self._opt[omega] = self.init_direct_scf(mol)
         vhfopt = self._opt.get(omega)
         if vhfopt is None:
-            opt_llll = opt_ssll = opt_ssss = opt_gaunt = None
+            opt_llll = opt_ssll = opt_ssss = opt_gaunt_lsls = opt_gaunt_lssl = None
         else:
-            opt_llll, opt_ssll, opt_ssss, opt_gaunt = vhfopt
+            opt_llll, opt_ssll, opt_ssss, opt_gaunt_lsls, opt_gaunt_lssl = vhfopt
+        if self.screening is False:
+            opt_llll = opt_ssll = opt_ssss = opt_gaunt_lsls = opt_gaunt_lssl = None
 
+        opt_gaunt = (opt_gaunt_lsls, opt_gaunt_lssl)
         vj, vk = get_jk_coulomb(mol, dm, hermi, self._coulomb_level,
                                 opt_llll, opt_ssll, opt_ssss, omega, log)
-
+        t1 = log.timer_debug1('Coulomb', *t0)
         if self.with_breit:
             assert omega is None
             if ('SSSS' in self._coulomb_level.upper() or
@@ -644,27 +689,26 @@ employing the updated GWH rule from doi:10.1021/ja00480a005.''')
             vj1, vk1 = _call_veff_gaunt_breit(mol, dm, hermi, opt_gaunt, False)
             vj += vj1
             vk += vk1
+        log.timer_debug1('Gaunt and Breit term', *t1)
 
         log.timer('vj and vk', *t0)
         return vj, vk
 
-    def get_veff(self, mol=None, dm=None, dm_last=0, vhf_last=0, hermi=1):
+    def get_veff(self, mol=None, dm=None, dm_last=None, vhf_last=None, hermi=1):
         '''Dirac-Coulomb'''
-        if mol is None: mol = self.mol
-        if dm is None: dm = self.make_rdm1()
-        if self.direct_scf:
-            ddm = numpy.array(dm) - numpy.array(dm_last)
-            vj, vk = self.get_jk(mol, ddm, hermi=hermi)
-            return numpy.array(vhf_last) + vj - vk
-        else:
-            vj, vk = self.get_jk(mol, dm, hermi=hermi)
-            return vj - vk
+        assert self._eri is None
+        return ghf.GHF.get_veff(self, mol, dm, dm_last, vhf_last, hermi)
 
     def scf(self, dm0=None):
         cput0 = (logger.process_clock(), logger.perf_counter())
 
         self.build()
         self.dump_flags()
+
+        if dm0 is None and self.mo_coeff is not None and self.mo_occ is not None:
+            # Initial guess from existing wavefunction
+            dm0 = self.make_rdm1()
+
         self.converged, self.e_tot, \
                 self.mo_energy, self.mo_coeff, self.mo_occ \
                 = kernel(self, self.conv_tol, self.conv_tol_grad,
@@ -699,6 +743,9 @@ employing the updated GWH rule from doi:10.1021/ja00480a005.''')
         from pyscf.x2c import x2c
         x2chf = x2c.UHF(self.mol)
         x2chf.__dict__.update(self.__dict__)
+        x2chf.mo_energy = None
+        x2chf.mo_coeff = None
+        x2chf.mo_occ = None
         return x2chf
     x2c = x2c1e
 
@@ -782,7 +829,7 @@ UHF = UDHF = DHF
 class HF1e(DHF):
     scf = hf._hf1e_scf
 
-    def _eigh(self, h, s):
+    def _eigh(self, h, s, overwrite=False, x=None):
         if zquatev:
             return zquatev.solve_KR_FCSCE(self.mol, h, s)
         else:
@@ -798,8 +845,39 @@ class RDHF(DHF):
             raise RuntimeError('zquatev library is required to perform Kramers-restricted DHF')
         UHF.__init__(self, mol)
 
-    def _eigh(self, h, s):
-        return zquatev.solve_KR_FCSCE(self.mol, h, s)
+    def check_linear_dependency(self, s, verbose=None):
+        log = logger.new_logger(self, verbose)
+        idx = _kramers_pair_sort_ao_idx(self.mol, four_component=True)
+        s = s[idx[:,None], idx]
+        e, v = zquatev.eigh(s)
+        if log is not None:
+            abs_e = abs(e)
+            emax = abs_e.max()
+            emin = abs_e.min()
+            c = emax / emin
+            log.debug('cond(S) = %s', c)
+            if c > 1e10:
+                log.warn('Singularity detected in the overlap matrix. '
+                         'SCF may be inaccurate and difficult to converge.')
+
+        if hf.remove_overlap_zero_eigenvalue:
+            mask = e > hf.overlap_zero_eigenvalue_threshold
+            x = v[:,mask] / numpy.sqrt(e[mask])
+        else:
+            x = v / numpy.sqrt(e)
+        x1 = numpy.empty_like(x)
+        x1[idx] = x
+        return x1
+
+    def _eigh(self, h, s, overwrite=False, x=None):
+        if x is None:
+            if h.dtype != s.dtype:
+                s = s.astype(h.dtype)
+            return zquatev.solve_KR_FCSCE(self.mol, h, s)
+        else:
+            h = x.conj().T.dot(h).dot(x)
+            e, c = zquatev.eigh(h, iop=1)
+            return e, x.dot(c)
 
     def x2c1e(self):
         from pyscf.x2c import x2c
@@ -927,6 +1005,14 @@ def _call_veff_ssss(mol, dm, hermi=1, mf_opt=None):
     return _jk_triu_(mol, vj, vk, hermi)
 
 def _call_veff_gaunt_breit(mol, dm, hermi=1, mf_opt=None, with_breit=False):
+    if mf_opt is not None:
+        opt_gaunt_lsls, opt_gaunt_lssl = mf_opt
+    else:
+        opt_gaunt_lsls = opt_gaunt_lssl = None
+
+    log = logger.new_logger(mol)
+    t0 = (logger.process_clock(), logger.perf_counter())
+
     if with_breit:
         # integral function int2e_breit_ssp1ssp2_spinor evaluates
         # -1/2[alpha1*alpha2/r12 + (alpha1*r12)(alpha2*r12)/r12^3]
@@ -946,7 +1032,7 @@ def _call_veff_gaunt_breit(mol, dm, hermi=1, mf_opt=None, with_breit=False):
         dmsl = dm[n2c:,:n2c].copy()
         dmll = dm[:n2c,:n2c].copy()
         dmss = dm[n2c:,n2c:].copy()
-        dms = [dmsl, dmsl, dmls, dmll, dmss]
+        dms = [dmsl, dmls, dmll, dmss]
     else:
         n_dm = len(dm)
         n2c = dm[0].shape[0] // 2
@@ -954,34 +1040,61 @@ def _call_veff_gaunt_breit(mol, dm, hermi=1, mf_opt=None, with_breit=False):
         dmls = [dmi[:n2c,n2c:].copy() for dmi in dm]
         dmsl = [dmi[n2c:,:n2c].copy() for dmi in dm]
         dmss = [dmi[n2c:,n2c:].copy() for dmi in dm]
-        dms = dmsl + dmsl + dmls + dmll + dmss
+        dms = dmsl + dmls + dmll + dmss
     vj = numpy.zeros((n_dm,n2c*2,n2c*2), dtype=numpy.complex128)
     vk = numpy.zeros((n_dm,n2c*2,n2c*2), dtype=numpy.complex128)
 
-    jks = ('lk->s1ij',) * n_dm \
-        + ('jk->s1il',) * n_dm
-    vx = _vhf.rdirect_bindm(intor_prefix+'ssp1ssp2_spinor', 's1', jks, dms[:n_dm*2], 1,
-                            mol._atm, mol._bas, mol._env, mf_opt)
-    vj[:,:n2c,n2c:] = vx[:n_dm,:,:]
-    vk[:,:n2c,n2c:] = vx[n_dm:,:,:]
+    if hermi != 0:
+        jks = ('lk->s1ij', 'jk->s1il')
+        vj_ls, vk_ls = _vhf.rdirect_mapdm(
+            intor_prefix+'ssp1ssp2_spinor', 's1', jks, dms[:n_dm], 1,
+            mol._atm, mol._bas, mol._env, opt_gaunt_lsls)
+        vj[:,:n2c,n2c:] = vj_ls
+        vk[:,:n2c,n2c:] = vk_ls
+        t0 = log.timer_debug1('LSLS contribution', *t0)
 
-    jks = ('lk->s1ij',) * n_dm \
-        + ('li->s1kj',) * n_dm \
-        + ('jk->s1il',) * n_dm
-    vx = _vhf.rdirect_bindm(intor_prefix+'ssp1sps2_spinor', 's1', jks, dms[n_dm*2:], 1,
-                            mol._atm, mol._bas, mol._env, mf_opt)
-    vj[:,:n2c,n2c:]+= vx[      :n_dm  ,:,:]
-    vk[:,n2c:,n2c:] = vx[n_dm  :n_dm*2,:,:]
-    vk[:,:n2c,:n2c] = vx[n_dm*2:      ,:,:]
+        jks = (('lk->s1ij',) * n_dm +
+               ('li->s1kj',) * n_dm +
+               ('jk->s1il',) * n_dm)
+        vx = _vhf.rdirect_bindm(
+            intor_prefix+'ssp1sps2_spinor', 's1', jks, dms[n_dm:], 1,
+            mol._atm, mol._bas, mol._env, opt_gaunt_lssl)
+        vj[:,:n2c,n2c:]+= vx[      :n_dm  ,:,:]
+        vk[:,n2c:,n2c:] = vx[n_dm  :n_dm*2,:,:]
+        vk[:,:n2c,:n2c] = vx[n_dm*2:      ,:,:]
+        t0 = log.timer_debug1('LSSL contribution', *t0)
 
-    if hermi == 1:
-        vj[:,n2c:,:n2c] = vj[:,:n2c,n2c:].transpose(0,2,1).conj()
-        vk[:,n2c:,:n2c] = vk[:,:n2c,n2c:].transpose(0,2,1).conj()
-    elif hermi == 2:
-        vj[:,n2c:,:n2c] = -vj[:,:n2c,n2c:].transpose(0,2,1).conj()
-        vk[:,n2c:,:n2c] = -vk[:,:n2c,n2c:].transpose(0,2,1).conj()
+        if hermi == 1:
+            vj[:,n2c:,:n2c] = vj[:,:n2c,n2c:].transpose(0,2,1).conj()
+            vk[:,n2c:,:n2c] = vk[:,:n2c,n2c:].transpose(0,2,1).conj()
+        elif hermi == 2:
+            vj[:,n2c:,:n2c] = -vj[:,:n2c,n2c:].transpose(0,2,1).conj()
+            vk[:,n2c:,:n2c] = -vk[:,:n2c,n2c:].transpose(0,2,1).conj()
     else:
-        raise NotImplementedError
+        jks = ('lk->s1ij', 'jk->s1il')
+        subj, subk = _vhf.rdirect_mapdm(
+            intor_prefix+'ssp1ssp2_spinor', 's1', jks,
+            (dms[:n_dm] + [x.conj().T for x in dms[n_dm:n_dm*2]]), 1,
+            mol._atm, mol._bas, mol._env, opt_gaunt_lsls)
+        vj[:,:n2c,n2c:] = subj[      :n_dm  ,:,:]
+        vj[:,n2c:,:n2c] = subj[n_dm  :n_dm*2,:,:].conj().transpose(0,2,1)
+        vk[:,:n2c,n2c:] = subk[      :n_dm  ,:,:]
+        vk[:,n2c:,:n2c] = subk[n_dm  :n_dm*2,:,:].conj().transpose(0,2,1)
+        t0 = log.timer_debug1('LSLS contribution', *t0)
+
+        jks = (('ji->s1kl',) * n_dm +
+               ('lk->s1ij',) * n_dm +
+               ('li->s1kj',) * n_dm +
+               ('jk->s1il',) * n_dm)
+        vx = _vhf.rdirect_bindm(
+            intor_prefix+'ssp1sps2_spinor', 's1', jks, dms, 1,
+            mol._atm, mol._bas, mol._env, opt_gaunt_lssl)
+        vj[:,n2c:,:n2c]+= vx[      :n_dm  ,:,:]
+        vj[:,:n2c,n2c:]+= vx[n_dm  :n_dm*2,:,:]
+        vk[:,n2c:,n2c:] = vx[n_dm*2:n_dm*3,:,:]
+        vk[:,:n2c,:n2c] = vx[n_dm*3:n_dm*4,:,:]
+        t0 = log.timer_debug1('LSSL contribution', *t0)
+
     vj = vj.reshape(dm.shape)
     vk = vk.reshape(dm.shape)
     c1 = .5 / lib.param.LIGHT_SPEED
@@ -1031,26 +1144,13 @@ class _VHFOpt(_vhf._VHFOpt):
                 mol._bas.ctypes, ctypes.c_int(nbas), mol._env.ctypes)
         self.dm_cond = dm_cond
 
-
-if __name__ == '__main__':
-    import pyscf.gto
-    mol = pyscf.gto.Mole()
-    mol.verbose = 5
-    mol.output = 'out_dhf'
-
-    mol.atom.extend([['He', (0.,0.,0.)], ])
-    mol.basis = {
-        'He': [(0, 0, (1, 1)),
-               (0, 0, (3, 1)),
-               (1, 0, (1, 1)), ]}
-    mol.build()
-
-##############
-# SCF result
-    method = UHF(mol)
-    energy = method.scf() #-2.38146942868
-    print(energy)
-    method.with_gaunt = True
-    print(method.scf()) # -2.38138339005
-    method.with_breit = True
-    print(method.scf()) # -2.38138339005
+def _kramers_pair_sort_ao_idx(mol, four_component=True):
+    trmaps = mol.time_reversal_map()
+    idxA = numpy.where(trmaps > 0)[0]
+    idxB = trmaps[idxA] - 1
+    if four_component:
+        n = trmaps.size
+        idx = numpy.hstack((idxA,idxA+n,idxB,idxB+n))
+    else:
+        idx = numpy.hstack((idxA,idxB))
+    return idx

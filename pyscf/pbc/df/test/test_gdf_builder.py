@@ -13,13 +13,12 @@
 # limitations under the License.
 
 import unittest
-import tempfile
 import numpy as np
 import scipy.linalg
 from pyscf import lib
 import pyscf.pbc
 from pyscf.pbc import gto as pgto
-from pyscf.pbc.df import df, aug_etb, FFTDF
+from pyscf.pbc.df import df, FFTDF
 from pyscf.pbc.df import gdf_builder
 from pyscf.pbc.df import ft_ao
 from pyscf.pbc.tools import pbc as pbctools
@@ -108,7 +107,7 @@ class KnownValues(unittest.TestCase):
 
     def test_make_j3c_gamma(self):
         dfbuilder = gdf_builder._CCGDFBuilder(cell, auxcell).build()
-        with tempfile.NamedTemporaryFile() as tmpf:
+        with lib.NamedTemporaryFile() as tmpf:
             dfbuilder.make_j3c(tmpf.name)
             v2 = load(tmpf.name, kpts[[0, 0]])
             self.assertAlmostEqual(lib.fp(v2), 1.5094843470069796, 7)
@@ -124,7 +123,7 @@ class KnownValues(unittest.TestCase):
 
     def test_make_j3c(self):
         dfbuilder = gdf_builder._CCGDFBuilder(cell, auxcell, kpts).build()
-        with tempfile.NamedTemporaryFile() as tmpf:
+        with lib.NamedTemporaryFile() as tmpf:
             dfbuilder.make_j3c(tmpf.name, aosym='s2')
             v_s2 = []
             for ki in range(nkpts):
@@ -148,7 +147,7 @@ class KnownValues(unittest.TestCase):
 
     def test_make_j3c_j_only(self):
         dfbuilder = gdf_builder._CCGDFBuilder(cell, auxcell, kpts).build()
-        with tempfile.NamedTemporaryFile() as tmpf:
+        with lib.NamedTemporaryFile() as tmpf:
             dfbuilder.make_j3c(tmpf.name, aosym='s2', j_only=True)
             v_s2 = []
             for ki in range(nkpts):
@@ -170,7 +169,7 @@ class KnownValues(unittest.TestCase):
                       dimension=2)
         auxcell = df.make_auxcell(cell, auxbasis)
         dfbuilder = gdf_builder._CCGDFBuilder(cell, auxcell).build()
-        with tempfile.NamedTemporaryFile() as tmpf:
+        with lib.NamedTemporaryFile() as tmpf:
             dfbuilder.make_j3c(tmpf.name)
             v2 = load(tmpf.name, kpts[[0, 0]])
             self.assertAlmostEqual(lib.fp(v2.T.dot(v2)), 0.3289627476345819, 8)
@@ -179,10 +178,11 @@ class KnownValues(unittest.TestCase):
         cell = pgto.M(atom='He 0 0 0; He 0.9 0 0',
                       basis=basis,
                       a=np.eye(3) * 2.8,
+                      low_dim_ft_type='inf_vacuum',
                       dimension=1)
         auxcell = df.make_auxcell(cell, auxbasis)
         dfbuilder = gdf_builder._CCGDFBuilder(cell, auxcell).build()
-        with tempfile.NamedTemporaryFile() as tmpf:
+        with lib.NamedTemporaryFile() as tmpf:
             dfbuilder.make_j3c(tmpf.name)
             v2 = load(tmpf.name, kpts[[0, 0]])
             self.assertAlmostEqual(lib.fp(v2), 1.7171975296579753, 6)
@@ -196,7 +196,7 @@ class KnownValues(unittest.TestCase):
         auxcell = df.make_auxcell(cell, auxbasis)
         dfbuilder = gdf_builder._CCGDFBuilder(cell, auxcell).build()
         ref = cholesky_eri(cell, auxmol=auxcell)
-        with tempfile.NamedTemporaryFile() as tmpf:
+        with lib.NamedTemporaryFile() as tmpf:
             dfbuilder.make_j3c(tmpf.name)
             v2 = load(tmpf.name, kpts[[0, 0]])
             self.assertAlmostEqual(abs(v2 - ref).max(), 0, 9)
@@ -277,7 +277,7 @@ class KnownValues(unittest.TestCase):
         j3c = lib.dot(auxG.conj()*wcoulG, aopair.reshape(ngrids,-1))
         j2c = scipy.linalg.cholesky(j2c[0], lower=True)
         ref = scipy.linalg.solve_triangular(j2c, j3c, lower=True)
-        with tempfile.NamedTemporaryFile() as tmpf:
+        with lib.NamedTemporaryFile() as tmpf:
             dfbuilder.make_j3c(tmpf.name, aosym='s2', j_only=True)
             v1 = load(tmpf.name, kpts[[0, 0]])
             self.assertAlmostEqual(abs(ref - v1).max(), 0, 7)
@@ -303,7 +303,7 @@ class KnownValues(unittest.TestCase):
 
     def test_make_j3c_gamma_lr(self):
         dfbuilder = gdf_builder._CCGDFBuilder(cell_lr, auxcell_lr).build()
-        with tempfile.NamedTemporaryFile() as tmpf:
+        with lib.NamedTemporaryFile() as tmpf:
             dfbuilder.make_j3c(tmpf.name)
             v2 = load(tmpf.name, kpts[[0, 0]])
             self.assertAlmostEqual(lib.fp(v2), 1.0942903795950072, 7)
@@ -319,7 +319,7 @@ class KnownValues(unittest.TestCase):
 
     def test_make_j3c_lr(self):
         dfbuilder = gdf_builder._CCGDFBuilder(cell_lr, auxcell_lr, kpts).build()
-        with tempfile.NamedTemporaryFile() as tmpf:
+        with lib.NamedTemporaryFile() as tmpf:
             dfbuilder.make_j3c(tmpf.name, aosym='s2')
             v_s2 = []
             for ki in range(nkpts):
@@ -342,7 +342,7 @@ class KnownValues(unittest.TestCase):
 
     def test_make_j3c_j_only_lr(self):
         dfbuilder = gdf_builder._CCGDFBuilder(cell_lr, auxcell_lr, kpts).build()
-        with tempfile.NamedTemporaryFile() as tmpf:
+        with lib.NamedTemporaryFile() as tmpf:
             dfbuilder.make_j3c(tmpf.name, aosym='s2', j_only=True)
             v_s2 = []
             for ki in range(nkpts):
@@ -391,7 +391,7 @@ class KnownValues(unittest.TestCase):
         j3c = lib.dot(auxG.conj()*wcoulG, aopair.reshape(ngrids,-1))
         j2c = scipy.linalg.cholesky(j2c[0], lower=True)
         ref = scipy.linalg.solve_triangular(j2c, j3c, lower=True)
-        with tempfile.NamedTemporaryFile() as tmpf:
+        with lib.NamedTemporaryFile() as tmpf:
             dfbuilder.make_j3c(tmpf.name, aosym='s2', j_only=True)
             v1 = load(tmpf.name, kpts[[0, 0]])
             self.assertAlmostEqual(abs(ref - v1).max(), 0, 7)
@@ -417,7 +417,7 @@ class KnownValues(unittest.TestCase):
 
     def test_make_j3c_gamma_sr(self):
         dfbuilder = gdf_builder._CCGDFBuilder(cell_sr, auxcell_sr).build()
-        with tempfile.NamedTemporaryFile() as tmpf:
+        with lib.NamedTemporaryFile() as tmpf:
             dfbuilder.make_j3c(tmpf.name)
             v2 = load(tmpf.name, kpts[[0, 0]])
             self.assertAlmostEqual(lib.fp(v2), 0.9647178630555139, 7)
@@ -433,7 +433,7 @@ class KnownValues(unittest.TestCase):
 
     def test_make_j3c_sr(self):
         dfbuilder = gdf_builder._CCGDFBuilder(cell_sr, auxcell_sr, kpts).build()
-        with tempfile.NamedTemporaryFile() as tmpf:
+        with lib.NamedTemporaryFile() as tmpf:
             dfbuilder.make_j3c(tmpf.name, aosym='s2')
             v_s2 = []
             for ki in range(nkpts):
@@ -457,7 +457,7 @@ class KnownValues(unittest.TestCase):
 
     def test_make_j3c_j_only_sr(self):
         dfbuilder = gdf_builder._CCGDFBuilder(cell_sr, auxcell_sr, kpts).build()
-        with tempfile.NamedTemporaryFile() as tmpf:
+        with lib.NamedTemporaryFile() as tmpf:
             dfbuilder.make_j3c(tmpf.name, aosym='s2', j_only=True)
             v_s2 = []
             for ki in range(nkpts):
@@ -505,7 +505,7 @@ class KnownValues(unittest.TestCase):
         j3c = lib.dot(auxG.conj()*wcoulG, aopair.reshape(ngrids,-1))
         j2c = scipy.linalg.cholesky(j2c[0], lower=True)
         ref = scipy.linalg.solve_triangular(j2c, j3c, lower=True)
-        with tempfile.NamedTemporaryFile() as tmpf:
+        with lib.NamedTemporaryFile() as tmpf:
             dfbuilder.make_j3c(tmpf.name, aosym='s2', j_only=True)
             v1 = load(tmpf.name, kpts[[0, 0]])
             self.assertAlmostEqual(abs(ref - v1).max(), 0, 7)

@@ -14,10 +14,13 @@
 
 import unittest
 import numpy
+import numpy as np
 from pyscf import gto
 from pyscf.pbc import gto as pbcgto
 from pyscf.pbc import tools
 from pyscf.pbc.scf import khf
+from pyscf.pbc.df import fft
+from pyscf.pbc.tools.k2gamma import translation_vectors_for_kmesh
 from pyscf import lib
 
 
@@ -36,9 +39,54 @@ class KnownValues(unittest.TestCase):
         cell.output = '/dev/null'
         cell.build()
         mf = khf.KRHF(cell, exxdiv='vcut_ws')
+
+        # isotropic k-mesh
         mf.kpts = cell.make_kpts([2,2,2])
         coulG = tools.get_coulG(cell, mf.kpts[2], True, mf, gs=[5,5,5])
-        self.assertAlmostEqual(lib.fp(coulG), 1.3245365170998518+0j, 9)
+        coulG = coulG.reshape([11]*3)
+        coulG[:,5,:] = 0
+        self.assertAlmostEqual(lib.fp(coulG), 1.3415512608007418+0j, 9)
+
+        # anisotropic k-mesh
+        mf._ws_exx = None   # remove precomputing
+        mf.kpts = cell.make_kpts([1,2,3])
+        coulG = tools.get_coulG(cell, mf.kpts[2], True, mf, gs=[5,5,5])
+        coulG = coulG.reshape([11]*3)
+        coulG[:,5,:] = 0
+        self.assertAlmostEqual(lib.fp(coulG), -15.809448382668005+0j, 9)
+
+        # reciprocal vector outside the WS FFT mesh
+        ws_exx = mf._ws_exx
+        alpha = ws_exx['alpha']
+        mesh = np.asarray(ws_exx['kcell'].mesh)
+        Gv = mesh[0] * ws_exx['kcell'].reciprocal_vectors()[[0]]
+        coulG = tools.get_coulG(
+            cell, exx=True, mf=mf, Gv=Gv, wrap_around=False)
+
+        q2 = np.dot(Gv[0], Gv[0])
+        ref = 4*np.pi/q2 * (1 - np.exp(-q2/(4*alpha**2)))
+        self.assertAlmostEqual(coulG[0], ref, 12)
+
+        # arbitrary band k-point
+        mf._ws_exx = None
+        mf.kpts = cell.make_kpts([2,2,2])
+        kpt_band = cell.get_abs_kpts([.12, .23, .34])
+        Gv = np.zeros((1,3))
+
+        for kpt in mf.kpts:
+            q = kpt - kpt_band
+            coulG = tools.get_coulG(
+                cell, q, True, mf, Gv=Gv, wrap_around=False)
+
+            ws_exx = mf._ws_exx
+            q2 = np.dot(q, q)
+            alpha = ws_exx['alpha']
+            ref = 4*np.pi/q2 * (1 - np.exp(-q2/(4*alpha**2)))
+            ref += ws_exx['kcell'].vol / len(ws_exx['vR']) * np.dot(
+                ws_exx['vR'], np.cos(np.dot(ws_exx['r_mic'], q)))
+            self.assertAlmostEqual(coulG[0], ref, 10)
+
+        self.assertEqual(len(ws_exx['vq_cache']), 1)
 
     def test_unconventional_ws_cell(self):
         cell = pbcgto.Cell()
@@ -49,7 +97,20 @@ class KnownValues(unittest.TestCase):
                     0.5, 0  , 1.8'''
         cell.build()
         kpts = cell.make_kpts([1,1,1])
-        self.assertRaises(RuntimeError, tools.precompute_exx, cell, kpts)
+
+        # but using the new default nimgs=[3,3,3] gives no error
+        res = tools.precompute_exx(cell, kpts)
+        self.assertAlmostEqual(lib.fp(res['vq']), 44.672318849250274+0j, 9)
+
+    def test_ws_inradius(self):
+        a = np.array([[2.0, 0.0, 0.0],
+                      [1.2, 1.0, 0.0],
+                      [0.0, 0.0, 3.0]])
+        ref = 0.5 * np.linalg.norm(a[0] - a[1])
+        self.assertAlmostEqual(tools.get_ws_inradius(a, [1,1,1]), ref, 12)
+
+        a = np.diag([2.0, 3.0, 4.0])
+        self.assertAlmostEqual(tools.get_ws_inradius(a, [2,1,3]), 1.5, 12)
 
     def test_coulG(self):
         numpy.random.seed(19)
@@ -71,8 +132,6 @@ class KnownValues(unittest.TestCase):
 
         cell.a = numpy.eye(3)
         cell.unit = 'B'
-        coulG = tools.get_coulG(cell, numpy.array([0, numpy.pi, 0]))
-        self.assertAlmostEqual(lib.fp(coulG), 4.6737453679713905, 9)
         coulG = tools.get_coulG(cell, numpy.array([0, numpy.pi, 0]),
                                 wrap_around=False)
         self.assertAlmostEqual(lib.fp(coulG), 4.5757877990664744, 9)
@@ -101,7 +160,8 @@ class KnownValues(unittest.TestCase):
                        atom ='''He .1 .0 .0''',
                        basis = 'ccpvdz')
         Ls = tools.get_lattice_Ls(cl1)
-        self.assertEqual(Ls.shape, (2275,3))
+        r_discard = tools.check_lattice_sum_range(cl1, Ls)
+        self.assertTrue(r_discard > cl1.rcut)
 
         Ls = tools.get_lattice_Ls(cl1, rcut=0)
         self.assertEqual(Ls.shape, (1,3))
@@ -130,13 +190,36 @@ C  15.16687337 15.16687337 15.16687337
         cell.precision = 1e-10
         cell.build()
         Ls = cell.get_lattice_Ls()
-        self.assertTrue(Ls.shape[0] > 140)
+        r_discard = tools.check_lattice_sum_range(cell, Ls)
+        self.assertTrue(r_discard > cell.rcut)
 
         S = cell.pbc_intor('int1e_ovlp')
         w, v = numpy.linalg.eigh(S)
         self.assertTrue(w.min() > 0)
         self.assertAlmostEqual(abs(S - S.T.conj()).max(), 0, 13)
         self.assertAlmostEqual(w.min(), 0.0007176363230, 8)
+
+    def test_get_lattice_Ls2(self):
+        cell = pbcgto.Cell()
+        cell.unit = 'B'
+        cell.atom = 'He 0.,  0.,  0.; He 0.99    ,  0.    ,  0.    '
+        cell.a = np.diag([10, 10, 2])
+        cell.rcut = 2.01
+        cell.build()
+        Ls = tools.get_lattice_Ls(cell, discard=True)
+        r_discard = tools.check_lattice_sum_range(cell, Ls)
+        self.assertTrue(r_discard > cell.rcut)
+
+    def test_get_lattice_Ls3(self):
+        numpy.random.seed(2)
+        cl1 = pbcgto.M(a = numpy.random.random((3,3))*3,
+                       mesh = [3]*3,
+                       atom ='''He .1 .0 .0''')
+        cl2 = tools.super_cell(cl1, [2,3,4])
+        rcut = 12
+        Ls = tools.get_lattice_Ls(cl2, rcut=rcut, discard=True)
+        r_discard = tools.check_lattice_sum_range(cl2, Ls)
+        self.assertTrue(r_discard > rcut)
 
     def test_super_cell(self):
         numpy.random.seed(2)
@@ -240,6 +323,24 @@ C  15.16687337 15.16687337 15.16687337
         mesh = tools.cutoff_to_mesh(a, ke.min())
         k1 = tools.mesh_to_cutoff(a, mesh)
         self.assertAlmostEqual(ke.min(), k1.min(), 9)
+
+    def test_coulG_wrap_around(self):
+        for mesh in [[7,7,7], [6,7,7]]:
+            for kmesh in [[2,1,1], [3,1,1], [4,1,1]]:
+                cell = pbcgto.M(atom='He', a=np.eye(3)*3, basis=[[0, [.6, 1]]], mesh=mesh)
+                kpts = cell.make_kpts(kmesh)
+                nkpts = len(kpts)
+                dm_kpts = np.ones([nkpts, 1, 1])
+                vk = fft.FFTDF(cell).get_jk(dm_kpts, kpts=kpts, with_j=False)[1]
+                e1 = np.einsum('kij,kji->', vk, dm_kpts)
+
+                expLk = np.exp(1j*np.dot(translation_vectors_for_kmesh(cell, kmesh), kpts.T))
+                dm = np.einsum('Rk,Sk,kuv->RuSv', expLk, expLk.conj(), dm_kpts) / nkpts
+                dm = dm.reshape(nkpts, nkpts)
+                scell = tools.super_cell(cell, kmesh)
+                vk = fft.FFTDF(scell).get_jk(dm, with_j=False)[1]
+                e2 = np.einsum('ij,ji->', vk, dm)
+                self.assertAlmostEqual(abs(e1 - e2), 0, 10)
 
 
 if __name__ == '__main__':

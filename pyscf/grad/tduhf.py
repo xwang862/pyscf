@@ -104,7 +104,7 @@ def grad_elec(td_grad, x_y, atmlst=None, max_memory=2000, verbose=logger.INFO):
     wvoa += numpy.einsum('ac,ai->ci', veff0moma[nocca:,nocca:], xmya) * 2
     wvob += numpy.einsum('ac,ai->ci', veff0momb[noccb:,noccb:], xmyb) * 2
 
-    vresp = mf.gen_response(hermi=1)
+    vresp = mf.gen_response(hermi=1, with_nlc=not td_grad.base.exclude_nlc)
     def fvind(x):
         dm1 = numpy.empty((2,nao,nao))
         xa = x[0,:nvira*nocca].reshape(nvira,nocca)
@@ -229,6 +229,3 @@ class Gradients(tdrhf_grad.Gradients):
         return grad_elec(self, xy, atmlst, self.max_memory, self.verbose)
 
 Grad = Gradients
-
-from pyscf import tdscf
-tdscf.uhf.TDA.Gradients = tdscf.uhf.TDHF.Gradients = lib.class_as_method(Gradients)

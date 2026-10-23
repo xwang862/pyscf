@@ -3,6 +3,11 @@ import numpy
 from pyscf import lib
 einsum = lib.einsum
 
+# pytblis does not support contractions between operands of different
+# floating-point precision (e.g. float64 vs float32); real/complex mixing at
+# the same precision is fine
+_pytblis = lib.numpy_helper.EINSUM_BACKEND == 'pytblis'
+
 def setUpModule():
     global bak
     lib.numpy_helper.EINSUM_MAX_SIZE, bak = 0, lib.numpy_helper.EINSUM_MAX_SIZE
@@ -92,6 +97,7 @@ class KnownValues(unittest.TestCase):
         self.assertTrue(c0.dtype == c1.dtype)
         self.assertTrue(abs(c0-c1).max() < 1e-14)
 
+    @unittest.skipIf(_pytblis, 'pytblis does not support operands of different precision')
     def test_d_cslice(self):
         a = numpy.random.random((7,1,3,4))
         b = numpy.random.random((2,4,5,7)).astype(numpy.float32)
@@ -100,6 +106,7 @@ class KnownValues(unittest.TestCase):
         self.assertTrue(c0.dtype == c1.dtype)
         self.assertTrue(abs(c0-c1).max() < 1e-14)
 
+    @unittest.skipIf(_pytblis, 'pytblis does not support operands of different precision')
     def test_z_cslice(self):
         a = numpy.random.random((7,1,3,4)).astype(numpy.float32) + 0j
         b = numpy.random.random((2,4,5,7))
@@ -108,6 +115,7 @@ class KnownValues(unittest.TestCase):
         self.assertTrue(c0.dtype == c1.dtype)
         self.assertTrue(abs(c0-c1).max() < 1e-14)
 
+    @unittest.skipIf(_pytblis, 'pytblis does not support operands of different precision')
     def test_cslice_dslice(self):
         a = numpy.random.random((7,1,3,4)).astype(numpy.float32) + 0j
         b = numpy.random.random((2,4,5,7))
@@ -211,7 +219,7 @@ class KnownValues(unittest.TestCase):
         c1 = einsum("ij,ji->", x, y)
         self.assertTrue(abs(c0-c1).max() < 1e-13)
 
-    def test_contract(self):
+    def test_tblis_einsum(self):
         try:
             from pyscf.lib import tblis_einsum
             tblis_available = True
@@ -223,10 +231,10 @@ class KnownValues(unittest.TestCase):
             b = numpy.random.random((4,9,6))
 
             c1 = numpy.ones((9,5), dtype=numpy.complex128)
-            c0 = tblis_einsum._contract('ijk,jlk->li', a, b, out=c1, alpha=.5j, beta=.2)
+            c0 = tblis_einsum.contract('ijk,jlk->li', a, b, out=c1, alpha=.5j, beta=.2)
             c1 = numpy.ones((9,5), dtype=numpy.complex128)
             c1 = c1*.2 + numpy.einsum('ijk,jlk->li', a, b)*.5j
-            self.assertTrue(abs(c0-c1).max() < 1e-13)
+            self.assertAlmostEqual(abs(c0-c1).max(), 0, 12)
 
     def test_4operands(self):
         a = numpy.random.random((30,40,5,10))
@@ -245,6 +253,24 @@ class KnownValues(unittest.TestCase):
         ref = lib.einsum('jlxp,px->jl', ref, d)
         self.assertAlmostEqual(abs(ref-f).max(), 0, 9)
 
+    def test_alpha_beta(self):
+        a = numpy.random.random((5,4,6))
+        b = numpy.random.random((4,9,6))
+
+        c1 = numpy.ones((9,5), dtype=numpy.complex128)
+        c0 = lib.numpy_helper.contract('ijk,jlk->li', a, b, out=c1, alpha=.5j, beta=.2)
+        c1 = numpy.ones((9,5), dtype=numpy.complex128)
+        c1 = c1*.2 + numpy.einsum('ijk,jlk->li', a, b)*.5j
+        self.assertAlmostEqual(abs(c0-c1).max(), 0, 12)
+
+        a = numpy.random.random((25,24,26))
+        b = numpy.random.random((24,29,26))
+
+        c1 = numpy.ones((29,25))
+        c0 = lib.numpy_helper.contract('ijk,jlk->li', a, b, out=c1, beta=.2)
+        c1 = numpy.ones((29,25))
+        c1 = c1*.2 + numpy.einsum('ijk,jlk->li', a, b)
+        self.assertAlmostEqual(abs(c0-c1).max(), 0, 12)
 
 if __name__ == '__main__':
     unittest.main()

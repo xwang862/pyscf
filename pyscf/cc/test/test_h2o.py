@@ -15,6 +15,7 @@
 
 import unittest
 import numpy
+import numpy as np
 from functools import reduce
 
 from pyscf import gto, lib
@@ -25,7 +26,7 @@ from pyscf.cc import ccsd
 from pyscf.cc import uccsd
 from pyscf.cc import gccsd
 from pyscf.cc import rccsd
-from pyscf.cc import dfccsd
+from pyscf.cc import dfccsd, dfuccsd
 
 def setUpModule():
     global mol, mf
@@ -81,6 +82,21 @@ class KnownValues(unittest.TestCase):
         mcc.kernel()
         self.assertAlmostEqual(mcc.ecc, -0.21124878189922872, 7)
         self.assertAlmostEqual(abs(mcc.t2).sum(), 5.4996425901189347, 5)
+
+        mcc.frozen = None
+        mcc.kernel()
+        self.assertAlmostEqual(mcc.ecc, -0.213343233755606, 7)
+        self.assertEqual(mcc.t2.shape, (5, 5, 19, 19))
+
+        mcc.frozen = 1
+        mcc.kernel()
+        self.assertAlmostEqual(mcc.ecc, -0.21124878189922872, 7)
+        self.assertEqual(mcc.t2.shape, (4, 4, 19, 19))
+
+        mcc.frozen = np.array([0])
+        mcc.kernel()
+        self.assertAlmostEqual(mcc.ecc, -0.21124878189922872, 7)
+        self.assertEqual(mcc.t2.shape, (4, 4, 19, 19))
 
     def test_ccsd_cart(self):
         pmol = mol.copy()
@@ -169,31 +185,37 @@ class KnownValues(unittest.TestCase):
         self.assertAlmostEqual(cc_scanner(geom), -76.228972886940639, 6)
 
     def test_init(self):
+        dfmf = mf.density_fit()
+        umf = mf.to_uhf()
+        dfumf = umf.density_fit()
+
         self.assertTrue(isinstance(cc.CCSD(mf), ccsd.CCSD))
-        self.assertTrue(isinstance(cc.CCSD(mf.density_fit()), dfccsd.RCCSD))
+        self.assertTrue(isinstance(cc.CCSD(dfmf), dfccsd.RCCSD))
         self.assertTrue(isinstance(cc.CCSD(mf.newton()), ccsd.CCSD))
-        self.assertTrue(isinstance(cc.CCSD(mf.density_fit().newton()), dfccsd.RCCSD))
+        self.assertTrue(isinstance(cc.CCSD(dfmf.newton()), dfccsd.RCCSD))
         self.assertTrue(isinstance(cc.CCSD(mf.newton().density_fit()), ccsd.CCSD))
         self.assertTrue(not isinstance(cc.CCSD(mf.newton().density_fit()), dfccsd.RCCSD))
         self.assertTrue(isinstance(cc.CCSD(mf.density_fit().newton().density_fit()), dfccsd.RCCSD))
 
         self.assertTrue(isinstance(cc.UCCSD(mf), uccsd.UCCSD))
-#        self.assertTrue(isinstance(cc.UCCSD(mf.density_fit()), dfccsd.UCCSD))
+        self.assertTrue(isinstance(cc.UCCSD(dfmf), dfuccsd.UCCSD))
         self.assertTrue(isinstance(cc.UCCSD(mf.newton()), uccsd.UCCSD))
-#        self.assertTrue(isinstance(cc.UCCSD(mf.density_fit().newton()), dfccsd.UCCSD))
+        self.assertTrue(isinstance(cc.UCCSD(dfmf.newton()), dfuccsd.UCCSD))
         self.assertTrue(isinstance(cc.UCCSD(mf.newton().density_fit()), uccsd.UCCSD))
-#        self.assertTrue(not isinstance(cc.UCCSD(mf.newton().density_fit()), dfccsd.UCCSD))
-#        self.assertTrue(isinstance(cc.UCCSD(mf.density_fit().newton().density_fit()), dfccsd.UCCSD))
+        self.assertTrue(not isinstance(cc.UCCSD(mf.newton().density_fit()), dfuccsd.UCCSD))
+        self.assertTrue(isinstance(cc.UCCSD(dfmf.newton().density_fit()), dfuccsd.UCCSD))
         self.assertTrue(isinstance(cc.CCSD(scf.GHF(mol)), gccsd.GCCSD))
 
-        umf = scf.convert_to_uhf(mf, scf.UHF(mol))
         self.assertTrue(isinstance(cc.CCSD(umf), uccsd.UCCSD))
-#        self.assertTrue(isinstance(cc.CCSD(umf.density_fit()), dfccsd.UCCSD))
+        self.assertTrue(isinstance(cc.CCSD(dfumf), dfuccsd.UCCSD))
         self.assertTrue(isinstance(cc.CCSD(umf.newton()), uccsd.UCCSD))
-#        self.assertTrue(isinstance(cc.CCSD(umf.density_fit().newton()), dfccsd.UCCSD))
+        self.assertTrue(isinstance(cc.CCSD(dfumf.newton()), dfuccsd.UCCSD))
         self.assertTrue(isinstance(cc.CCSD(umf.newton().density_fit()), uccsd.UCCSD))
-#        self.assertTrue(not isinstance(cc.CCSD(umf.newton().density_fit()), dfccsd.UCCSD))
-#        self.assertTrue(isinstance(cc.CCSD(umf.density_fit().newton().density_fit()), dfccsd.UCCSD))
+        self.assertTrue(not isinstance(cc.CCSD(umf.newton().density_fit()), dfuccsd.UCCSD))
+        self.assertTrue(isinstance(cc.CCSD(dfumf.newton().density_fit()), dfuccsd.UCCSD))
+
+        self.assertTrue(isinstance(dfmf.CCSD(), dfccsd.RCCSD))
+        self.assertTrue(isinstance(dfumf.CCSD(), dfuccsd.UCCSD))
 
         self.assertTrue(isinstance(cc.CCSD(mf, mo_coeff=mf.mo_coeff*1j), rccsd.RCCSD))
 

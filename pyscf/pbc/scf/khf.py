@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-# Copyright 2014-2019 The PySCF Developers. All Rights Reserved.
+# Copyright 2014-2026 The PySCF Developers. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -35,18 +35,20 @@ from pyscf.pbc.scf import hf as pbchf
 from pyscf import lib
 from pyscf.scf import hf as mol_hf
 from pyscf.lib import logger
+from pyscf.data import nist
 from pyscf.pbc.scf import addons
-from pyscf.pbc.scf import chkfile  # noqa
+from pyscf.pbc.scf import smearing
+from pyscf.pbc.scf import chkfile
 from pyscf.pbc import tools
 from pyscf.pbc import df
 from pyscf.pbc.scf.rsjk import RangeSeparatedJKBuilder
 from pyscf.pbc.lib.kpts import KPoints
+from pyscf.pbc.lib.kpts_helper import is_trim
 from pyscf import __config__
 
 WITH_META_LOWDIN = getattr(__config__, 'pbc_scf_analyze_with_meta_lowdin', True)
 PRE_ORTH_METHOD = getattr(__config__, 'pbc_scf_analyze_pre_orth_method', 'ANO')
 CHECK_COULOMB_IMAG = getattr(__config__, 'pbc_scf_check_coulomb_imag', True)
-
 
 def get_ovlp(mf, cell=None, kpts=None):
     '''Get the overlap AO matrices at sampled k-points.
@@ -71,12 +73,17 @@ def get_hcore(mf, cell=None, kpts=None):
     Returns:
         hcore : (nkpts, nao, nao) ndarray
     '''
+    from pyscf.pbc.dft.multigrid import MultiGridNumInt
     if cell is None: cell = mf.cell
     if kpts is None: kpts = mf.kpts
-    if cell.pseudo:
-        nuc = lib.asarray(mf.with_df.get_pp(kpts))
+    if hasattr(mf, '_numint') and isinstance(mf._numint, MultiGridNumInt):
+        ni = mf._numint
     else:
-        nuc = lib.asarray(mf.with_df.get_nuc(kpts))
+        ni = mf.with_df
+    if cell.pseudo:
+        nuc = ni.get_pp(kpts)
+    else:
+        nuc = ni.get_nuc(kpts)
     if len(cell._ecpbas) > 0:
         from pyscf.pbc.gto import ecp
         nuc += lib.asarray(ecp.ecp_int(cell, kpts))
@@ -95,7 +102,7 @@ def get_j(mf, cell, dm_kpts, kpts, kpts_band=None):
 
     Kwargs:
         kpts_band : (k,3) ndarray
-            A list of arbitrary "band" k-points at which to evalute the matrix.
+            A list of arbitrary "band" k-points at which to evaluate the matrix.
 
     Returns:
         vj : (nkpts, nao, nao) ndarray
@@ -114,7 +121,7 @@ def get_jk(mf, cell, dm_kpts, kpts, kpts_band=None, with_j=True, with_k=True,
 
     Kwargs:
         kpts_band : (3,) ndarray
-            A list of arbitrary "band" k-point at which to evalute the matrix.
+            A list of arbitrary "band" k-point at which to evaluate the matrix.
 
     Returns:
         vj : (nkpts, nao, nao) ndarray
@@ -181,24 +188,31 @@ def get_occ(mf, mo_energy_kpts=None, mo_coeff_kpts=None):
     This is a k-point version of scf.hf.SCF.get_occ
     '''
     if mo_energy_kpts is None: mo_energy_kpts = mf.mo_energy
+    assert isinstance(mo_energy_kpts, np.ndarray)
 
     nkpts = len(mo_energy_kpts)
     nocc = mf.cell.tot_electrons(nkpts) // 2
 
-    mo_energy = np.sort(np.hstack(mo_energy_kpts))
-    fermi = mo_energy[nocc-1]
-    mo_occ_kpts = []
-    for mo_e in mo_energy_kpts:
-        mo_occ_kpts.append((mo_e <= fermi).astype(np.double) * 2)
-
-    if nocc < mo_energy.size:
-        logger.info(mf, 'HOMO = %.12g  LUMO = %.12g',
-                    mo_energy[nocc-1], mo_energy[nocc])
-        if mo_energy[nocc-1]+1e-3 > mo_energy[nocc]:
-            logger.warn(mf, 'HOMO %.12g == LUMO %.12g',
-                        mo_energy[nocc-1], mo_energy[nocc])
+    mo_energy_kpts = np.asarray(mo_energy_kpts)
+    mo_energy = np.sort(mo_energy_kpts.ravel())
+    nmo = mo_energy.size
+    if 0 < nocc < nmo:
+        homo, lumo = mo_energy[nocc-1:nocc+1]
+        gap = (lumo - homo) * nist.HARTREE2EV
+        mf.scf_summary['gap'] = gap
+        if mf.verbose >= logger.INFO:
+            if homo+1e-3 > lumo:
+                logger.warn(mf, 'HOMO %.12g == LUMO %.12g', homo, lumo)
+            else:
+                logger.info(mf, '  HOMO = %.12g  LUMO = %.12g  gap/eV = %.5f',
+                            homo, lumo, gap)
+    elif nocc == nmo:
+        logger.info(mf, 'HOMO = %.12g (no LUMO)', mo_energy[nocc-1])
     else:
-        logger.info(mf, 'HOMO = %.12g', mo_energy[nocc-1])
+        raise RuntimeError(f'Failed to assign mo_occ. Nocc ({nocc}) > Nmo ({nmo})')
+    fermi = mo_energy[nocc-1]
+    mo_occ_kpts = np.zeros_like(mo_energy_kpts)
+    mo_occ_kpts[mo_energy_kpts <= fermi] = 2
 
     if mf.verbose >= logger.DEBUG:
         np.set_printoptions(threshold=len(mo_energy))
@@ -241,19 +255,27 @@ def energy_elec(mf, dm_kpts=None, h1e_kpts=None, vhf_kpts=None):
     '''
     if dm_kpts is None: dm_kpts = mf.make_rdm1()
     if h1e_kpts is None: h1e_kpts = mf.get_hcore()
-    if vhf_kpts is None: vhf_kpts = mf.get_veff(mf.cell, dm_kpts)
+    if vhf_kpts is None:
+        vhf_kpts = mf.get_veff(mf.cell, dm_kpts)
 
     nkpts = len(dm_kpts)
-    e1 = 1./nkpts * np.einsum('kij,kji', dm_kpts, h1e_kpts)
-    e_coul = 1./nkpts * np.einsum('kij,kji', dm_kpts, vhf_kpts) * 0.5
+    e1 = 1./nkpts * np.einsum('kij,kji->', dm_kpts, h1e_kpts)
+    e2 = 1./nkpts * np.einsum('kij,kji->', dm_kpts, vhf_kpts) * 0.5
     mf.scf_summary['e1'] = e1.real
-    mf.scf_summary['e2'] = e_coul.real
-    logger.debug(mf, 'E1 = %s  E_coul = %s', e1, e_coul)
-    if CHECK_COULOMB_IMAG and abs(e_coul.imag > mf.cell.precision*10):
+    mf.scf_summary['e2'] = e2.real
+    if hasattr(vhf_kpts, 'ecoul'):
+        ecoul = vhf_kpts.ecoul
+        exx = e2 - ecoul
+        mf.scf_summary['coul'] = ecoul.real
+        mf.scf_summary['exc'] = exx.real
+        logger.debug(mf, 'E1 = %s  E2 = %s  E_coul = %s  Exc = %s', e1, e2, ecoul, exx)
+    else:
+        logger.debug(mf, 'E1 = %s  E2 = %s', e1, e2)
+    if CHECK_COULOMB_IMAG and abs(e2.imag) > mf.cell.precision*10:
         logger.warn(mf, "Coulomb energy has imaginary part %s. "
                     "Coulomb integrals (e-e, e-N) may not converge !",
-                    e_coul.imag)
-    return (e1+e_coul).real, e_coul.real
+                    e2.imag)
+    return (e1+e2).real, e2.real
 
 
 def analyze(mf, verbose=None, with_meta_lowdin=WITH_META_LOWDIN,
@@ -282,7 +304,7 @@ def _make_rdm1_meta(cell, dm_ao_kpts, kpts, pre_orth_method, s):
     from pyscf.lo import orth
     from pyscf.pbc.tools import k2gamma
 
-    kmesh = k2gamma.kpts_to_kmesh(cell, kpts-kpts[0])
+    kmesh = k2gamma.kpts_to_kmesh(cell, kpts-kpts[0], bound_by_supmol=False)
     nkpts, nao = dm_ao_kpts.shape[:2]
     scell, phase = k2gamma.get_phase(cell, kpts, kmesh)
     s_sc = k2gamma.to_supercell_ao_integrals(cell, kpts, s, kmesh=kmesh, force_real=False)
@@ -314,22 +336,35 @@ def canonicalize(mf, mo_coeff_kpts, mo_occ_kpts, fock=None):
     if fock is None:
         dm = mf.make_rdm1(mo_coeff_kpts, mo_occ_kpts)
         fock = mf.get_fock(dm=dm)
-    mo_coeff = []
-    mo_energy = []
-    for k, mo in enumerate(mo_coeff_kpts):
-        mo1 = np.empty_like(mo)
-        mo_e = np.empty_like(mo_occ_kpts[k])
-        occidx = mo_occ_kpts[k] == 2
-        viridx = ~occidx
-        for idx in (occidx, viridx):
-            if np.count_nonzero(idx) > 0:
-                orb = mo[:,idx]
-                f1 = reduce(np.dot, (orb.T.conj(), fock[k], orb))
-                e, c = scipy.linalg.eigh(f1)
-                mo1[:,idx] = np.dot(orb, c)
-                mo_e[idx] = e
-        mo_coeff.append(mo1)
-        mo_energy.append(mo_e)
+    occmask = mo_occ_kpts > 0
+    virmask = ~occmask
+    mo_coeff = np.zeros_like(mo_coeff_kpts)
+    mo_energy = np.full(mo_occ_kpts.shape, pbchf.INVALID_ORBITAL_ENERGY)
+    for k, c_k in enumerate(mo_coeff_kpts):
+        f_k = c_k.conj().T.dot(fock[k]).dot(c_k)
+        idx = np.where(occmask[k])[0]
+        if len(idx) > 0:
+            e, c = scipy.linalg.eigh(f_k[idx[:,None],idx])
+            mo_coeff[k][:,idx] = c_k[:,idx].dot(c)
+            mo_energy[k,idx] = e
+
+        idx = np.where(virmask[k])[0]
+        n = len(idx)
+        if n > 0:
+            sub_fock = f_k[idx[:,None],idx]
+            # make a guess for the linear dependency bases. Coefficients of the
+            # padding orbitals are set to 0. The corresponding fock diagonal
+            # should be strictly 0
+            f_diag = sub_fock.diagonal()
+            for i in reversed(range(n)):
+                if f_diag[i] != 0:
+                    break
+            idx = idx[:i+1]
+            sub_fock = sub_fock[:i+1,:i+1]
+            e, c = scipy.linalg.eigh(sub_fock)
+            mo_coeff[k][:,idx] = c_k[:,idx].dot(c)
+            mo_energy[k,idx] = e
+        mol_hf._adjust_phase_(mo_coeff[k])
     return mo_energy, mo_coeff
 
 def _cast_mol_init_guess(fn):
@@ -410,6 +445,19 @@ def get_rho(mf, dm=None, grids=None, kpts=None):
     ni = numint.KNumInt()
     return ni.get_rho(mf.cell, dm, grids, kpts, mf.max_memory)
 
+def gen_response(mf, mo_coeff=None, mo_occ=None,
+                 singlet=None, hermi=0, max_memory=None, with_nlc=True):
+    from pyscf.pbc.scf._response_functions import _get_jk, _get_k
+    cell = mf.cell
+    kpts = mf.kpts
+    if (singlet is None or singlet) and hermi != 2:
+        def vind(dm1, kshift=0):
+            vj, vk = _get_jk(mf, cell, dm1, hermi, kpts, kshift)
+            return vj - .5 * vk
+    else:
+        def vind(dm1, kshift=0):
+            return -.5 * _get_k(mf, cell, dm1, hermi, kpts, kshift)
+    return vind
 
 class KSCF(pbchf.SCF):
     '''SCF base class with k-point sampling.
@@ -426,7 +474,6 @@ class KSCF(pbchf.SCF):
 
     _keys = {'cell', 'exx_built', 'exxdiv', 'with_df', 'rsjk'}
 
-    reset = pbchf.SCF.reset
     mol = pbchf.SCF.mol
 
     check_sanity = pbchf.SCF.check_sanity
@@ -444,8 +491,9 @@ class KSCF(pbchf.SCF):
     init_guess_by_atom = _cast_mol_init_guess(mol_hf.init_guess_by_atom)
     _finalize = pbchf.SCF._finalize
     canonicalize = canonicalize
+    smearing = smearing.smearing
 
-    def __init__(self, cell, kpts=np.zeros((1,3)),
+    def __init__(self, cell, kpts=None,
                  exxdiv=getattr(__config__, 'pbc_scf_SCF_exxdiv', 'ewald')):
         if not cell._built:
             sys.stderr.write('Warning: cell.build() is not called in input\n')
@@ -457,7 +505,8 @@ class KSCF(pbchf.SCF):
         self.rsjk = None
 
         self.exxdiv = exxdiv
-        self.kpts = kpts
+        if kpts is not None:
+            self.kpts = kpts
         self.conv_tol = max(cell.precision * 10, 1e-8)
 
         self.exx_built = False
@@ -473,6 +522,35 @@ class KSCF(pbchf.SCF):
     @property
     def mo_occ_kpts(self):
         return self.mo_occ
+
+    @property
+    def kpts(self):
+        if 'kpts' in self.__dict__:
+            # To handle the attribute kpts loaded from chkfile
+            self.kpts = self.__dict__.pop('kpts')
+        return self.with_df.kpts
+
+    @kpts.setter
+    def kpts(self, x):
+        kpts = np.reshape(x, (-1,3))
+        self.with_df.kpts = kpts
+        if self.rsjk:
+            self.rsjk.kpts = kpts
+
+    @property
+    def kmesh(self):
+        '''The number of k-points along each axis in the first Brillouin zone'''
+        from pyscf.pbc.tools.k2gamma import kpts_to_kmesh
+        kpts = self.kpts
+        kmesh = kpts_to_kmesh(self.cell, kpts)
+        if len(kpts) != np.prod(kmesh):
+            logger.warn(self, 'K-points specified in %s are not Monkhorst-Pack %s grids',
+                        self, kmesh)
+        return kmesh
+
+    @kmesh.setter
+    def kmesh(self, x):
+        self.kpts = self.cell.make_kpts(x)
 
     def build(self, cell=None):
         # To handle the attribute kpt or kpts loaded from chkfile
@@ -499,6 +577,11 @@ class KSCF(pbchf.SCF):
 
         if self.verbose >= logger.WARN:
             self.check_sanity()
+        return self
+
+    def reset(self, cell=None):
+        pbchf.SCF.reset(self, cell)
+        self.exx_built = False
         return self
 
     def dump_flags(self, verbose=None):
@@ -563,7 +646,7 @@ class KSCF(pbchf.SCF):
         logger.timer(self, 'vj and vk', *cpu0)
         return vj, vk
 
-    def get_veff(self, cell=None, dm_kpts=None, dm_last=0, vhf_last=0, hermi=1,
+    def get_veff(self, cell=None, dm_kpts=None, dm_last=None, vhf_last=None, hermi=1,
                  kpts=None, kpts_band=None):
         '''Hartree-Fock potential matrix for the given density matrix.
         See :func:`scf.hf.get_veff` and :func:`scf.hf.RHF.get_veff`
@@ -571,7 +654,12 @@ class KSCF(pbchf.SCF):
         if dm_kpts is None:
             dm_kpts = self.make_rdm1()
         vj, vk = self.get_jk(cell, dm_kpts, hermi, kpts, kpts_band)
-        return vj - vk * .5
+        vhf = vj - vk * .5
+        if dm_kpts.ndim == 3 and kpts_band is None:
+            nkpts = len(dm_kpts)
+            ecoul = np.einsum('Kij,Kji->', dm_kpts, vj).real * .5/nkpts
+            vhf = lib.tag_array(vhf, ecoul=ecoul)
+        return vhf
 
     def get_grad(self, mo_coeff_kpts, mo_occ_kpts, fock=None):
         '''
@@ -584,15 +672,60 @@ class KSCF(pbchf.SCF):
             fock = self.get_hcore(self.cell, self.kpts) + self.get_veff(self.cell, dm1)
         return get_grad(mo_coeff_kpts, mo_occ_kpts, fock)
 
-    def eig(self, h_kpts, s_kpts):
-        nkpts = len(h_kpts)
-        eig_kpts = []
-        mo_coeff_kpts = []
+    def check_linear_dependency(self, s, verbose=None):
+        log = logger.new_logger(self, verbose)
+        kpts = self.kpts
+        if isinstance(kpts, KPoints):
+            kpts = kpts.kpts_ibz
+        trs_mask = is_trim(self.cell, kpts)
+        x_kpts = []
+        cond_kpts = []
+        for k, s_k in enumerate(s):
+            if trs_mask[k]:
+                s_k = s_k.real
+            e, v = scipy.linalg.eigh(s_k)
+            abs_e = abs(e)
+            emax = abs_e.max()
+            emin = abs_e.min()
+            c = emax / emin
+            log.debug('kpt %d, cond(S) = %s', k, c)
+            cond_kpts.append(c)
+            if mol_hf.remove_overlap_zero_eigenvalue:
+                mask = e > mol_hf.overlap_zero_eigenvalue_threshold
+                x = v[:,mask] / np.sqrt(e[mask])
+                nao, nmo = x.shape
+                if nmo < nao:
+                    log.info(f"kpt {k}: {nao-nmo} small eigenvectors of overlap matrix removed")
+            else:
+                x = v / np.sqrt(e)
+            x_kpts.append(x)
 
-        for k in range(nkpts):
-            e, c = self._eigh(h_kpts[k], s_kpts[k])
-            eig_kpts.append(e)
-            mo_coeff_kpts.append(c)
+        if any(c > 1e10 for c in cond_kpts):
+            log.warn('Singularity detected in the overlap matrix. '
+                     'SCF may be inaccurate and difficult to converge.')
+
+        x_orth = x_kpts
+        nkpts, nao = s.shape[:2]
+        return x_orth
+
+    def eig(self, h_kpts, s_kpts, overwrite=False, x=None):
+        nkpts, nao = h_kpts.shape[:2]
+        eig_kpts = np.empty((nkpts, nao))
+        mo_coeff_kpts = np.empty((nkpts, nao, nao), dtype=h_kpts.dtype)
+        if x is None:
+            for k in range(nkpts):
+                e, c = self._eigh(h_kpts[k], s_kpts[k], overwrite)
+                eig_kpts[k] = e
+                mo_coeff_kpts[k] = c
+        else:
+            for k in range(nkpts):
+                e, c = self._eigh(h_kpts[k], s_kpts[k], x=x[k])
+                nmo_k = c.shape[1]
+                eig_kpts[k,:nmo_k] = e
+                mo_coeff_kpts[k,:,:nmo_k] = c
+                if nmo_k < nao:
+                    eig_kpts[k,nmo_k:] = pbchf.INVALID_ORBITAL_ENERGY
+                    mo_coeff_kpts[k,:,nmo_k:] = 0
         return eig_kpts, mo_coeff_kpts
 
     def make_rdm1(self, mo_coeff_kpts=None, mo_occ_kpts=None, **kwargs):
@@ -628,9 +761,10 @@ class KSCF(pbchf.SCF):
         kpts_band = kpts_band.reshape(-1,3)
 
         fock = self.get_hcore(cell, kpts_band)
-        fock = fock + self.get_veff(cell, dm_kpts, kpts=kpts, kpts_band=kpts_band)
+        fock += self.get_veff(cell, dm_kpts, kpts=kpts, kpts_band=kpts_band)
         s1e = self.get_ovlp(cell, kpts_band)
-        mo_energy, mo_coeff = self.eig(fock, s1e)
+        mo_energy, mo_coeff = pbchf.eigh_with_canonical_orth(fock, s1e)
+
         if single_kpt_band:
             mo_energy = mo_energy[0]
             mo_coeff = mo_coeff[0]
@@ -729,9 +863,12 @@ class KSCF(pbchf.SCF):
         raise NotImplementedError
 
 class KRHF(KSCF):
+    '''RHF class with k-point sampling (default: gamma point).
+    '''
 
     analyze = analyze
     spin_square = mol_hf.RHF.spin_square
+    gen_response = gen_response
     to_gpu = lib.to_gpu
 
     def check_sanity(self):
@@ -779,16 +916,17 @@ class KRHF(KSCF):
         return mulliken_meta(cell, dm, kpts, s=s, verbose=verbose,
                              pre_orth_method=pre_orth_method)
 
-    def nuc_grad_method(self):
+    def Gradients(self):
         from pyscf.pbc.grad import krhf
         return krhf.Gradients(self)
 
     def stability(self,
                   internal=getattr(__config__, 'pbc_scf_KSCF_stability_internal', True),
                   external=getattr(__config__, 'pbc_scf_KSCF_stability_external', False),
-                  verbose=None):
+                  verbose=None,
+                  return_status=False):
         from pyscf.pbc.scf.stability import rhf_stability
-        return rhf_stability(self, internal, external, verbose)
+        return rhf_stability(self, internal, external, verbose, return_status)
 
     def to_ks(self, xc='HF'):
         '''Convert to RKS object.

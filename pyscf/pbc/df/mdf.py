@@ -22,7 +22,8 @@ Ref:
 J. Chem. Phys. 147, 164119 (2017)
 '''
 
-import tempfile
+import os
+import sys
 import numpy as np
 import h5py
 import scipy.linalg
@@ -36,7 +37,7 @@ from pyscf.pbc.df import df
 from pyscf.pbc.df import aft
 from pyscf.pbc.df.aft import _check_kpts
 from pyscf.pbc.df.gdf_builder import _CCGDFBuilder
-from pyscf.pbc.df.rsdf_builder import _RSGDFBuilder
+from pyscf.pbc.df.rsdf_builder import _RSGDFBuilder, estimate_rs_2c2e_rcut
 from pyscf.pbc.df.incore import libpbc, make_auxcell
 from pyscf.pbc.lib.kpts import KPoints
 from pyscf.pbc.lib.kpts_helper import is_zero, member, unique
@@ -89,7 +90,7 @@ class MDF(df.GDF):
         self.linear_dep_threshold = df.LINEAR_DEP_THR
         self._j_only = False
 # If _cderi_to_save is specified, the 3C-integral tensor will be saved in this file.
-        self._cderi_to_save = tempfile.NamedTemporaryFile(dir=lib.param.TMPDIR)
+        self._cderi_to_save = lib.NamedTemporaryFile(dir=lib.param.TMPDIR)
 # If _cderi is specified, the 3C-integral tensor will be read from this file
         self._cderi = None
         self._rsh_df = {}  # Range separated Coulomb DF objects
@@ -98,9 +99,76 @@ class MDF(df.GDF):
             excludes=('_cderi_to_save', '_cderi', '_rsh_df'), reset_state=True)
 
     def build(self, j_only=None, with_j3c=True, kpts_band=None):
-        df.GDF.build(self, j_only, with_j3c, kpts_band)
+        if j_only is not None:
+            self._j_only = j_only
+        if self.kpts_band is not None:
+            self.kpts_band = np.reshape(self.kpts_band, (-1,3))
+        if kpts_band is not None:
+            kpts_band = np.reshape(kpts_band, (-1,3))
+            if self.kpts_band is None:
+                self.kpts_band = kpts_band
+            else:
+                self.kpts_band = unique(np.vstack((self.kpts_band,kpts_band)))[0]
+
+        self.check_sanity()
+        self.dump_flags()
         cell = self.cell
-        if any(x % 2 == 0 for x in self.mesh[:cell.dimension]):
+
+        # Remove overlaps between the sampling and band k-points. Duplicate
+        # k-points can cause incore.wrap_int3c to allocate an oversized buffer
+        # that the integral code leaves partially unfilled.
+        if self.kpts_band is None:
+            kpts_union = self.kpts
+        else:
+            kpts_union = unique(np.vstack([self.kpts, self.kpts_band]))[0]
+        j_only = self._j_only or len(kpts_union) == 1
+
+        # Charge normalization makes charge-compensated DF integrals simpler.
+        # However, it gives compact auxiliary functions much larger
+        # coefficients, making the two-center Coulomb metric more ill-conditioned.
+        # Other algorithms should not use this normalization.
+        if self._prefer_ccdf or cell.omega > 0:
+            # Only _CCMDFBuilder supports long-range integrals.
+            auxcell = self.auxcell = df.make_auxcell(
+                cell, self.auxbasis, self.exp_to_discard,
+                normalize_multipoles=True)
+            dfbuilder = _CCMDFBuilder(cell, auxcell, kpts_union)
+        else:
+            auxcell = self.auxcell = df.make_auxcell(
+                cell, self.auxbasis, self.exp_to_discard,
+                normalize_multipoles=False)
+            dfbuilder = _RSMDFBuilder(cell, auxcell, kpts_union)
+        dfbuilder.eta = self.eta
+        dfbuilder.mesh = self.mesh
+        dfbuilder.linear_dep_threshold = self.linear_dep_threshold
+
+        if with_j3c and self._cderi_to_save is not None:
+            if isinstance(self._cderi_to_save, str):
+                cderi = self._cderi_to_save
+            else:
+                cderi = self._cderi_to_save.name
+            if isinstance(self._cderi, str):
+                if self._cderi == cderi and os.path.isfile(cderi):
+                    logger.warn(self, 'File %s (specified by ._cderi) is '
+                                'overwritten by GDF initialization.', cderi)
+                    # On Windows, close the handle before os.remove to avoid
+                    # permission error.
+                    if sys.platform == 'win32':
+                        self._cderi_to_save.close()
+                    os.remove(cderi)
+                else:
+                    logger.warn(self, 'Value of ._cderi is ignored. '
+                                'DF integrals will be saved in file %s .', cderi)
+
+            t1 = (logger.process_clock(), logger.perf_counter())
+            self._cderi = cderi
+            dfbuilder.make_j3c(cderi, j_only=j_only, dataname=self._dataname,
+                               kptij_lst=None)
+            # Use the same mesh for the Gaussian and plane-wave parts.
+            self.mesh = dfbuilder.mesh
+            t1 = logger.timer_debug1(self, 'j3c', *t1)
+
+        if self.mesh is not None and any(x % 2 == 0 for x in self.mesh[:cell.dimension]):
             # Even number in mesh can produce planewaves without counterparts
             # (see np.fft.fftfreq). MDF mesh is typically not enough to capture
             # all basis. The singular planewaves can break the symmetry in
@@ -109,34 +177,35 @@ class MDF(df.GDF):
             logger.warn(self, 'MDF with even number in mesh may have significant errors')
         return self
 
-    def _make_j3c(self, cell=None, auxcell=None, kptij_lst=None, cderi_file=None):
-        if cell is None: cell = self.cell
-        if auxcell is None: auxcell = self.auxcell
-        if cderi_file is None: cderi_file = self._cderi_to_save
-
-        # Remove duplicated k-points. Duplicated kpts may lead to a buffer
-        # located in incore.wrap_int3c larger than necessary. Integral code
-        # only fills necessary part of the buffer, leaving some space in the
-        # buffer unfilled.
-        if self.kpts_band is None:
-            kpts_union = self.kpts
-        else:
-            kpts_union = unique(np.vstack([self.kpts, self.kpts_band]))[0]
-
-        if self._prefer_ccdf or cell.omega > 0:
-            # For long-range integrals _CCMDFBuilder is the only option
-            dfbuilder = _CCMDFBuilder(cell, auxcell, kpts_union)
-        else:
-            dfbuilder = _RSMDFBuilder(cell, auxcell, kpts_union)
-            dfbuilder.eta = self.eta
-        dfbuilder.mesh = self.mesh
-        dfbuilder.linear_dep_threshold = self.linear_dep_threshold
-        j_only = self._j_only or len(kpts_union) == 1
-        dfbuilder.make_j3c(cderi_file, j_only=j_only, dataname=self._dataname,
-                           kptij_lst=kptij_lst)
-
-        # mdf.mesh must be the mesh to generate cderi
-        self.mesh = dfbuilder.mesh
+    def weighted_coulG(self, kpt=np.zeros(3), exx=False, mesh=None, omega=None):
+        # In PySCF-2.10 and earlier versions, certain contributions at the edges
+        # +/-Gmax +/- 0.5 were removed to restore symmetry between the PW bases
+        # in the MDF. Asymmetric PWs can introduce imaginary parts in the
+        # Coulomb energy terms. This error becomes larger when the energy cutoff
+        # for PWs is insufficient. The PW bases used in MDF typically cannot
+        # converge the Coulomb energy alone, leading to more significant errors
+        # for the asymmetric PWs. The screening of asymmetric PWs at the edges
+        # was implemented in the pbc.tools.pbc.get_coulG function. However, this
+        # treatment could cause inconsistency between supercell gamma point and
+        # k-point sampled calculations, and has been removed from get_coulG. It
+        # is exclusively applied within the MDF context here.
+        wcoulG = aft.weighted_coulG(self, kpt, exx, mesh, omega)
+        if abs(kpt).max() < 1e-9:
+            return wcoulG
+        cell = self.cell
+        b = cell.reciprocal_vectors()
+        scaled_kpt = np.linalg.solve(b.T, kpt)
+        wcoulG = wcoulG.reshape(mesh)
+        for n in range(cell.dimension):
+            if abs(scaled_kpt[n] + 0.5) < 1e-12:
+                # when k = -.5, -Gmax-.5 lies on the edge. They were removed in
+                # previous versions.
+                wcoulG[(slice(None),)*n + (mesh[n]//2+1,)] = 0
+            elif abs(scaled_kpt[n] - 0.5) < 1e-12 and mesh[n] % 2 == 1:
+                # when k = .5, Gmax+.5 lies on the edge. They were removed in
+                # previous versions.
+                wcoulG[(slice(None),)*n + (mesh[n]//2,)] = 0
+        return wcoulG.ravel()
 
     get_pp = df.GDF.get_pp
     get_nuc = df.GDF.get_nuc
@@ -153,14 +222,12 @@ class MDF(df.GDF):
             # * AFT is computationally more efficient than MDF if the Coulomb
             #   attenuation tends to the long-range role (i.e. small omega).
             # * Note: changing to AFT integrator may cause small difference to
-            #   the MDF integrator. If a very strict MDF result is desired,
-            #   we can disable this trick by setting
-            #   LONGRANGE_AFT_TURNOVER_THRESHOLD to 0.
+            #   the MDF integrator.
             # * The sparse mesh is not appropriate for low dimensional systems
             #   with infinity vacuum since the ERI may require large mesh to
             #   sample density in vacuum.
-            if (omega < df.LONGRANGE_AFT_TURNOVER_THRESHOLD and
-                cell.dimension >= 2 and cell.low_dim_ft_type != 'inf_vacuum'):
+            if (omega > 0 and
+                (cell.dimension >= 2 or cell.low_dim_ft_type != 'inf_vacuum')):
                 mydf = aft.AFTDF(cell, self.kpts)
                 ke_cutoff = aft.estimate_ke_cutoff_for_omega(cell, omega)
                 mydf.mesh = cell.cutoff_to_mesh(ke_cutoff)
@@ -207,7 +274,6 @@ class MDF(df.GDF):
     def get_naoaux(self):
         return df.DF.get_naoaux(self) + aft.AFTDF.get_naoaux(self)
 
-
 class _RSMDFBuilder(_RSGDFBuilder):
     '''
     Use the range-separated algorithm to build mixed density fitting 3-center tensor
@@ -230,9 +296,11 @@ class _RSMDFBuilder(_RSGDFBuilder):
         #    <g|g> - 2 <g|G><G|g> + <g|G><G|G><G|g> = <g|g> - <g|G><G|g>
         auxcell = self.auxcell
         omega = self.omega
-        rs_auxcell = self.rs_auxcell
+        rs_auxcell = self.rs_auxcell.copy()
         auxcell_c = rs_auxcell.compact_basis_cell()
+
         if auxcell_c.nbas > 0:
+            auxcell_c.rcut = estimate_rs_2c2e_rcut(auxcell_c, omega)
             with auxcell_c.with_short_range_coulomb(omega):
                 sr_j2c = list(auxcell_c.pbc_intor('int2c2e', hermi=1, kpts=uniq_kpts))
 
@@ -319,6 +387,8 @@ class _RSMDFBuilder(_RSGDFBuilder):
         GauxI = np.asarray(Gaux.imag, order='C')
         return GauxR, GauxI
 
+    weighted_coulG = MDF.weighted_coulG
+
 
 class _CCMDFBuilder(_CCGDFBuilder):
     '''
@@ -367,7 +437,6 @@ class _CCMDFBuilder(_CCGDFBuilder):
                 auxG = None
             j2c[k] = j2c_k
         return j2c
-
 
     def outcore_auxe2(self, cderi_file, intor='int3c2e', aosym='s2', comp=None,
                       j_only=False, dataname='j3c', shls_slice=None,
@@ -426,3 +495,5 @@ class _CCMDFBuilder(_CCGDFBuilder):
         else:
             cderi_negative = None
         return cderi, cderi_negative
+
+    weighted_coulG = MDF.weighted_coulG

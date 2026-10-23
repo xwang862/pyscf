@@ -22,6 +22,7 @@ Some helper functions
 
 import os
 import sys
+import atexit
 import time
 import random
 import platform
@@ -91,35 +92,105 @@ c_double_p = ctypes.POINTER(ctypes.c_double)
 c_int_p = ctypes.POINTER(ctypes.c_int)
 c_null_ptr = ctypes.POINTER(ctypes.c_void_p)
 
+_dll_deps = {
+    'libcgto':       ['libcint'],
+    'libcvhf':       ['libcint'],
+    'libao2mo':      ['libcint', 'libcvhf'],
+    'libdft':        ['libcvhf', 'libcgto', 'libcint'],
+    'libpbc':        ['libcint', 'libcgto'],
+    'libri':         ['libao2mo', 'libcvhf', 'libcgto', 'libcint'],
+    # Windows wheels may bundle lib-prefixed support DLLs, while conda-forge
+    # provides xc.dll and xcfun.dll. Prefer the bundled names, then fall back
+    # to the environment-provided names.
+    'libxc_itrf':    [('libxc', 'xc')],
+    'libxcfun_itrf': [('libxcfun', 'xcfun')],
+}
+
+def _load_dependency(libname):
+    if isinstance(libname, str):
+        return load_library(libname)
+    if isinstance(libname, tuple):
+        for candidate in libname:
+            try:
+                return load_library(candidate)
+            except OSError:
+                pass
+        raise OSError(f'Library candidates {libname} not found')
+
+    raise TypeError(f'Unsupported dependency spec: {libname!r}')
+
+@functools.lru_cache(128)
 def load_library(libname):
+    lib = None
+    _loaderpath = os.path.dirname(__file__)
     try:
-        _loaderpath = os.path.dirname(__file__)
-        return numpy.ctypeslib.load_library(libname, _loaderpath)
+        lib = numpy.ctypeslib.load_library(libname, _loaderpath)
     except OSError:
+        pass
+
+    if lib is None and sys.platform == 'win32':
+        for env_path in [os.path.join(sys.prefix, 'Library', 'bin'),
+                         os.path.join(sys.prefix, 'Library', 'lib')]:
+            try:
+                lib = numpy.ctypeslib.load_library(libname, env_path)
+                break
+            except OSError:
+                pass
+
+    if lib is None:
         from pyscf import __path__ as ext_modules
         for path in ext_modules:
             libpath = os.path.join(path, 'lib')
             if os.path.isdir(libpath):
                 for files in os.listdir(libpath):
                     if files.startswith(libname):
-                        return numpy.ctypeslib.load_library(libname, libpath)
-        raise
+                        lib = numpy.ctypeslib.load_library(libname, libpath)
+                        break
+                if lib is not None:
+                    break
+        if lib is None:
+            raise OSError(f'Library {libname} not found')
+
+    if sys.platform == 'win32' and libname in _dll_deps:
+        deps = [_load_dependency(d) for d in _dll_deps[libname]]
+        lib = make_dll_wrapper(lib, *deps)
+    return lib
+
+
+def make_dll_wrapper(lib, *fallbacks):
+    if sys.platform != 'win32':
+        return lib
+    class _DllWrapper:
+        def __init__(self, primary, *fallbacks):
+            object.__setattr__(self, '_primary', primary)
+            object.__setattr__(self, '_fallbacks', fallbacks)
+        def __getattr__(self, name):
+            for dll in (self._primary,) + self._fallbacks:
+                try:
+                    return getattr(dll, name)
+                except AttributeError:
+                    pass
+            raise AttributeError(f"function '{name}' not found")
+    return _DllWrapper(lib, *fallbacks)
 
 #Fixme, the standard resource module gives wrong number when objects are released
 # http://fa.bianp.net/blog/2013/different-ways-to-get-memory-consumption-or-lessons-learned-from-memory_profiler/#fn:1
 #or use slow functions as memory_profiler._get_memory did
-CLOCK_TICKS = os.sysconf("SC_CLK_TCK")
-PAGESIZE = os.sysconf("SC_PAGE_SIZE")
 def current_memory():
     '''Return the size of used memory and allocated virtual memory (in MB)'''
-    #import resource
-    #return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1000
     if sys.platform.startswith('linux'):
+        pagesize = os.sysconf("SC_PAGE_SIZE")
         with open("/proc/%s/statm" % os.getpid()) as f:
-            vms, rss = [int(x)*PAGESIZE for x in f.readline().split()[:2]]
+            vms, rss = [int(x) * pagesize for x in f.readline().split()[:2]]
             return rss/1e6, vms/1e6
     else:
-        return 0, 0
+        try:
+            import psutil
+            process = psutil.Process(os.getpid())
+            mem_info = process.memory_info()
+            return mem_info.rss/1e6, mem_info.vms/1e6
+        except (ImportError, Exception):
+            return 0, 0
 
 def num_threads(n=None):
     '''Set the number of OMP threads.  If argument is not specified, the
@@ -349,14 +420,7 @@ def prange_split(n_total, n_sections):
 
 izip = zip
 
-if sys.version_info > (3, 8):
-    from math import comb
-else:
-    import math
-    def comb(n, k):
-        if k < 0 or k > n:
-            return 0
-        return math.factorial(n) // math.factorial(n-k) // math.factorial(k)
+from math import comb
 
 def map_with_prefetch(func, *iterables):
     '''
@@ -417,8 +481,8 @@ def tril_product(*iterables, **kwds):
     .. math:: i[tril_idx[0]] >= i[tril_idx[1]] >= ... >= i[tril_idx[len(tril_idx)-1]]
 
     Args:
-        *iterables: Variable length argument list of indices for the cartesian product
-        **kwds: Arbitrary keyword arguments.  Acceptable keywords include:
+        ``*iterables``: Variable length argument list of indices for the cartesian product
+        ``**kwds``: Arbitrary keyword arguments.  Acceptable keywords include:
             repeat (int): Number of times to repeat the iterables
             tril_idx (array_like): Indices to put into lower-triangular form.
 
@@ -491,7 +555,7 @@ class capture_stdout:
         self._contents = None
         self.old_stdout_fileno = sys.stdout.fileno()
         self.bak_stdout_fd = os.dup(self.old_stdout_fileno)
-        self.ftmp = tempfile.NamedTemporaryFile(dir=param.TMPDIR)
+        self.ftmp = NamedTemporaryFile(dir=param.TMPDIR)
         os.dup2(self.ftmp.file.fileno(), self.old_stdout_fileno)
         return self
     def __exit__(self, type, value, traceback):
@@ -609,7 +673,6 @@ class StreamObject:
         anything related to the method (such as the energy, the wave-function,
         the DFT mesh grids etc.).
         '''
-        pass
 
     def pre_kernel(self, envs):
         '''
@@ -617,7 +680,6 @@ class StreamObject:
         Internal variables are exposed to pre_kernel through the "envs"
         dictionary.  Return value of pre_kernel function is not required.
         '''
-        pass
 
     def post_kernel(self, envs):
         '''
@@ -625,7 +687,6 @@ class StreamObject:
         variables are exposed to post_kernel through the "envs" dictionary.
         Return value of post_kernel function is not required.
         '''
-        pass
 
     def run(self, *args, **kwargs):
         '''
@@ -664,7 +725,7 @@ class StreamObject:
 
     def apply(self, fn, *args, **kwargs):
         '''
-        Apply the fn to rest arguments:  return fn(*args, **kwargs).  The
+        Apply the fn to rest arguments:  return ``fn(*args, **kwargs)``.  The
         return value of method set is the object itself.  This allows a series
         of functions/methods to be executed in pipe.
         '''
@@ -696,6 +757,12 @@ class StreamObject:
         return self.view(self.__class__)
 
     __getstate__, __setstate__ = generate_pickle_methods()
+
+    def reset(self):
+        '''
+        Clean up intermediates
+        '''
+        raise NotImplementedError
 
 
 _warn_once_registry = {}
@@ -870,25 +937,27 @@ def invalid_method(name):
     fn.__name__ = name
     return fn
 
-@functools.lru_cache(None)
-def _define_class(name, bases):
-    return type(name, bases, {})
-
+_registered_classes = {}
 def make_class(bases, name=None, attrs=None):
     '''
     Construct a class
 
-    class {name}(*bases):
-        __dict__ = attrs
+    .. code-block:: python
+
+        class {name}(*bases):
+            __dict__ = attrs
     '''
+    _registered_classes
     if name is None:
         name = ''.join(getattr(x, '__name_mixin__', x.__name__) for x in bases)
 
-    cls = _define_class(name, bases)
-    cls.__name_mixin__ = name
-    if attrs is not None:
-        for key, val in attrs.items():
-            setattr(cls, key, val)
+    cls = _registered_classes.get((name, bases))
+    if cls is None:
+        if attrs is None:
+            attrs = {}
+        cls = type(name, bases, attrs)
+        cls.__name_mixin__ = name
+        _registered_classes[name, bases] = cls
     return cls
 
 def set_class(obj, bases, name=None, attrs=None):
@@ -927,7 +996,8 @@ def drop_class(cls, base_cls, name_mixin=None):
 
     # rebuild the dynamic_mixin class
     attrs = {**cls.__dict__, '__name_mixin__': cls_name}
-    cls_undressed = type(cls_name, tuple(filter_bases), attrs)
+    cls_undressed = make_class(tuple(filter_bases), cls_name, attrs)
+    cls_undressed.__module__ = cls.__module__
     return cls_undressed
 
 def replace_class(cls, old_cls, new_cls):
@@ -949,7 +1019,9 @@ def replace_class(cls, old_cls, new_cls):
 
     name = cls.__name__.replace(old_cls.__name__, new_cls.__name__)
     attrs = {**cls.__dict__, '__name_mixin__': name}
-    return type(name, tuple(bases), attrs)
+    _cls = make_class(tuple(bases), name, attrs)
+    _cls.__module__ = cls.__module__
+    return _cls
 
 def overwrite_mro(obj, mro):
     '''A hacky function to overwrite the __mro__ attribute'''
@@ -1204,8 +1276,9 @@ class H5TmpFile(H5FileWrap):
     >>> ftmp = lib.H5TmpFile()
     '''
     def __init__(self, filename=None, mode='a', prefix='', suffix='',
-                 dir=param.TMPDIR, *args, **kwargs):
+                 dir=None, *args, **kwargs):
         self.delete_on_close = False
+        dir = dir or param.TMPDIR
         if filename is None:
             filename = H5TmpFile._gen_unique_name(dir, pre=prefix, suf=suffix)
             self.delete_on_close = True
@@ -1242,6 +1315,35 @@ class H5TmpFile(H5FileWrap):
 
     def __exit__(self, type, value, traceback):
         self.close()
+
+
+def NamedTemporaryFile(*args, **kwargs):
+    '''Create a named temporary file object. This function wraps
+    `tempfile.NamedTemporaryFile`. On Windows, `delete=False` is forced
+    to prevent permission errors when the file is reopened by another
+    handle.
+
+    Examples:
+
+    >>> from pyscf import lib
+    >>> ftmp = lib.NamedTemporaryFile()
+    >>> ftmp.name
+    '''
+    if sys.platform == 'win32':
+        kwargs['delete'] = False
+    f = tempfile.NamedTemporaryFile(*args, **kwargs)
+    if sys.platform == 'win32':
+        def _close_and_unlink():
+            try:
+                f.close()
+            except Exception:
+                pass
+            try:
+                os.unlink(f.name)
+            except OSError:
+                pass
+        atexit.register(_close_and_unlink)
+    return f
 
 
 def fingerprint(a):
@@ -1401,7 +1503,7 @@ def git_info(repo_path):
     try:
         with open(os.path.join(repo_path, '.git', 'ORIG_HEAD'), 'r') as f:
             orig_head = f.read().strip()
-    except IOError:
+    except OSError:
         pass
 
     try:
@@ -1413,7 +1515,7 @@ def git_info(repo_path):
             branch = os.path.basename(head)
             with open(os.path.join(repo_path, '.git', head.split(' ')[1]), 'r') as f:
                 head = f.read().strip()
-    except IOError:
+    except OSError:
         pass
     return orig_head, head, branch
 
@@ -1424,14 +1526,22 @@ def format_sys_info():
     result = [
         f'System: {platform.uname()}  Threads {num_threads()}',
         f'Python {sys.version}',
-        f'numpy {numpy.__version__}  scipy {scipy.__version__}  '
-        f'h5py {h5py.__version__}',
+        (f'numpy {numpy.__version__}  scipy {scipy.__version__}  '
+         f'h5py {h5py.__version__}'),
         f'Date: {time.ctime()}',
         f'PySCF version {pyscf.__version__}',
         f'PySCF path  {info["path"]}',
     ]
     if 'git' in info:
         result.append(info['git'])
+    # Report the effective namespace search paths, including extensions found
+    # without PYSCF_EXT_PATH. Preserve their order and omit the core package.
+    seen = {os.path.realpath(os.path.dirname(pyscf.__file__))}
+    for path in pyscf.__path__:
+        realpath = os.path.realpath(path)
+        if realpath not in seen:
+            result.append(f'PySCF extension path  {path}')
+            seen.add(realpath)
     return result
 
 
@@ -1478,7 +1588,7 @@ class _OmniObject:
     '''
     verbose = 0
     max_memory = param.MAX_MEMORY
-    stdout = sys.stdout
+    stdout = StreamObject.stdout
 
     def __init__(self, default_factory=None):
         self._default = default_factory
@@ -1495,6 +1605,13 @@ omniobj._built = True
 omniobj.mol = omniobj
 omniobj._scf = omniobj
 omniobj.base = omniobj
+omniobj.precision = 1e-8 # utilized by several pbc modules
+
+# Attributes that are kept in np.ndarray during the to_gpu conversion
+_ATTRIBUTES_IN_NPARRAY = {'kpt', 'kpts', '_kpts', 'kpts_band', 'mesh', 'frozen'}
+# Call .to_gpu() for additional attributes that are not specified in the
+# class._keys list
+_ADDITIONAL_ATTRIBUTES = ['_scf', '_numint']
 
 def to_gpu(method, out=None):
     '''Convert a method to its corresponding GPU variant, and recursively
@@ -1523,23 +1640,47 @@ def to_gpu(method, out=None):
 
         from importlib import import_module
         mod = import_module(method.__module__.replace('pyscf', 'gpu4pyscf'))
-        cls = getattr(mod, method.__class__.__name__)
+        if hasattr(mod, 'from_cpu'):
+            # the customized to_gpu function can be accessed at module
+            # levelin gpu4pyscf.
+            return mod.from_cpu(method)
+
         # A temporary GPU instance. This ensures to initialize private
         # attributes that are only available for GPU code.
-        out = cls(omniobj)
+        cls = getattr(mod, method.__class__.__name__)
+        # Allow gpu4pyscf to customize the to_gpu method for PySCF classes.
+        if hasattr(cls, 'from_cpu'):
+            return cls.from_cpu(method)
 
-    # Convert only the keys that are defined in the corresponding GPU class
-    cls_keys = [getattr(cls, '_keys', ()) for cls in out.__class__.__mro__[:-1]]
-    out_keys = set(out.__dict__).union(*cls_keys)
-    # Only overwrite the attributes of the same name.
-    keys = set(method.__dict__).intersection(out_keys)
+        out = method.view(cls)
 
-    for key in keys:
-        val = getattr(method, key)
-        if isinstance(val, numpy.ndarray):
-            val = cupy.asarray(val)
-        elif hasattr(val, 'to_gpu'):
-            val = val.to_gpu()
+    elif hasattr(out, 'from_cpu'):
+        out.__dict__.update(out.__class__.from_cpu(method).__dict__)
+        return out
+
+    cls_keys = set.union(*[getattr(cls, '_keys', ()) for cls in out.__class__.__mro__[:-1]])
+    cpu_keys = set.union(*[getattr(cls, '_keys', ()) for cls in method.__class__.__mro__[:-1]])
+    # Discards keys that are only defined in CPU classes
+    discards = cpu_keys.difference(cls_keys)
+    for k in discards:
+        out.__dict__.pop(k, None)
+
+    for key, val in method.__dict__.items():
+        # Convert only the keys that are defined in the corresponding GPU class
+        if key in cls_keys and key not in _ATTRIBUTES_IN_NPARRAY:
+            if isinstance(val, numpy.ndarray):
+                val = cupy.asarray(val)
+            elif hasattr(val, 'to_gpu'):
+                val = val.to_gpu()
         setattr(out, key, val)
-    out.reset()
+
+    for key in _ADDITIONAL_ATTRIBUTES:
+        val = getattr(method, key, None)
+        if hasattr(val, 'to_gpu'):
+            setattr(out, key, val.to_gpu())
+    if hasattr(out, 'reset'):
+        try:
+            out.reset()
+        except NotImplementedError:
+            pass
     return out

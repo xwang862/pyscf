@@ -12,8 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-cmake_minimum_required (VERSION 3.5)
+cmake_minimum_required (VERSION 3.22)
 project (pyscf)
+
+include(CheckSymbolExists)
 
 if (NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE RELWITHDEBINFO)
@@ -69,8 +71,9 @@ endif()
 if (NOT BLAS_LIBRARIES)
 #enable_language(Fortran)
 find_package(BLAS)
-check_function_exists(ffsll HAVE_FFS)
 endif()
+check_symbol_exists(ffsll "strings.h" HAVE_FFS)
+#check_function_exists(ffsll HAVE_FFS)
 
 if (NOT BLAS_LIBRARIES)
   message(FATAL_ERROR "A required library with BLAS API not found.")
@@ -125,7 +128,9 @@ include_directories("${PROJECT_BINARY_DIR}")
 
 # See also https://gitlab.kitware.com/cmake/community/wikis/doc/cmake/RPATH-handling
 if (WIN32)
-  #?
+  set(CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS ON)
+  set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,--disable-runtime-pseudo-reloc")
+  set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}")
 elseif (APPLE)
   set(CMAKE_BUILD_WITH_INSTALL_RPATH TRUE)
   set(CMAKE_INSTALL_RPATH "@loader_path;@loader_path/deps/lib;@loader_path/deps/lib64")
@@ -145,6 +150,8 @@ add_subdirectory(vhf)
 add_subdirectory(ao2mo)
 add_subdirectory(mcscf)
 add_subdirectory(cc)
+add_subdirectory(ccsdt)
+add_subdirectory(mp)
 add_subdirectory(ri)
 #add_subdirectory(localizer)
 add_subdirectory(pbc)
@@ -168,10 +175,10 @@ option(USE_QCINT "Using the qcint library (optimized for x86-64) for gaussian in
 
 if(BUILD_LIBCINT)
   set(LIBCINT_GIT https://github.com/sunqm/libcint.git) # libcint is a portable, cross-platform implementation
-  set(LIBCINT_VERSION v6.1.1)
+  set(LIBCINT_VERSION v6.2.0)
   if (USE_QCINT)
     set(LIBCINT_GIT https://github.com/sunqm/qcint.git) # qcint is an optimized implementation for x86-64 architecture
-    set(LIBCINT_VERSION v6.1.2)
+    set(LIBCINT_VERSION v6.2.0)
     if(NOT BUILD_MARCH_NATIVE)
       message(WARNING "The BUILD_MARCH_NATIVE option is not specified! qcint may not compile unless you explicitly pass compiler flags that turn on vectorization!")
     endif()
@@ -188,12 +195,12 @@ if(BUILD_LIBCINT)
         -DWITH_RANGE_COULOMB:STRING=1
         -DWITH_FORTRAN:STRING=0
         -DWITH_CINT2_INTERFACE:STRING=0
+        -DWITH_4C1E:STRING=1
         -DMIN_EXPCUTOFF:STRING=20
         -DKEEP_GOING:STRING=1
         -DCMAKE_INSTALL_PREFIX:PATH=<INSTALL_DIR>
         -DCMAKE_INSTALL_LIBDIR:PATH=lib
         -DCMAKE_C_COMPILER:STRING=${CMAKE_C_COMPILER}
-        -DBLAS_LIBRARIES:STRING=${BLAS_LIBRARIES}
         -DCMAKE_C_CREATE_SHARED_LIBRARY:STRING=${C_LINK_TEMPLATE}
         -DBUILD_MARCH_NATIVE:STRING=${BUILD_MARCH_NATIVE}
   )
@@ -215,36 +222,50 @@ endif()
 if(NOT DISABLE_DFT)
 add_subdirectory(dft)
 
+if(ENABLE_LIBXC)
+  add_subdirectory(pdft)
+endif() # ENABLE_LIBXC
+
 if(ENABLE_LIBXC AND BUILD_LIBXC)
   ExternalProject_Add(libxc
     #GIT_REPOSITORY https://gitlab.com/libxc/libxc.git
     #GIT_TAG master
-    URL https://gitlab.com/libxc/libxc/-/archive/6.1.0/libxc-6.1.0.tar.gz
+    URL https://gitlab.com/libxc/libxc/-/archive/7.1.2/libxc-7.1.2.tar.gz
     PREFIX ${PROJECT_BINARY_DIR}/deps
     INSTALL_DIR ${PROJECT_SOURCE_DIR}/deps
-    CMAKE_ARGS -DCMAKE_BUILD_TYPE=RELEASE -DBUILD_SHARED_LIBS=1
+    # The wheel needs libxc itself, not its upstream test targets/dependencies.
+    CMAKE_ARGS -DCMAKE_BUILD_TYPE=RELEASE -DBUILD_SHARED_LIBS=1 -DBUILD_TESTING=OFF
             -DCMAKE_INSTALL_PREFIX:PATH=<INSTALL_DIR>
             -DCMAKE_INSTALL_LIBDIR:PATH=lib
-            -DENABLE_FORTRAN=0 -DDISABLE_KXC=0 -DDISABLE_LXC=1
+            -DENABLE_FORTRAN=0 -DMAXORDER=3
+            -DBUILD_TESTING=OFF
             -DCMAKE_C_CREATE_SHARED_LIBRARY=${C_LINK_TEMPLATE}
             -DENABLE_XHOST:STRING=${BUILD_MARCH_NATIVE}
             -DCMAKE_C_COMPILER:STRING=${CMAKE_C_COMPILER}
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 # remove when libxc update version min in next release
   )
   add_dependencies(xc_itrf libxc)
   add_dependencies(dft libxc)
+  add_dependencies(pdft libxc)
 endif() # ENABLE_LIBXC
 
 if(ENABLE_XCFUN AND BUILD_XCFUN)
   ExternalProject_Add(libxcfun
     GIT_REPOSITORY https://github.com/dftlibs/xcfun.git
     GIT_TAG a89b783
-    # This patch adds the xcfun derivative order up to 5
-    PATCH_COMMAND git apply --reject ${PROJECT_SOURCE_DIR}/libxcfun.patch || true
+    # CI builds the wheel twice from one tree. Preserve the external-project
+    # stamps so the final packaging pass does not fetch and patch XCFun again.
+    UPDATE_DISCONNECTED TRUE
+    # This patch adds derivatives up to order 5; a rejection must not produce
+    # a silently incomplete wheel.
+    PATCH_COMMAND git apply --reject ${PROJECT_SOURCE_DIR}/libxcfun.patch
     PREFIX ${PROJECT_BINARY_DIR}/deps
     INSTALL_DIR ${PROJECT_SOURCE_DIR}/deps
     CMAKE_ARGS -DCMAKE_BUILD_TYPE=RELEASE -DBUILD_SHARED_LIBS=1
             -DXCFUN_MAX_ORDER=${XCFUN_MAX_ORDER} -DENABLE_TESTALL=0
             -DCMAKE_INSTALL_PREFIX:PATH=<INSTALL_DIR>
+            # xcfun uses M_PI before another bundled header defines it.
+            -DCMAKE_CXX_FLAGS=-DM_PI=3.14159265358979323846
             -DCMAKE_CXX_CREATE_SHARED_LIBRARY=${CXX_LINK_TEMPLATE}
             -DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}
   )

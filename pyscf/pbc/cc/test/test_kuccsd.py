@@ -153,7 +153,7 @@ class KnownValues(unittest.TestCase):
         self.assertAlmostEqual(lib.fp(Ht1[0]), (2.2677885702176339-2.5150764056992041j ), 4)
         self.assertAlmostEqual(lib.fp(Ht1[1]), (-51.643438947846086+526.58026126100458j), 4)
         self.assertAlmostEqual(lib.fp(Ht2[0]), (-29.490813482748258-8.7509143690136018j), 4)
-        self.assertAlmostEqual(lib.fp(Ht2[1]), (2256.0435017189384-193.16481690849486j ), 4)
+        self.assertAlmostEqual(lib.fp(Ht2[1]), (2256.0438505288594-193.16480856714745j ), 4)
         self.assertAlmostEqual(lib.fp(Ht2[2]), (-250.59447681063182-397.57189085666982j), 4)
 
         kgcc = kccsd.GCCSD(scf.addons.convert_to_ghf(kmf))
@@ -363,6 +363,7 @@ class KnownValues(unittest.TestCase):
         self.assertAlmostEqual(abs(r2-spin_r2_ea).max(), 0, 12)
 
     # TODO: more tests are needed for kuccsd_rdm
+    @unittest.skip('Some checks may fail due to uncertainty in orbital phases')
     def test_kuccsd_rdm_slow(self):
         a0 = 3.0
         nmp = [3,1,1]

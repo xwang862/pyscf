@@ -46,7 +46,8 @@ from pyscf.df.grad.casdm2_util import (solve_df_rdm2, grad_elec_dferi,
                                        grad_elec_auxresponse_dferi)
 from pyscf.mcscf.addons import StateAverageMCSCFSolver
 
-def grad_elec(mc_grad, mo_coeff=None, ci=None, atmlst=None, verbose=None):
+def grad_elec(mc_grad, mo_coeff=None, ci=None, atmlst=None, verbose=None,
+              eris=None):
     mc = mc_grad.base
     with_df = mc.with_df
     if mo_coeff is None: mo_coeff = mc.mo_coeff
@@ -81,8 +82,12 @@ def grad_elec(mc_grad, mo_coeff=None, ci=None, atmlst=None, verbose=None):
     # MRH flag: this is one of my kludges
     # It would be better to just pass the ERIS object used in orbital optimization
     # But I am too lazy at the moment
-    aapa = with_df.ao2mo ((mo_cas, mo_cas, mo_occ, mo_cas), compact=False)
-    aapa = aapa.reshape(ncas,ncas,nocc,ncas)
+    if eris is None:
+        aapa = with_df.ao2mo((mo_cas, mo_cas, mo_occ, mo_cas),
+                             compact=False)
+        aapa = aapa.reshape(ncas,ncas,nocc,ncas)
+    else:
+        aapa = numpy.asarray(eris.papa[ncore:ncore+ncas,:,:nocc])
     vj, vk = mc._scf.get_jk(mol, (dm_core, dm_cas))
     h1 = mc.get_hcore()
     vhf_c = vj[0] - vk[0] * .5
@@ -196,7 +201,8 @@ class Gradients(casci_grad.Gradients):
         logger.timer(self, 'vj and vk', *cpu0)
         return vj, vk
 
-    def kernel (self, mo_coeff=None, ci=None, atmlst=None, verbose=None):
+    def kernel (self, mo_coeff=None, ci=None, atmlst=None, verbose=None,
+                eris=None):
         log = logger.new_logger(self, verbose)
         if atmlst is None:
             atmlst = self.atmlst
@@ -208,7 +214,7 @@ class Gradients(casci_grad.Gradients):
         if self.verbose >= logger.INFO:
             self.dump_flags()
 
-        de = self.grad_elec(mo_coeff, ci, atmlst, log)
+        de = self.grad_elec(mo_coeff, ci, atmlst, log, eris=eris)
         self.de = de = de + self.grad_nuc(atmlst=atmlst)
         if self.mol.symmetry:
             self.de = self.symmetrize(self.de, atmlst)
@@ -227,44 +233,3 @@ class Gradients(casci_grad.Gradients):
     to_gpu = lib.to_gpu
 
 Grad = Gradients
-
-#from pyscf import mcscf
-#mcscf.mc1step.CASSCF.Gradients = lib.class_as_method(Gradients)
-
-
-if __name__ == '__main__':
-    from pyscf import scf
-    from pyscf import mcscf
-    from pyscf import df
-    #from pyscf.grad import numeric
-
-    mol = gto.Mole()
-    mol.atom = 'N 0 0 0; N 0 0 1.2; H 1 1 0; H 1 1 1.2'
-    mol.basis = '631g'
-    mol.build()
-    aux = df.aug_etb (mol)
-    mf = scf.RHF(mol).density_fit (auxbasis=aux).run()
-    mc = mcscf.CASSCF(mf, 4, 4).run()
-    mc.conv_tol = 1e-10
-    de = Gradients (mc).kernel()
-    #de_num = numeric.Gradients (mc).kernel ()
-    #print(lib.finger(de) - 0.019602220578635747)
-    #print(lib.finger(de) - lib.finger (de_num))
-
-    mol = gto.Mole()
-    mol.verbose = 0
-    mol.atom = 'N 0 0 0; N 0 0 1.2'
-    mol.basis = 'sto3g'
-    mol.build()
-    mf = scf.RHF(mol).density_fit (auxbasis=aux).run()
-    mc = mcscf.CASSCF(mf, 4, 4)
-    mc.conv_tol = 1e-10
-    mc.kernel ()
-    de = Gradients (mc).kernel()
-
-    mcs = mc.as_scanner()
-    mol.set_geom_('N 0 0 0; N 0 0 1.201')
-    e1 = mcs(mol)
-    mol.set_geom_('N 0 0 0; N 0 0 1.199')
-    e2 = mcs(mol)
-    print(de[1,2], (e1-e2)/0.002*lib.param.BOHR)

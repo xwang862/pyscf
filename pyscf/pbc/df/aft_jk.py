@@ -34,13 +34,35 @@ from pyscf.pbc.df import ft_ao
 from pyscf.pbc.df.df_jk import (_format_dms, _format_kpts_band, _format_jks,
                                 _ewald_exxdiv_for_G0)
 from pyscf.pbc.lib.kpts_helper import (is_zero, group_by_conj_pairs,
-                                       kk_adapted_iter)
+                                       kk_adapted_iter, KPT_DIFF_TOL)
 from pyscf.pbc.tools import k2gamma
 from pyscf.pbc.df.incore import libpbc
 
+def _sub_kpts_idx(kpts, kpts_band):
+    '''Indices of kpts_band within kpts, if every band k-point is also a member
+    of kpts. Returns None otherwise.
+
+    The k-point symmetry adapted SCF drivers call get_jk with kpts_band set to
+    the IBZ k-points, which are a subset of the full BZ mesh. Detecting this
+    lets the optimized *_kpts algorithms be used instead of the generic (and
+    much slower) band code.
+    '''
+    if kpts_band is None:
+        return None
+    kpts = numpy.reshape(kpts, (-1,3))
+    band = numpy.reshape(kpts_band, (-1,3))
+    dk = abs(band[:,None,:] - kpts).max(axis=2)
+    idx = dk.argmin(axis=1)
+    if dk[numpy.arange(len(band)),idx].max() > KPT_DIFF_TOL:
+        return None
+    return idx
+
 def get_j_kpts(mydf, dm_kpts, hermi=1, kpts=numpy.zeros((1,3)), kpts_band=None):
+    band_idx = None
     if kpts_band is not None:
-        return get_j_for_bands(mydf, dm_kpts, hermi, kpts, kpts_band)
+        band_idx = _sub_kpts_idx(kpts, kpts_band)
+        if band_idx is None:
+            return get_j_for_bands(mydf, dm_kpts, hermi, kpts, kpts_band)
 
     dm_kpts = lib.asarray(dm_kpts, order='C')
     dms = _format_dms(dm_kpts, kpts)
@@ -58,6 +80,8 @@ def get_j_kpts(mydf, dm_kpts, hermi=1, kpts=numpy.zeros((1,3)), kpts_band=None):
 
     if is_zero(kpts):
         vj_kpts = vj_kpts.real.copy()
+    if band_idx is not None:
+        vj_kpts = vj_kpts[:,band_idx]
     return _format_jks(vj_kpts, dm_kpts, kpts_band, kpts)
 
 def _update_vj_(vj_kpts, Gpq, dms, coulG, weight=None):
@@ -134,8 +158,11 @@ def get_j_for_bands(mydf, dm_kpts, hermi=1, kpts=numpy.zeros((1,3)), kpts_band=N
 
 def get_k_kpts(mydf, dm_kpts, hermi=1, kpts=numpy.zeros((1,3)), kpts_band=None,
                exxdiv=None):
+    band_idx = None
     if kpts_band is not None:
-        return get_k_for_bands(mydf, dm_kpts, hermi, kpts, kpts_band, exxdiv)
+        band_idx = _sub_kpts_idx(kpts, kpts_band)
+        if band_idx is None:
+            return get_k_for_bands(mydf, dm_kpts, hermi, kpts, kpts_band, exxdiv)
 
     cpu0 = cpu1 = logger.process_clock(), logger.perf_counter()
     log = logger.new_logger(mydf)
@@ -154,9 +181,9 @@ def get_k_kpts(mydf, dm_kpts, hermi=1, kpts=numpy.zeros((1,3)), kpts_band=None,
     weight = 1. / nkpts
 
     aosym = 's1'
-    bvk_kmesh = k2gamma.kpts_to_kmesh(cell, kpts)
+    kmesh = k2gamma.kpts_to_kmesh(cell, kpts)
     rcut = ft_ao.estimate_rcut(cell)
-    supmol = ft_ao.ExtendedMole.from_cell(cell, bvk_kmesh, rcut.max())
+    supmol = ft_ao.ExtendedMole.from_cell(cell, kmesh, rcut.max())
     supmol = supmol.strip_basis(rcut)
 
     t_rev_pairs = group_by_conj_pairs(cell, kpts, return_kpts_pairs=False)
@@ -282,9 +309,7 @@ def get_k_kpts(mydf, dm_kpts, hermi=1, kpts=numpy.zeros((1,3)), kpts_band=None,
 
     # Add ewald_exxdiv contribution because G=0 was not included in the
     # non-uniform grids
-    if (exxdiv == 'ewald' and
-        (cell.dimension < 2 or  # 0D and 1D are computed with inf_vacuum
-         (cell.dimension == 2 and cell.low_dim_ft_type == 'inf_vacuum'))):
+    if exxdiv == 'ewald' and cell.low_dim_ft_type == 'inf_vacuum':
         _ewald_exxdiv_for_G0(cell, kpts, dms, vk_kpts, kpts)
 
     if time_reversal_symmetry:
@@ -292,6 +317,8 @@ def get_k_kpts(mydf, dm_kpts, hermi=1, kpts=numpy.zeros((1,3)), kpts_band=None,
             if k != k_conj:
                 vk_kpts[:,k_conj] = vk_kpts[:,k].conj()
     log.timer_debug1('get_k_kpts', *cpu0)
+    if band_idx is not None:
+        return _format_jks(vk_kpts[:,band_idx], dm_kpts, kpts_band, kpts)
     return vk_kpts.reshape(dm_kpts.shape)
 
 def get_k_for_bands(mydf, dm_kpts, hermi=1, kpts=numpy.zeros((1,3)), kpts_band=None,
@@ -360,9 +387,7 @@ def get_k_for_bands(mydf, dm_kpts, hermi=1, kpts=numpy.zeros((1,3)), kpts_band=N
 
     # Add ewald_exxdiv contribution because G=0 was not included in the
     # non-uniform grids
-    if (exxdiv == 'ewald' and
-        (cell.dimension < 2 or  # 0D and 1D are computed with inf_vacuum
-         (cell.dimension == 2 and cell.low_dim_ft_type == 'inf_vacuum'))):
+    if exxdiv == 'ewald' and cell.low_dim_ft_type == 'inf_vacuum':
         _ewald_exxdiv_for_G0(cell, kpts, dms, vk_kpts, kpts_band)
 
     return _format_jks(vk_kpts, dm_kpts, input_band, kpts)
@@ -380,10 +405,10 @@ def _update_vk_(vk, Gpq, dms, wcoulG, kpti_idx, kptj_idx, swap_2e,
     dmsR, dmsI = dms
     nG = len(wcoulG)
     n_dm, nkpts, nao = vkR.shape[:3]
-    bufR = np.empty((nG*nao**2))
-    bufI = np.empty((nG*nao**2))
-    buf1R = np.empty((nG*nao**2))
-    buf1I = np.empty((nG*nao**2))
+    bufR = np.empty(nG*nao**2)
+    bufI = np.empty(nG*nao**2)
+    buf1R = np.empty(nG*nao**2)
+    buf1I = np.empty(nG*nao**2)
     iLkR = np.ndarray((nao,nG,nao), buffer=buf1R)
     iLkI = np.ndarray((nao,nG,nao), buffer=buf1I)
 
@@ -471,10 +496,10 @@ def _update_vk_dmf(vk, Gpq, dmf, wcoulG, kpti_idx, kptj_idx, swap_2e,
     dmfR, dmfI = dmf
     nG = len(wcoulG)
     n_dm, nkpts, nao, nocc = dmfR.shape
-    bufR = np.empty((nG*nao**2))
-    bufI = np.empty((nG*nao**2))
-    bufR1 = np.empty((nG*nao*nocc))
-    bufI1 = np.empty((nG*nao*nocc))
+    bufR = np.empty(nG*nao**2)
+    bufI = np.empty(nG*nao**2)
+    bufR1 = np.empty(nG*nao*nocc)
+    bufI1 = np.empty(nG*nao*nocc)
 
     for k, (ki, kj) in enumerate(zip(kpti_idx, kptj_idx)):
         # case 1: k_pq = (pi|iq)
@@ -659,7 +684,7 @@ def get_jk(mydf, dm, hermi=1, kpt=numpy.zeros(3),
     t1 = (logger.process_clock(), logger.perf_counter())
 
     dm = numpy.asarray(dm, order='C')
-    dms = _format_dms(dm, [kpt])
+    dms = _format_dms(dm, kpt.reshape(1, 3))
     nset, _, nao = dms.shape[:3]
     dms = dms.reshape(nset,nao,nao)
     j_real = is_zero(kpt)
@@ -751,9 +776,7 @@ def get_jk(mydf, dm, hermi=1, kpt=numpy.zeros(3),
             vk = vkR + vkI * 1j
         # Add ewald_exxdiv contribution because G=0 was not included in the
         # non-uniform grids
-        if (exxdiv == 'ewald' and
-            (cell.dimension < 2 or  # 0D and 1D are computed with inf_vacuum
-             (cell.dimension == 2 and cell.low_dim_ft_type == 'inf_vacuum'))):
+        if exxdiv == 'ewald' and cell.low_dim_ft_type == 'inf_vacuum':
             _ewald_exxdiv_for_G0(cell, kpt, dms, vk)
         vk = vk.reshape(dm.shape)
     return vj, vk

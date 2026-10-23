@@ -37,7 +37,7 @@ from pyscf.hessian import rhf as rhf_hess
 from pyscf.hessian import uhf as uhf_hess
 from pyscf.df.hessian.rhf import _load_dim0, _pinv
 from pyscf.df.grad.rhf import (_int3c_wrapper, _gen_metric_solver,
-                               LINEAR_DEP_THRESHOLD)
+                               _make_auxmol, LINEAR_DEP_THRESHOLD)
 
 
 def partial_hess_elec(hessobj, mo_energy=None, mo_coeff=None, mo_occ=None,
@@ -72,7 +72,8 @@ def _partial_hess_ejk(hessobj, mo_energy=None, mo_coeff=None, mo_occ=None,
     dme0 = numpy.einsum('pi,qi,i->pq', mocca, mocca, mo_ea)
     dme0+= numpy.einsum('pi,qi,i->pq', moccb, moccb, mo_eb)
 
-    auxmol = hessobj.base.with_df.auxmol
+    with_df = hessobj.base.with_df
+    auxmol = _make_auxmol(with_df, mol)
     naux = auxmol.nao
     nbas = mol.nbas
     auxslices = auxmol.aoslice_by_atom()
@@ -193,14 +194,15 @@ def _partial_hess_ejk(hessobj, mo_energy=None, mo_coeff=None, mo_occ=None,
 
     if hessobj.auxbasis_response > 1:
         get_int3c_ipip2 = _int3c_wrapper(mol, auxmol, 'int3c2e_ipip2', 's1')
-        rhok0a_P__ = lib.einsum('plj,li->pij', rhok0a_Pl_, mocca)
-        rhok0b_P__ = lib.einsum('plj,li->pij', rhok0b_Pl_, moccb)
-        rho2c_0  = lib.einsum('pij,qij->pq', rhok0a_P__, rhok0a_P__)
-        rho2c_0 += lib.einsum('pij,qij->pq', rhok0b_P__, rhok0b_P__)
         int2c_inv = _pinv(int2c, lindep=LINEAR_DEP_THRESHOLD)
         int2c_ipip1 = auxmol.intor('int2c2e_ipip1', aosym='s1')
         int2c_ip_ip  = lib.einsum('xpq,qr,ysr->xyps', int2c_ip1, int2c_inv, int2c_ip1)
         int2c_ip_ip -= auxmol.intor('int2c2e_ip1ip2', aosym='s1').reshape(3,3,naux,naux)
+        if with_k:
+            rhok0a_P__ = lib.einsum('plj,li->pij', rhok0a_Pl_, mocca)
+            rhok0b_P__ = lib.einsum('plj,li->pij', rhok0b_Pl_, moccb)
+            rho2c_0  = lib.einsum('pij,qij->pq', rhok0a_P__, rhok0a_P__)
+            rho2c_0 += lib.einsum('pij,qij->pq', rhok0b_P__, rhok0b_P__)
     int2c = solve_j2c = None
 
     get_int3c_ipvip1 = _int3c_wrapper(mol, auxmol, 'int3c2e_ipvip1', 's1')
@@ -319,16 +321,16 @@ def _partial_hess_ejk(hessobj, mo_energy=None, mo_coeff=None, mo_occ=None,
                 ek[i0,i0] += np.einsum('xijp,pij->x', int3c_ipip2, rhok0_PJI).reshape(3,3)
                 ek[i0,i0] -= np.einsum('pq,xpq->x', rho2c_0[p0:p1], int2c_ipip1[:,p0:p1]).reshape(3,3)
                 rhok0_PJI = None
-                # (00|0)(1|1)(0|00)
-                # (00|1)(1|0)(0|00)
-                # (00|1)(0|1)(0|00)
-                # (00|1)(1|00)
-                rhoj1 = lib.einsum('px,pq->xq', wj_ip2[p0:p1], int2c_inv[p0:p1])
-                # (00|0)(0|1)(1|0)(0|00)
-                rhoj0_01 = lib.einsum('xp,pq->xq', wj0_01[:,p0:p1], int2c_inv[p0:p1])
-                # (00|0)(1|0)(1|0)(0|00)
-                ip1_2c_2c = lib.einsum('xpq,qr->xpr', int2c_ip1[:,p0:p1], int2c_inv)
-                rhoj0_10 = lib.einsum('p,xpq->xq', rhoj0_P[p0:p1], ip1_2c_2c)
+            # (00|0)(1|1)(0|00)
+            # (00|1)(1|0)(0|00)
+            # (00|1)(0|1)(0|00)
+            # (00|1)(1|00)
+            rhoj1 = lib.einsum('px,pq->xq', wj_ip2[p0:p1], int2c_inv[p0:p1])
+            # (00|0)(0|1)(1|0)(0|00)
+            rhoj0_01 = lib.einsum('xp,pq->xq', wj0_01[:,p0:p1], int2c_inv[p0:p1])
+            # (00|0)(1|0)(1|0)(0|00)
+            ip1_2c_2c = lib.einsum('xpq,qr->xpr', int2c_ip1[:,p0:p1], int2c_inv)
+            rhoj0_10 = lib.einsum('p,xpq->xq', rhoj0_P[p0:p1], ip1_2c_2c)
             if with_k:
                 # (00|0)(0|1)(1|0)(0|00)
                 ip1_rho2c = .5 * lib.einsum('xpq,qr->xpr', int2c_ip1[:,p0:p1], rho2c_0)
@@ -408,7 +410,8 @@ def _gen_jk(hessobj, mo_coeff, mo_occ, chkfile=None, atmlst=None,
     if atmlst is None:
         atmlst = range(mol.natm)
 
-    auxmol = hessobj.base.with_df.auxmol
+    with_df = hessobj.base.with_df
+    auxmol = _make_auxmol(with_df, mol)
     nbas = mol.nbas
     auxslices = auxmol.aoslice_by_atom()
     aux_loc = auxmol.ao_loc
@@ -465,9 +468,9 @@ def _gen_jk(hessobj, mo_coeff, mo_occ, chkfile=None, atmlst=None,
             vj1_buf[i] += np.einsum('xp,pij->xij', wj1, coef3c)
         if with_k:
             rhok0_PlJ = lib.einsum('plj,Jj->plJ', rhok0a_Pl_[p0:p1], mocca)
-            vk1a_buf += lib.einsum('xijp,plj->xil', int3c_ip1, rhok0_PlJ[p0:p1])
+            vk1a_buf += lib.einsum('xijp,plj->xil', int3c_ip1, rhok0_PlJ)
             rhok0_PlJ = lib.einsum('plj,Jj->plJ', rhok0b_Pl_[p0:p1], moccb)
-            vk1b_buf += lib.einsum('xijp,plj->xil', int3c_ip1, rhok0_PlJ[p0:p1])
+            vk1b_buf += lib.einsum('xijp,plj->xil', int3c_ip1, rhok0_PlJ)
         int3c_ip1 = None
     vj1_buf = ftmp['vj1_buf'] = vj1_buf
 
@@ -515,10 +518,13 @@ def _gen_jk(hessobj, mo_coeff, mo_occ, chkfile=None, atmlst=None,
 
 class Hessian(uhf_hess.Hessian):
     '''Non-relativistic UHF hessian'''
+
+    _keys = {'auxbasis_response',}
+
     def __init__(self, mf):
         uhf_hess.Hessian.__init__(self, mf)
 
-    auxbasis_response = 1
+    auxbasis_response = 2
     partial_hess_elec = partial_hess_elec
     make_h1 = make_h1
 

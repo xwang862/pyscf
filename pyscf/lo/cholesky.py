@@ -46,14 +46,14 @@ def cholesky_mos(mo_coeff):
     nao, nmo = mo_coeff.shape
 
     # Factorization of a density matrix-like quantity.
-    D = np.dot(mo_coeff, mo_coeff.T)
+    D = np.dot(mo_coeff, mo_coeff.T.conj())
     L, piv, rank = pivoted_cholesky(D, lower=True)
     if rank < nmo:
         raise RuntimeError('rank of matrix lower than the number of orbitals')
 
     # Permute L back to the original order of the AOs.
     # Superfluous columns are cropped out.
-    P = np.zeros((nao, nao))
+    P = np.zeros((nao, nao), dtype=D.dtype)
     P[piv, np.arange(nao)] = 1
     mo_loc = np.dot(P, L[:, :nmo])
 
@@ -94,4 +94,4 @@ if __name__ == "__main__":
     numpy.set_printoptions(precision=3, suppress=True, sign=' ')
     for i in range(nocc):
         li = numpy.argsort(abs(mo_loc[:, i]))
-        print('{0:3d}    {1}'. format(i, mo_loc[li[:-6:-1], i]))
+        print(f'{i:3d}    {mo_loc[li[:-6:-1], i]}')

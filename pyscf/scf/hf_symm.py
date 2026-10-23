@@ -32,6 +32,7 @@ import scipy.linalg
 from pyscf import lib
 from pyscf import symm
 from pyscf.lib import logger
+from pyscf.data import nist
 from pyscf.scf import hf
 from pyscf.scf import uhf
 from pyscf.scf import rohf
@@ -171,7 +172,7 @@ def canonicalize(mf, mo_coeff, mo_occ, fock=None):
                     orb = mo_coeff[:,idx]
                     f1 = reduce(numpy.dot, (orb.conj().T, fock, orb))
                     e, c = scipy.linalg.eigh(f1)
-                    mo[:,idx] = numpy.dot(mo_coeff[:,idx], c)
+                    mo[:,idx] = orb.dot(c)
                     mo_e[idx] = e
     else:
         s = mf.get_ovlp()
@@ -185,7 +186,7 @@ def canonicalize(mf, mo_coeff, mo_occ, fock=None):
                 mo_e[idx] = e
         orbsym = mf.get_orbsym(mo, s)
 
-    mo = lib.tag_array(mo, orbsym=orbsym)
+    mo = lib.tag_array(hf._adjust_phase_(mo), orbsym=orbsym)
     return mo_e, mo
 
 def _symmetrize_canonicalization_(mf, mo_energy, mo_coeff, s):
@@ -293,7 +294,7 @@ def check_irrep_nelec(mol, irrep_nelec, nelec):
 
 #TODO: force Dooh, Doov orbitals E1gx/E1gy ... using the same coefficients
 #TODO: force SO3 orbitals p+0,p-1,p+1, ... using the same coefficients
-def eig(mf, h, s, symm_orb=None, irrep_id=None):
+def eig(mf, h, s, overwrite=False, x=None, symm_orb=None, irrep_id=None):
     '''Solve generalized eigenvalue problem, for each irrep.  The
     eigenvalues and eigenvectors are not sorted to ascending order.
     Instead, they are grouped based on irreps.
@@ -304,19 +305,44 @@ def eig(mf, h, s, symm_orb=None, irrep_id=None):
             raise RuntimeError('mol.symmetry not enabled')
         symm_orb = mol.symm_orb
         irrep_id = mol.irrep_id
+    nirrep = len(symm_orb)
+    group_name = getattr(mol, 'groupname', None)
 
-    nirrep = symm_orb.__len__()
+    if x is not None and group_name not in ('Dooh', 'Coov'):
+        orbsym = x.orbsym
+        res = [mf._eigh(h, s, x=x[:,orbsym==irrep_id[ir]])
+               for ir in range(nirrep)]
+        e = numpy.hstack([e for e, c in res])
+        c = numpy.hstack([c for e, c in res])
+        c = lib.tag_array(c, orbsym=numpy.hstack(orbsym))
+        return e, c
+
     h = symm.symmetrize_matrix(h, symm_orb)
     s = symm.symmetrize_matrix(s, symm_orb)
     cs = []
     es = []
     orbsym = []
-    if getattr(mol, 'groupname', None) in ('Dooh', 'Coov'):
+    if group_name in ('Dooh', 'Coov'):
         for ir in range(nirrep):
             irrep_1d = irrep_id[ir] in (0, 1, 4, 5)
             irrep_2dx = irrep_id[ir] % 2 == 0
             if irrep_1d or irrep_2dx:
-                e, c = mf._eigh(h[ir], s[ir])
+                if x is not None:
+                    # For cylindrical symmetry, we want to ensure the strict
+                    # degeneracy between two branches in 2D irreps.
+                    # However, diagonalization in the canonical X bases may
+                    # introduce two eigh calls for the two branches and break
+                    # the degeneracy. Here, we skip the use of X bases, just
+                    # truncate the subspace of each irrep according to the
+                    # dimension of X bases.
+                    nmo = numpy.count_nonzero(x.orbsym == irrep_id[ir])
+                    e, v = scipy.linalg.eigh(s[ir])
+                    x_ir = (v / numpy.sqrt(e))[:,-nmo:]
+                    h_ir = x_ir.conj().T.dot(h[ir]).dot(x_ir)
+                    e, c = scipy.linalg.eigh(h_ir)
+                    c = x_ir.dot(c)
+                else:
+                    e, c = mf._eigh(h[ir], s[ir])
                 cs.append(c)
                 es.append(e)
                 orbsym.append([irrep_id[ir]] * e.size)
@@ -335,7 +361,7 @@ def eig(mf, h, s, symm_orb=None, irrep_id=None):
             es.append(e)
             orbsym.append([irrep_id[ir]] * e.size)
     e = numpy.hstack(es)
-    c = so2ao_mo_coeff(symm_orb, cs)
+    c = hf._adjust_phase_(so2ao_mo_coeff(symm_orb, cs))
     c = lib.tag_array(c, orbsym=numpy.hstack(orbsym))
     return e, c
 
@@ -449,6 +475,59 @@ class SymAdaptedRHF(hf.RHF):
         check_irrep_nelec(mol, self.irrep_nelec, self.mol.nelectron)
         return hf.RHF.build(self, mol)
 
+    def check_linear_dependency(self, s, verbose=None):
+        log = logger.new_logger(self, verbose)
+        mol = self.mol
+        symm_orb = mol.symm_orb
+        irrep_id = mol.irrep_id
+        nirrep = len(symm_orb)
+        group_name = getattr(mol, 'groupname', None)
+        s = symm.symmetrize_matrix(s, symm_orb)
+        xs = []
+        orbsym = []
+        cond = []
+        for ir in range(nirrep):
+            e, v = scipy.linalg.eigh(s[ir])
+            abs_e = abs(e)
+            emax = abs_e.max()
+            emin = abs_e.min()
+            c = emax / emin
+            log.debug('irrep %d, cond(S) = %s', ir, c)
+            cond.append(c)
+            if hf.remove_overlap_zero_eigenvalue:
+                mask = e > hf.overlap_zero_eigenvalue_threshold
+                x = v[:,mask] / numpy.sqrt(e[mask])
+                nso, nmo = x.shape
+                if nmo < nso:
+                    log.info('irrep %d: %d small eigenvectors of overlap matrix removed',
+                             ir, nso-nmo)
+            else:
+                x = v / numpy.sqrt(e)
+
+            if group_name in ('Dooh', 'Coov'):
+                irrep_1d = irrep_id[ir] in (0, 1, 4, 5)
+                irrep_2dx = irrep_id[ir] % 2 == 0
+                if irrep_1d or irrep_2dx:
+                    xs.append(x)
+                    orbsym.append(numpy.repeat(irrep_id[ir], x.shape[1]))
+                if not irrep_1d and irrep_2dx:
+                    # force 2D irreps using the same coefficients
+                    irrep_conj = irrep_id[ir] ^ 1
+                    assert irrep_id[ir+1] == irrep_conj
+                    xs.append(x)
+                    orbsym.append(numpy.repeat(irrep_conj, x.shape[1]))
+            else:
+                xs.append(x)
+                orbsym.append(numpy.repeat(irrep_id[ir], x.shape[1]))
+
+        if any(c > 1e10 for c in cond):
+            log.warn('Singularity detected in the overlap matrix. '
+                     'SCF may be inaccurate and difficult to converge.')
+
+        x_orth = so2ao_mo_coeff(symm_orb, xs)
+        x_orth = lib.tag_array(x_orth, orbsym=numpy.hstack(orbsym))
+        return x_orth
+
     eig = eig
 
     def get_grad(self, mo_coeff, mo_occ, fock=None):
@@ -492,25 +571,28 @@ class SymAdaptedRHF(hf.RHF):
             mo_occ[occ_idx] = 2
 
         vir_idx = (mo_occ==0)
-        if self.verbose >= logger.INFO and numpy.count_nonzero(vir_idx) > 0:
+        if numpy.count_nonzero(vir_idx) > 0:
             ehomo = max(mo_energy[~vir_idx])
             elumo = min(mo_energy[ vir_idx])
-            noccs = []
-            for i, ir in enumerate(mol.irrep_id):
-                irname = mol.irrep_name[i]
-                ir_idx = (orbsym == ir)
+            gap = (elumo - ehomo) * nist.HARTREE2EV
+            self.scf_summary['gap'] = gap
+            if self.verbose >= logger.INFO:
+                noccs = []
+                for i, ir in enumerate(mol.irrep_id):
+                    irname = mol.irrep_name[i]
+                    ir_idx = (orbsym == ir)
 
-                noccs.append(int(mo_occ[ir_idx].sum()))
-                if ehomo in mo_energy[ir_idx]:
-                    irhomo = irname
-                if elumo in mo_energy[ir_idx]:
-                    irlumo = irname
-            logger.info(self, 'HOMO (%s) = %.15g  LUMO (%s) = %.15g',
-                        irhomo, ehomo, irlumo, elumo)
+                    noccs.append(int(mo_occ[ir_idx].sum()))
+                    if ehomo in mo_energy[ir_idx]:
+                        irhomo = irname
+                    if elumo in mo_energy[ir_idx]:
+                        irlumo = irname
+                logger.info(self, 'HOMO (%s) = %.15g  LUMO (%s) = %.15g  gap/eV = %.5f',
+                            irhomo, ehomo, irlumo, elumo, gap)
 
-            logger.debug(self, 'irrep_nelec = %s', noccs)
-            _dump_mo_energy(mol, mo_energy, mo_occ, ehomo, elumo, orbsym,
-                            verbose=self.verbose)
+                logger.debug(self, 'irrep_nelec = %s', noccs)
+                _dump_mo_energy(mol, mo_energy, mo_occ, ehomo, elumo, orbsym,
+                                verbose=self.verbose)
         return mo_occ
 
     def _finalize(self):
@@ -638,12 +720,13 @@ class SymAdaptedROHF(rohf.ROHF):
                              'support low-spin configuration.')
         return hf.RHF.build(self, mol)
 
-    @lib.with_doc(eig.__doc__)
-    def eig(self, fock, s):
-        e, c = eig(self, fock, s)
-        if getattr(fock, 'focka', None) is not None:
-            mo_ea = numpy.einsum('pi,pi->i', c, fock.focka.dot(c))
-            mo_eb = numpy.einsum('pi,pi->i', c, fock.fockb.dot(c))
+    check_linear_dependency = SymAdaptedRHF.check_linear_dependency
+
+    def eig(self, h, s, overwrite=False, x=None, symm_orb=None, irrep_id=None):
+        e, c = eig(self, h, s, overwrite, x, symm_orb, irrep_id)
+        if getattr(h, 'focka', None) is not None:
+            mo_ea = numpy.einsum('pi,pi->i', c, h.focka.dot(c))
+            mo_eb = numpy.einsum('pi,pi->i', c, h.fockb.dot(c))
             e = lib.tag_array(e, mo_ea=mo_ea, mo_eb=mo_eb)
         return e, c
 
@@ -838,12 +921,12 @@ class SymAdaptedROHF(rohf.ROHF):
                 ir_in_d2h = mol.irrep_id[k] % 10  # convert to D2h irreps
                 wfnsym ^= ir_in_d2h
 
-            if mol.groupname in ('SO3', 'Dooh', 'Coov'):
-                # TODO: check wave function symmetry
-                log.note('Wave-function symmetry = %s', mol.groupname)
-            else:
+            if mol.groupname in symm.param.POINTGROUP:
                 log.note('Wave-function symmetry = %s',
                          symm.irrep_id2name(mol.groupname, wfnsym))
+            else:
+                # TODO: check wave function symmetry for ('SO3', 'Dooh', 'Coov') etc
+                log.note('Wave-function symmetry = %s', mol.groupname)
             log.note('occupancy for each irrep:  ' + (' %4s'*nirrep),
                      *mol.irrep_name)
             log.note('double occ                 ' + (' %4d'*nirrep), *ndoccs)

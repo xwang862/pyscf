@@ -57,7 +57,7 @@ def parse(string, symb=None):
         for dat in raw_data[i:]:
             dat = dat.strip()
             if dat: # remove empty lines
-                if ((dat[0].isalpha() and dat.split(None, 1)[0].upper() != symb.upper())):
+                if (dat[0].isalpha() and dat.split(None, 1)[0].upper() != symb.upper()):
                     break
                 else:
                     seg.append(dat)
@@ -115,12 +115,11 @@ def _parse_ecp(raw_ecp):
     if nelec is None:
         return []
 
-    bsort = []
-    for l in range(-1, MAXL):
-        bsort.extend([b for b in ecp_add if b[0] == l])
-    if not bsort:
+    if not ecp_add:
         raise BasisNotFoundError(f'ECP data not found in "{raw_ecp}"')
-    return [nelec, bsort]
+
+    ecp_sorted = sorted(ecp_add, key=lambda shell: shell[0])
+    return [nelec, ecp_sorted]
 
 def load(basisfile, symb):
     '''Load ECP for atom of symb from file'''
@@ -142,7 +141,7 @@ def _search_ecp(basisfile, symb):
     for dat in fdata[i:]:
         dat = dat.strip()
         if dat:  # remove empty lines
-            if ((dat[0].isalpha() and dat.split(None, 1)[0].upper() != symb.upper())):
+            if (dat[0].isalpha() and dat.split(None, 1)[0].upper() != symb.upper()):
                 return seg
             else:
                 seg.append(dat)

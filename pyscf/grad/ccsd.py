@@ -33,7 +33,7 @@ from pyscf.cc import ccsd_rdm
 from pyscf.ao2mo import _ao2mo
 from pyscf.scf import cphf
 from pyscf.grad import rhf as rhf_grad
-from pyscf.grad.mp2 import _shell_prange, _index_frozen_active
+from pyscf.grad.mp2 import _shell_prange, _index_frozen_active, has_frozen_orbitals
 
 
 #
@@ -55,6 +55,13 @@ def grad_elec(cc_grad, t1=None, t2=None, l1=None, l2=None, eris=None, atmlst=Non
     log = logger.new_logger(mycc, verbose)
     time0 = logger.process_clock(), logger.perf_counter()
 
+    if getattr(mycc._scf, 'with_df', None) is not None:
+        log.warn('The reference of %s is density fitted, but this function '
+                 'contracts the 2-particle density matrix with the exact '
+                 'four-index ERI derivatives. The result is not a derivative '
+                 'of the density-fitted energy. Use '
+                 'pyscf.df.grad.ccsd.Gradients instead.', mycc)
+
     log.debug('Build ccsd rdm1 intermediates')
     if d1 is None:
         d1 = ccsd_rdm._gamma1_intermediates(mycc, t1, t2, l1, l2)
@@ -71,9 +78,7 @@ def grad_elec(cc_grad, t1=None, t2=None, l1=None, l2=None, eris=None, atmlst=Non
     mo_energy = mycc._scf.mo_energy
     nao, nmo = mo_coeff.shape
     nocc = numpy.count_nonzero(mycc.mo_occ > 0)
-    with_frozen = not ((mycc.frozen is None)
-                       or (isinstance(mycc.frozen, (int, numpy.integer)) and mycc.frozen == 0)
-                       or (len(mycc.frozen) == 0))
+    with_frozen = has_frozen_orbitals(mycc)
     OA, VA, OF, VF = _index_frozen_active(mycc.get_frozen_mask(), mycc.mo_occ)
 
     log.debug('symmetrized rdm2 and MO->AO transformation')
@@ -174,6 +179,10 @@ def grad_elec(cc_grad, t1=None, t2=None, l1=None, l2=None, eris=None, atmlst=Non
     # Hartree-Fock part contribution
     dm1p = hf_dm1 + dm1*2
     dm1 += hf_dm1
+    # The relaxed one-particle density (AO basis, SCF part included) that the
+    # Hellmann-Feynman term below contracts with h1: it is dE/dh, so one-electron
+    # properties such as the dipole moment follow from it without a second solve.
+    cc_grad.rdm1_relaxed = dm1
     zeta += rhf_grad.make_rdm1e(mo_energy, mo_coeff, mycc.mo_occ)
 
     for k, ia in enumerate(atmlst):
@@ -267,9 +276,7 @@ class CCSD_GradScanner(lib.GradScanner):
 def _response_dm1(mycc, Xvo, eris=None):
     nvir, nocc = Xvo.shape
     nmo = nocc + nvir
-    with_frozen = not ((mycc.frozen is None)
-                       or (isinstance(mycc.frozen, (int, numpy.integer)) and mycc.frozen == 0)
-                       or (len(mycc.frozen) == 0))
+    with_frozen = has_frozen_orbitals(mycc)
     if eris is None or with_frozen:
         mo_energy = mycc._scf.mo_energy
         mo_occ = mycc.mo_occ
@@ -354,8 +361,8 @@ def _rdm2_mo2ao(mycc, d2, mo_coeff, fsave=None):
     blksize = min(nao_pair, max(ccsd.BLKMIN, blksize))
     fswap.create_dataset('o', (nmo,nocc,nao_pair), 'f8', chunks=(nocc,nocc,blksize))
     buf1 = numpy.zeros((nocc,nocc,nmo,nmo))
-    buf1[:,:,:nocc,:nocc] = doooo
-    buf1[:,:,nocc:,nocc:] = _cp(doovv)
+    buf1[:,:,:nocc,:nocc] = numpy.asarray(doooo, order='C')
+    buf1[:,:,nocc:,nocc:] = numpy.asarray(doovv, order='C')
     buf1 = _trans(buf1.reshape(nocc**2,-1), (0,nmo,0,nmo))
     fswap['o'][:nocc] = buf1.reshape(nocc,nocc,nao_pair)
     dovoo = numpy.asarray(dooov).transpose(2,3,0,1)
@@ -419,6 +426,7 @@ def _cp(a):
     return numpy.asarray(a, order='C')
 
 class Gradients(rhf_grad.GradientsBase):
+    _keys = {'rdm1_relaxed'}
 
     grad_elec = grad_elec
 
@@ -426,7 +434,10 @@ class Gradients(rhf_grad.GradientsBase):
                atmlst=None, verbose=None):
         log = logger.new_logger(self, verbose)
         mycc = self.base
-        if t1 is None: t1 = mycc.t1
+        if t1 is None:
+            if mycc.t1 is None:
+                mycc.run()
+            t1 = mycc.t1
         if t2 is None: t2 = mycc.t2
         if l1 is None: l1 = mycc.l1
         if l2 is None: l2 = mycc.l2
@@ -453,6 +464,18 @@ class Gradients(rhf_grad.GradientsBase):
     def grad_nuc(self, mol=None, atmlst=None):
         mf_grad = self.base._scf.nuc_grad_method()
         return mf_grad.grad_nuc(mol, atmlst)
+
+    def dip_moment(self, mol=None, unit='Debye', verbose=logger.NOTE, **kwargs):
+        '''Dipole moment from the relaxed CC density formed by the last gradient
+        evaluation (the density whose contraction with h1 gives the Hellmann-Feynman
+        term, i.e. -dE/dF); orbital response included. Call kernel() first.
+        '''
+        if mol is None: mol = self.mol
+        dm = getattr(self, 'rdm1_relaxed', None)
+        if dm is None:
+            raise RuntimeError('No relaxed density yet: run kernel() first; '
+                               'the gradient evaluation forms it.')
+        return self.base._scf.dip_moment(mol, dm, unit, verbose=verbose, **kwargs)
 
     as_scanner = as_scanner
 

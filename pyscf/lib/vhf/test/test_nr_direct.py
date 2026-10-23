@@ -15,7 +15,6 @@
 
 import os
 import ctypes
-import _ctypes
 import unittest
 import numpy
 from pyscf import lib
@@ -68,7 +67,7 @@ def runjk(dm1, ncomp, intorname, filldot, *namejk):
     dmsptr = (ctypes.c_void_p*(njk*n_dm))()
     vjkptr = (ctypes.c_void_p*(njk*n_dm))()
     for i, symb in enumerate(namejk):
-        f1 = ctypes.c_void_p(_ctypes.dlsym(libcvhf2._handle, symb))
+        f1 = ctypes.cast(getattr(libcvhf2, symb), ctypes.c_void_p)
         for j in range(n_dm):
             dmsptr[i*n_dm+j] = dm1[j].ctypes.data_as(ctypes.c_void_p)
             vjkptr[i*n_dm+j] = vjk[i,j*ncomp].ctypes.data_as(ctypes.c_void_p)
@@ -285,6 +284,40 @@ class KnowValues(unittest.TestCase):
         self.assertTrue(numpy.allclose(vj0,vj1))
         self.assertTrue(numpy.allclose(vk0,vk1))
 
+    def test_sr_vhf_q_cond(self):
+        for omega in [.1, .2, .3]:
+            for l in [0, 1, 2, 3]:
+                for a in [.15, .5, 2.5]:
+                    rs = numpy.arange(1, 10) * 2.
+                    mol = gto.M(atom=['H 0 0 0'] + [f'H 0 0 {r}' for r in rs],
+                                basis=[[l,[a,1]]], unit='B')
+                    nbas = mol.nbas
+                    q_cond = numpy.empty((6,nbas,nbas), dtype=numpy.float32)
+                    ao_loc = mol.ao_loc
+                    cintopt = lib.c_null_ptr()
+                    with mol.with_short_range_coulomb(omega):
+                        with mol.with_integral_screen(1e-26):
+                            libcvhf2.CVHFnr_sr_int2e_q_cond(
+                                libcvhf2.int2e_sph, cintopt,
+                                q_cond.ctypes.data_as(ctypes.c_void_p),
+                                ao_loc.ctypes.data_as(ctypes.c_void_p),
+                                mol._atm.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(mol.natm),
+                                mol._bas.ctypes.data_as(ctypes.c_void_p), ctypes.c_int(mol.nbas),
+                                mol._env.ctypes.data_as(ctypes.c_void_p))
+
+                    s_index = q_cond[2]
+                    si_0 = s_index[0,0]
+                    si_others = s_index.diagonal()[1:]
+                    with mol.with_short_range_coulomb(omega):
+                        ints = [abs(mol.intor_by_shell('int2e', (0,0,i,i))).max()
+                                for i in range(1, mol.nbas)]
+
+                        aij = akl = a * 2
+                        omega2 = mol.omega**2
+                        theta = 1/(2/aij+1/omega2)
+                        rr = rs**2
+                        estimator = rr * numpy.exp(si_0 + si_others - theta*rr)
+                        assert all(estimator / ints > 1)
 
 
 if __name__ == '__main__':
