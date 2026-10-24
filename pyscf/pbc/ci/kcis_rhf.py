@@ -246,7 +246,7 @@ def optical_absorption_singlet(cis, scan, eta, kshift=0, tol=1e-5, maxiter=500, 
     return -1./np.pi*spectrum.imag
 
 
-class gmres_counter(object):
+class gmres_counter:
     def __init__(self, disp=True, rel=False):
         self._disp = disp
         self._rel = rel

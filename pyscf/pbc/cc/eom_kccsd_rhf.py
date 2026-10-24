@@ -1267,7 +1267,7 @@ def trans_rdm1_right(eom, r1, r2, kshift, imds=None):
     The terms follow Stanton and Bartlett, J. Chem. Phys. 98, 7029 (1993), with k-point labels.
     '''
     cc = eom._cc
-    t1, t2, l1, l2 = cc.t1, cc.t2, cc.l1, cc.l2
+    t1, l1, l2 = cc.t1, cc.l1, cc.l2
     nkpts, nocc, nvir = t1.shape
     if imds is None:
         imds = make_trans_rdm1_imds(eom, kshift)
