@@ -33,8 +33,6 @@ from pyscf.pbc.mp.kmp2 import (get_nocc, get_nmo, padding_k_idx,
                                padded_mo_coeff, get_frozen_mask)
 
 from pyscf.pbc.df import df
-from pyscf.pbc import tools
-from pyscf.pbc.cc.ccsd import _adjust_occ
 
 # einsum = np.einsum
 einsum = lib.einsum
@@ -308,9 +306,6 @@ def cis_matvec_singlet(cis, vector, kshift, eris=None, dielec=1.0):
 
     r = cis.vector_to_amplitudes(vector)
 
-    # Should use Fock diagonal elements to build (e_a - e_i) matrix
-    # epsilons = [eris.fock[k].diagonal().real for k in range(nkpts)]
-    # Assume mo_energy comes from Fock diagonal
     epsilons = eris.mo_energy
 
     # Scaling factor of (oo|vv) type integral
@@ -391,7 +386,7 @@ def cis_H(cis, kshift, eris=None):
 
     kconserv_r = cis.get_kconserv_r(kshift)
     dtype = eris.dtype
-    epsilons = [eris.fock[k].diagonal().real for k in range(nkpts)]
+    epsilons = eris.mo_energy
 
     H = np.zeros((nkpts, nkpts, nov, nov), dtype=dtype)
     # <ia|H|jb> <- (esp_a - esp_i) \delta{i,j} \delta{a,b}
@@ -649,19 +644,10 @@ class _CIS_ERIS:
             self.fock = np.asarray([reduce(np.dot, (mo.T.conj(), fockao[k], mo))
                                     for k, mo in enumerate(mo_coeff)])
 
+        # Orbital energies come from the Fock diagonal, built with exxdiv = None,
+        # unless keep_exxdiv = True (in that case exxdiv = scf.exxdiv). 
+        # No Madelung shift is applied to occupied levels (different from KMP2 and KCCSD).
         self.mo_energy = [self.fock[k].diagonal().real for k in range(nkpts)]
-
-        if not cis.keep_exxdiv:
-            # Add HFX correction in the self.mo_energy to improve convergence in
-            # CCSD iteration. It is useful for the 2D systems since their occupied and
-            # the virtual orbital energies may overlap which may lead to numerical
-            # issue in the CCSD iterations.
-            # FIXME: Whether to add this correction for other exxdiv treatments?
-            # Without the correction, MP2 energy may be largely off the correct value.
-            madelung = tools.madelung(cell, kpts)
-            self.mo_energy = [
-                _adjust_occ(mo_e, nocc, -madelung) for k, mo_e in enumerate(self.mo_energy)
-            ]
 
         # Get location of padded elements in occupied and virtual space.
         nocc_per_kpt = get_nocc(cis, per_kpoint=True)
